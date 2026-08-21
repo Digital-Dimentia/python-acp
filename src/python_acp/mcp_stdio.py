@@ -13,6 +13,7 @@ class MCPProtocolError(RuntimeError):
 @dataclass
 class MCPStdioClient:
     command: Sequence[str]
+    request_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -72,7 +73,8 @@ class MCPStdioClient:
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}
-        await self._write(payload)
+        async with self._lock:
+            await self._write(payload)
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         async with self._lock:
@@ -104,14 +106,23 @@ class MCPStdioClient:
         if self._proc is None or self._proc.stdout is None:
             raise MCPProtocolError("MCP process not running")
         while True:
-            line = await self._proc.stdout.readline()
+            try:
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(),
+                    timeout=self.request_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise MCPProtocolError("Timed out waiting for MCP response") from exc
             if not line:
                 raise MCPProtocolError("MCP process closed stdout")
             try:
                 message = json.loads(line.decode("utf-8").strip())
             except json.JSONDecodeError:
                 continue
-            if message.get("id") == request_id:
-                if not isinstance(message, dict):
-                    raise MCPProtocolError("Invalid MCP response")
-                return message
+            if not isinstance(message, dict):
+                continue
+            if "id" not in message:
+                continue
+            if message["id"] != request_id:
+                continue
+            return message

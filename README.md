@@ -1,6 +1,6 @@
 # python-acp
 
-`python-acp` is a Python Agent Client Protocol (ACP) app that wraps an MCP server process over `stdio/stdout` and exposes MCP tools directly over WebSockets (no LLM required).
+`python-acp` is a Python Agent Client Protocol (ACP) app that wraps an MCP server process over `stdin/stdout` and exposes MCP tools directly over WebSockets (no LLM required).
 
 ## Features
 

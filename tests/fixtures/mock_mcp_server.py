@@ -26,7 +26,7 @@ for line in sys.stdin:
                 "id": req_id,
                 "result": {
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"},
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
                 },
             }
         )
@@ -70,6 +70,90 @@ for line in sys.stdin:
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "error": {"code": -32000, "message": "Unknown tool"},
+                }
+            )
+    elif method == "prompts/list":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "prompts": [
+                        {
+                            "name": "greeting",
+                            "description": "Build a greeting message",
+                            "arguments": [{"name": "name", "required": True}],
+                        }
+                    ]
+                },
+            }
+        )
+    elif method == "prompts/get":
+        params = req.get("params", {})
+        if params.get("name") == "greeting":
+            name = params.get("arguments", {}).get("name", "friend")
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "description": "Greeting prompt",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": {"type": "text", "text": f"Hello, {name}!"},
+                            }
+                        ],
+                    },
+                }
+            )
+        else:
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32000, "message": "Unknown prompt"},
+                }
+            )
+    elif method == "resources/list":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "resources": [
+                        {
+                            "uri": "greeting://{name}",
+                            "name": "greeting-resource",
+                            "description": "A greeting resource",
+                            "mimeType": "text/plain",
+                        }
+                    ]
+                },
+            }
+        )
+    elif method == "resources/read":
+        params = req.get("params", {})
+        resource_uri = params.get("uri") or params.get("name")
+        arguments = params.get("arguments", {}) or {}
+        if resource_uri == "greeting://{name}" or resource_uri == "greeting://" or resource_uri.startswith("greeting://"):
+            name = arguments.get("name", resource_uri.split("//", 1)[1] or "friend")
+            content = f"Hello, {name}!"
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "contents": [{"uri": resource_uri, "mimeType": "text/plain", "text": content}]
+                    },
+                }
+            )
+        else:
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32000, "message": "Unknown resource"},
                 }
             )
     else:

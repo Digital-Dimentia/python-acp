@@ -35,7 +35,25 @@ async def test_list_tools_and_call_tool_over_stdio() -> None:
 
 
 @pytest.mark.asyncio
-async def test_websocket_bridge_lists_and_calls_tools() -> None:
+async def test_list_prompts_get_prompt_and_read_resource_over_stdio() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        prompts = await client.list_prompts()
+        assert prompts[0]["name"] == "greeting"
+
+        prompt_result = await client.get_prompt("greeting", {"name": "Ava"})
+        assert prompt_result["messages"][0]["content"]["text"] == "Hello, Ava!"
+
+        resources = await client.list_resources()
+        assert resources[0]["name"] == "greeting-resource"
+
+        resource = await client.read_resource("greeting://{name}", {"name": "Ava"})
+        assert resource["contents"][0]["text"] == "Hello, Ava!"
+
+
+@pytest.mark.asyncio
+async def test_websocket_bridge_lists_and_calls_tools_prompts_and_resources() -> None:
     cmd = [sys.executable, str(FIXTURE_SERVER)]
     port = _free_port()
 
@@ -58,6 +76,38 @@ async def test_websocket_bridge_lists_and_calls_tools() -> None:
                 call_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 assert call_response["ok"] is True
                 assert call_response["result"]["content"][0]["text"] == "from-ws"
+
+                await ws.send(json.dumps({"action": "list_prompts"}))
+                prompt_list_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert prompt_list_response["ok"] is True
+                assert prompt_list_response["prompts"][0]["name"] == "greeting"
+
+                await ws.send(
+                    json.dumps(
+                        {"action": "get_prompt", "name": "greeting", "arguments": {"name": "Milo"}}
+                    )
+                )
+                prompt_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert prompt_response["ok"] is True
+                assert prompt_response["result"]["messages"][0]["content"]["text"] == "Hello, Milo!"
+
+                await ws.send(json.dumps({"action": "list_resources"}))
+                resource_list_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resource_list_response["ok"] is True
+                assert resource_list_response["resources"][0]["name"] == "greeting-resource"
+
+                await ws.send(
+                    json.dumps(
+                        {
+                            "action": "read_resource",
+                            "name": "greeting://{name}",
+                            "arguments": {"name": "Nia"},
+                        }
+                    )
+                )
+                resource_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resource_response["ok"] is True
+                assert resource_response["result"]["contents"][0]["text"] == "Hello, Nia!"
 
                 await ws.send(json.dumps({"action": "call_tool", "name": "missing"}))
                 error_response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))

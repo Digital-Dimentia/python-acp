@@ -17,12 +17,15 @@ jobs:
           python-version: "3.11"
       - name: Build release artifacts
         run: |
-          python -m venv .venv
-          . .venv/bin/activate
-          pip install --upgrade pip
-          pip install -e ".[dev]"
-          python -m build
+          make venv
+          make build
+          make container-image
+          mkdir -p artifacts
+          tar -czf artifacts/python-acp-artifacts.tar.gz -C dist .
       - name: Publish release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            artifacts/*.tar.gz

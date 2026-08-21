@@ -71,6 +71,33 @@ class MCPStdioClient:
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
+    async def list_prompts(self) -> list[dict[str, Any]]:
+        response = await self.request("prompts/list", {})
+        prompts = response.get("prompts", [])
+        if not isinstance(prompts, list):
+            raise MCPProtocolError("Invalid prompts/list response")
+        return prompts
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self.request("prompts/get", {"name": name, "arguments": arguments or {}})
+
+    async def list_resources(self) -> list[dict[str, Any]]:
+        response = await self.request("resources/list", {})
+        resources = response.get("resources", [])
+        if not isinstance(resources, list):
+            raise MCPProtocolError("Invalid resources/list response")
+        return resources
+
+    async def read_resource(
+        self, resource_id: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"uri": resource_id}
+        if arguments:
+            params["arguments"] = arguments
+        return await self.request("resources/read", params)
+
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}
         async with self._lock:

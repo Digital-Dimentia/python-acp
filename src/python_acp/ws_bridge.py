@@ -60,6 +60,40 @@ class ACPWebSocketBridge:
                 result = await self._mcp_client.call_tool(name, arguments)
                 return {"ok": True, "result": result}
 
+            if action == "list_prompts":
+                prompts = await self._mcp_client.list_prompts()
+                return {"ok": True, "prompts": prompts}
+
+            if action == "get_prompt":
+                name = request.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("get_prompt requires a non-empty string field 'name'")
+                arguments = request.get("arguments")
+                if arguments is None:
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    raise ValueError("'arguments' must be an object")
+                result = await self._mcp_client.get_prompt(name, arguments)
+                return {"ok": True, "result": result}
+
+            if action == "list_resources":
+                resources = await self._mcp_client.list_resources()
+                return {"ok": True, "resources": resources}
+
+            if action == "read_resource":
+                resource = request.get("name")
+                if resource is None:
+                    resource = request.get("uri")
+                if not isinstance(resource, str) or not resource:
+                    raise ValueError("read_resource requires a non-empty string field 'name' or 'uri'")
+                arguments = request.get("arguments")
+                if arguments is None:
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    raise ValueError("'arguments' must be an object")
+                result = await self._mcp_client.read_resource(resource, arguments)
+                return {"ok": True, "result": result}
+
             if action == "ping":
                 return {"ok": True, "pong": True}
 

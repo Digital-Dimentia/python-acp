@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-acp"
+version = "0.1.0"
+description = "ACP app that exposes MCP tools over WebSockets"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets==12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build==1.2.2",
+  "pytest==8.3.2",
+  "pytest-asyncio==0.24.0",
+  "ruff==0.6.9",
+]
+
+[project.scripts]
+python-acp = "python_acp.cli:run"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

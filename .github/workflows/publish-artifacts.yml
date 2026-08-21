@@ -28,4 +28,5 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            dist/*.tar
             artifacts/*.tar.gz

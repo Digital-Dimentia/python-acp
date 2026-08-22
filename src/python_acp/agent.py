@@ -57,6 +57,7 @@ from python_acp.capabilities import (
     negotiate_protocol_version,
 )
 from python_acp.errors import as_request_error
+from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry, TurnAlreadyRunningError, UnknownSessionError
 from python_acp.turns import IdleTurnExecutor, TurnContext, TurnExecutor
 
@@ -78,6 +79,7 @@ class PythonAcpAgent:
         self,
         sessions: SessionRegistry,
         executor: TurnExecutor | None = None,
+        backends: McpBackendRegistry | None = None,
     ) -> None:
         # `sessions` is required rather than defaulted, and that is the point. One
         # registry serves the whole process: the WebSocket transport builds an agent per
@@ -85,6 +87,12 @@ class PythonAcpAgent:
         # it created on a connection that has since dropped. A default would hide that.
         self._sessions = sessions
         self._executor = executor or IdleTurnExecutor()
+        # Same sharing rule as the session registry, and for the same reason: a
+        # session's MCP servers outlive the connection that created it. Teardown is the
+        # session registry's `on_close` hook, not ours — `cli.py` wires the two together
+        # (`SessionRegistry(on_close=backends.close)`), which is the only place that can,
+        # because it is the only place that constructs both.
+        self._backends = backends if backends is not None else McpBackendRegistry()
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
 
@@ -92,6 +100,11 @@ class PythonAcpAgent:
     def sessions(self) -> SessionRegistry:
         """The process-wide session registry this agent serves."""
         return self._sessions
+
+    @property
+    def backends(self) -> McpBackendRegistry:
+        """The per-session MCP servers. `pyacp-hnk.2`'s executor reads through this."""
+        return self._backends
 
     # ------------------------------------------------------------------
     # Connection
@@ -215,10 +228,18 @@ class PythonAcpAgent:
         (`pyacp-fln.2`, `pyacp-fln.3`). The registry carries both, so those beads change
         what is created rather than what is returned.
         """
-        self._reject_unsupported_mcp_servers(mcp_servers or [])
+        stdio_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
         session = self._sessions.create(
             cwd, additional_directories=additional_directories or ()
         )
+        try:
+            await self._backends.open(session.session_id, stdio_servers)
+        except Exception:
+            # The session was registered a line ago and its backends did not come up.
+            # Handing back an id whose tools silently do not exist is the failure this
+            # whole path exists to avoid, so the session goes with them.
+            await self._sessions.close(session.session_id)
+            raise
         return NewSessionResponse(
             sessionId=session.session_id,
             modes=session.modes,
@@ -375,16 +396,16 @@ class PythonAcpAgent:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _reject_unsupported_mcp_servers(mcp_servers: list[Any]) -> None:
-        """Refuse the MCP transports `initialize` did not advertise.
+    def _reject_unsupported_mcp_servers(mcp_servers: list[Any]) -> list[McpServerStdio]:
+        """Keep the stdio servers, refuse the transports `initialize` did not advertise.
 
         `mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in
         `capabilities.AGENT_CAPABILITY_MANIFEST`, and stdio needs no capability at all.
         Accepting an `HttpMcpServer` anyway would make the advertisement a lie and hand
         back a session whose tools silently do not exist.
 
-        Spawning the stdio ones is `pyacp-db3`'s; refusing the rest cannot wait for it,
-        because the wrong answer here is silent.
+        Partitioning rather than validating-then-reusing, so `mcp_registry` is handed a
+        list whose element type it can rely on instead of re-checking.
         """
         unsupported = [
             server for server in mcp_servers if not isinstance(server, McpServerStdio)
@@ -392,8 +413,9 @@ class PythonAcpAgent:
         if unsupported:
             raise ValueError(
                 "This agent advertises no HTTP, SSE, or ACP MCP transports; "
-                f"rejected: {[getattr(s, 'name', '?') for s in unsupported]}"
+                f"rejected: {[getattr(server, 'name', '?') for server in unsupported]}"
             )
+        return list(mcp_servers)
 
     @staticmethod
     def _not_implemented(method: str) -> RequestError:

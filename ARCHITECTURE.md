@@ -16,7 +16,8 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
 - Session registry (`sessions.py`): the `Session` record and the registry that creates, forks, resumes, lists, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind, and the `session/update` emission channel. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
-- MCP stdio client (`mcp_stdio.py`): drives an MCP server subprocess over newline-delimited JSON-RPC.
+- MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
+- MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
 ```mermaid
 flowchart LR
@@ -32,14 +33,17 @@ flowchart LR
     Errors["errors.py"]
     Sessions["sessions.py<br/>SessionRegistry"]
     Turns["turns.py<br/>TurnExecutor"]
+    Backends["mcp_registry.py<br/>McpBackendRegistry"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
-    MCPProc[("MCP server subprocess")]
+    MCPProc[("MCP server subprocess<br/>one per session server")]
+    StartupProc[("--mcp-command subprocess<br/>optional, deprecated surface only")]
 
     Editor <--> TStdio
     WsClient <--> TWs
     CLI --> TStdio
     CLI --> TWs
     CLI --> Sessions
+    CLI --> Backends
     TStdio --> SDK
     TWs --> SDK
     TWs --> Legacy
@@ -49,14 +53,20 @@ flowchart LR
     Agent --> Errors
     Agent --> Sessions
     Agent --> Turns
+    Agent --> Backends
+    Sessions -. "on_close" .-> Backends
     Turns -. "session/update via the Client handle" .-> SDK
-    Legacy --> MCPClient
-    CLI --> MCPClient
+    Backends --> MCPClient
     MCPClient <--> MCPProc
+    Legacy --> StartupProc
+    CLI -.-> StartupProc
 ```
 
-`legacy_ws.py` is the only thing still calling the MCP client directly. That is what
-Phase 7 deletes, and what the Phase 2 session registry replaces for the ACP path.
+Two things are worth reading off that diagram. `legacy_ws.py` is the only thing still
+bound to the process-wide `--mcp-command` subprocess — that is what Phase 7 deletes, and
+why `--mcp-command` is now optional for everyone else. And `sessions.py` reaches
+`mcp_registry.py` only through the dotted `on_close` edge: it never imports MCP, so
+`cli.py` wiring that hook is the entire coupling (decision B6a).
 
 ## Target Subsystems (ACP v1)
 
@@ -218,6 +228,7 @@ there is no legacy surface on stdio, and never was.
 - [Session registry module](src/python_acp/sessions.md)
 - [Turn executor seam module](src/python_acp/turns.md)
 - [CLI module](src/python_acp/cli.md)
+- [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)

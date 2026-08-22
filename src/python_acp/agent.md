@@ -82,6 +82,12 @@ tools silently do not exist, so a well-formed entry of an unadvertised transport
 `-32602`. Spawning the stdio ones is `pyacp-db3`'s; refusing the rest could not wait for
 it, because the wrong answer is silent.
 
+The stdio entries that survive are handed to [mcp_registry.py](mcp_registry.md), which
+spawns and handshakes one subprocess per server. **Opening is all-or-nothing and takes
+the session with it**: if any server fails to come up, the session created a line earlier
+is closed before the error propagates, because handing back an id whose tools silently do
+not exist is the failure this whole path avoids.
+
 **One hazard is inherited and cannot be refused here.**
 `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
 that fails validation — a stdio server missing the required `env`, say — is silently
@@ -103,7 +109,7 @@ member.
 | `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
 | `on_connect` | — | **live** — stores the `Client` facade | — |
 | `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
-| `new_session` | `session/new` | **live** — registers a session; rejects the MCP transports `initialize` did not advertise | `pyacp-db3` |
+| `new_session` | `session/new` | **live** — registers a session, opens its MCP servers, rejects the transports `initialize` did not advertise | — |
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | `-32601` | `pyacp-3rw.3` |
 | `list_sessions` | `session/list` | `-32601` | `pyacp-3rw.3` |

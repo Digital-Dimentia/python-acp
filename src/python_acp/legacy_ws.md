@@ -33,6 +33,16 @@ point of `pyacp-tzd.3`, and
 `tests/test_transport_ws.py::test_only_non_acp_methods_are_claimed_as_legacy` is the
 guard: a method claimed here would shadow the agent's.
 
+## It needs `--mcp-command`, and nothing else does
+
+`--mcp-command` became **optional** in `pyacp-db3`: ACP sessions carry their own MCP
+servers in `session/new`, so an agent no longer needs a process-wide one. This surface
+does — it predates sessions entirely and has nowhere else to look.
+
+So `LegacyActionHandler` accepts `None` and says so, with a `ValueError` naming both ways
+out (`--mcp-command`, or `session/new`), rather than failing later with something that
+reads like a backend fault.
+
 ## `LEGACY_METHODS` only shrinks
 
 The set is closed. It loses entries as `pyacp-sld.2` moves them to `ext_method`, and

@@ -204,6 +204,69 @@ def test_stray_prints_land_on_stderr_not_the_wire() -> None:
         assert "corrupt the stream" in captured.getvalue()
 
 
+def test_mcp_command_is_optional() -> None:
+    """ACP sessions carry their own servers now; only the deprecated surface needs one."""
+    args = build_parser().parse_args(["--transport", "stdio"])
+
+    assert args.mcp_command is None
+
+
+async def test_the_agent_serves_a_session_with_no_process_wide_backend() -> None:
+    """`pyacp-db3`: the whole point is that a client no longer needs `--mcp-command`."""
+    argv = ["-m", "python_acp.cli", "--transport", "stdio"]
+    async with spawn_agent_process(_NullClient(), sys.executable, *argv) as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+        created = await asyncio.wait_for(
+            conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30
+        )
+        result = await asyncio.wait_for(
+            conn.prompt(session_id=created.session_id, prompt=[]), timeout=30
+        )
+
+    assert result.stop_reason == "end_turn"
+
+
+async def test_a_session_can_bring_its_own_mcp_server() -> None:
+    """`session/new`'s `mcpServers`, spawned per session and torn down with it."""
+    argv = ["-m", "python_acp.cli", "--transport", "stdio"]
+    async with spawn_agent_process(_NullClient(), sys.executable, *argv) as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+
+        created = await asyncio.wait_for(
+            conn.new_session(
+                cwd="/tmp",
+                mcp_servers=[
+                    {
+                        "name": "tools",
+                        "command": sys.executable,
+                        "args": [str(FIXTURE_SERVER)],
+                        "env": [],
+                    }
+                ],
+            ),
+            timeout=30,
+        )
+
+    assert created.session_id
+
+
+async def test_a_session_whose_server_will_not_start_is_refused() -> None:
+    argv = ["-m", "python_acp.cli", "--transport", "stdio"]
+    async with spawn_agent_process(_NullClient(), sys.executable, *argv) as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+
+        with pytest.raises(RequestError):
+            await asyncio.wait_for(
+                conn.new_session(
+                    cwd="/tmp",
+                    mcp_servers=[
+                        {"name": "broken", "command": sys.executable, "args": ["-c", "pass"], "env": []}
+                    ],
+                ),
+                timeout=30,
+            )
+
+
 def test_ws_stays_the_default_transport() -> None:
     args = build_parser().parse_args(["--mcp-command", "echo"])
 

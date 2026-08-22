@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
+from collections.abc import AsyncIterator
 
 from python_acp.agent import PythonAcpAgent
+from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
 from python_acp.transport_stdio import run_stdio
@@ -21,8 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mcp-command",
         nargs="+",
-        required=True,
-        help="Command used to start the MCP server (stdio transport).",
+        default=None,
+        help=(
+            "Command used to start a process-wide MCP server (stdio transport). "
+            "Optional since ACP sessions carry their own servers in session/new; it is "
+            "still required by the deprecated WebSocket action surface, which predates "
+            "sessions and has nowhere else to look."
+        ),
     )
     parser.add_argument(
         "--transport",
@@ -62,35 +70,55 @@ def configure_logging(debug: bool) -> None:
     )
 
 
+@contextlib.asynccontextmanager
+async def _startup_backend(command: list[str] | None) -> AsyncIterator[MCPStdioClient | None]:
+    """The process-wide MCP server, if one was asked for.
+
+    Started and handshaked before any listener binds, so a bad `--mcp-command` fails at
+    startup rather than mid-session. It is **not** what ACP sessions use — those carry
+    their own servers (`pyacp-db3`) — and exists only for the deprecated action surface.
+    """
+    if command is None:
+        yield None
+        return
+    async with MCPStdioClient(command) as mcp_client:
+        await mcp_client.initialize()
+        yield mcp_client
+
+
 async def _run(args: argparse.Namespace) -> None:
     configure_logging(args.debug)
 
-    async with MCPStdioClient(args.mcp_command) as mcp_client:
-        await mcp_client.initialize()
+    async with _startup_backend(args.mcp_command) as mcp_client:
+        # Both registries are process-wide, and both are created here because this is
+        # the only place that constructs both: a session must outlive the connection
+        # that created it (`session/resume`), and its MCP servers must be torn down when
+        # it closes. `on_close` is the seam between them (decision B6a) and wiring it
+        # anywhere else would leave subprocesses behind.
+        backends = McpBackendRegistry()
+        sessions = SessionRegistry(on_close=backends.close)
 
-        # One registry for the process, whichever transport is bound. A session must
-        # outlive the connection that created it or `session/resume` means nothing, so
-        # this is created here rather than inside a transport or an agent.
-        sessions = SessionRegistry()
+        try:
+            if args.transport == "stdio":
+                await run_stdio(PythonAcpAgent(sessions, backends=backends))
+                return
 
-        if args.transport == "stdio":
-            # The backend is started and handshaked in both modes so --mcp-command
-            # means the same thing either way and a bad one fails at startup rather
-            # than mid-session. The agent cannot reach it yet — that wiring is the
-            # per-session backend registry in Phase 2 (pyacp-3rw.3, pyacp-db3). The
-            # WebSocket transport does hand it to the deprecated surface, which is the
-            # only thing still calling MCP directly.
-            await run_stdio(PythonAcpAgent(sessions))
-            return
-
-        server = WebSocketAgentServer(
-            mcp_client, args.host, args.port, debug=args.debug, sessions=sessions
-        )
-        await server.start()
-        # Never print(): under --transport stdio that corrupts the wire, and one
-        # logging path in every mode is what keeps it from creeping back.
-        logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
-        await server.serve_forever()
+            server = WebSocketAgentServer(
+                mcp_client,
+                args.host,
+                args.port,
+                debug=args.debug,
+                sessions=sessions,
+                backends=backends,
+            )
+            await server.start()
+            # Never print(): under --transport stdio that corrupts the wire, and one
+            # logging path in every mode is what keeps it from creeping back.
+            logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
+            await server.serve_forever()
+        finally:
+            # Sessions the client never closed still own subprocesses.
+            await sessions.close_all()
 
 
 def run() -> None:

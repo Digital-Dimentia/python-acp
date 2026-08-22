@@ -9,6 +9,8 @@ direct call would hide.
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 from acp import PROTOCOL_VERSION, RequestError
@@ -25,9 +27,12 @@ from python_acp import __version__
 from python_acp.agent import PythonAcpAgent
 from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
 from python_acp.errors import as_request_error
+from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.turns import TurnContext
+
+FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
 # Every wire method the SDK routes to an agent, and whether it is gated behind
 # use_unstable_protocol. Derived from docs/acp-compliance-matrix.md.
@@ -488,22 +493,54 @@ async def test_new_session_keeps_additional_directories() -> None:
     assert registry.get(result.session_id).additional_directories == ("/extra",)
 
 
-async def test_new_session_accepts_a_stdio_mcp_server() -> None:
+async def test_new_session_opens_the_stdio_servers_it_was_given() -> None:
     """stdio needs no capability, so it is the one transport that may be handed to us."""
-    router = make_router()
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends))
 
     result = await router(
         "session/new",
         {
             "cwd": "/work",
             "mcpServers": [
-                {"name": "tools", "command": "/bin/true", "args": [], "env": []}
+                {
+                    "name": "tools",
+                    "command": sys.executable,
+                    "args": [str(FIXTURE_SERVER)],
+                    "env": [],
+                }
             ],
         },
         False,
     )
+    try:
+        opened = backends.backends(result.session_id)
+        assert list(opened) == ["tools"]
+        assert [tool["name"] for tool in await opened["tools"].list_tools()] == ["echo"]
+    finally:
+        await backends.close_all()
 
-    assert result.session_id
+
+async def test_a_backend_that_cannot_start_takes_the_session_with_it() -> None:
+    """A session id whose tools silently do not exist is the failure this path prevents."""
+    sessions = SessionRegistry()
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(sessions=sessions, backends=backends))
+
+    with pytest.raises(RequestError):
+        await router(
+            "session/new",
+            {
+                "cwd": "/work",
+                "mcpServers": [
+                    {"name": "broken", "command": sys.executable, "args": ["-c", "pass"], "env": []}
+                ],
+            },
+            False,
+        )
+
+    assert len(sessions) == 0
+    assert len(backends) == 0
 
 
 @pytest.mark.parametrize(

@@ -74,8 +74,24 @@ class LegacyActionHandler:
     deprecation warning.
     """
 
-    def __init__(self, mcp_client: MCPStdioClient) -> None:
+    def __init__(self, mcp_client: MCPStdioClient | None) -> None:
         self._mcp_client = mcp_client
+
+    @property
+    def mcp_client(self) -> MCPStdioClient:
+        """The process-wide backend this surface was built around.
+
+        `None` once `--mcp-command` became optional (`pyacp-db3`): ACP sessions carry
+        their own servers now, so a client can run without one. The deprecated surface
+        cannot — it predates sessions entirely and has nowhere else to look — so it says
+        so rather than failing later with something that looks like a backend fault.
+        """
+        if self._mcp_client is None:
+            raise ValueError(
+                "The deprecated WebSocket surface needs a process-wide MCP server; "
+                "start python-acp with --mcp-command, or use session/new instead"
+            )
+        return self._mcp_client
 
     async def respond(self, message: dict[str, Any]) -> dict[str, Any] | None:
         """Answer a legacy message, or return `None` when it deserves no reply.
@@ -95,7 +111,7 @@ class LegacyActionHandler:
     async def dispatch_action(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
         if action == "list_tools":
-            tools = await self._mcp_client.list_tools()
+            tools = await self.mcp_client.list_tools()
             logger.debug("MCP tools response: %s", tools)
             return {"ok": True, "tools": tools}
 
@@ -103,7 +119,7 @@ class LegacyActionHandler:
             name = _required_name(request.get("name"), "call_tool", "field 'name'")
             arguments = _arguments(request.get("arguments"))
             logger.debug("Calling MCP tool '%s' with arguments %s", name, arguments)
-            result = await self._mcp_client.call_tool(name, arguments)
+            result = await self.mcp_client.call_tool(name, arguments)
             logger.debug("MCP tool '%s' result: %s", name, result)
             # A tool that failed is not a transport failure, so this does not raise —
             # but `ok` must not claim success either. The full result rides along in
@@ -114,7 +130,7 @@ class LegacyActionHandler:
             return response
 
         if action == "list_prompts":
-            prompts = await self._mcp_client.list_prompts()
+            prompts = await self.mcp_client.list_prompts()
             logger.debug("MCP prompts response: %s", prompts)
             return {"ok": True, "prompts": prompts}
 
@@ -122,12 +138,12 @@ class LegacyActionHandler:
             name = _required_name(request.get("name"), "get_prompt", "field 'name'")
             arguments = _arguments(request.get("arguments"))
             logger.debug("Getting MCP prompt '%s' with arguments %s", name, arguments)
-            result = await self._mcp_client.get_prompt(name, arguments)
+            result = await self.mcp_client.get_prompt(name, arguments)
             logger.debug("MCP prompt '%s' result: %s", name, result)
             return {"ok": True, "result": result}
 
         if action == "list_resources":
-            resources = await self._mcp_client.list_resources()
+            resources = await self.mcp_client.list_resources()
             logger.debug("MCP resources response: %s", resources)
             return {"ok": True, "resources": resources}
 
@@ -138,7 +154,7 @@ class LegacyActionHandler:
             resource = _required_name(resource, "read_resource", "field 'name' or 'uri'")
             arguments = _arguments(request.get("arguments"))
             logger.debug("Reading MCP resource '%s' with arguments %s", resource, arguments)
-            result = await self._mcp_client.read_resource(resource, arguments)
+            result = await self.mcp_client.read_resource(resource, arguments)
             logger.debug("MCP resource '%s' result: %s", resource, result)
             return {"ok": True, "result": result}
 
@@ -167,12 +183,12 @@ class LegacyActionHandler:
             return _result(request_id, {"pong": True})
 
         if method == "tools/list":
-            return _result(request_id, {"tools": await self._mcp_client.list_tools()})
+            return _result(request_id, {"tools": await self.mcp_client.list_tools()})
 
         if method == "tools/call":
             name = _required_name(params.get("name"), "tools/call", "parameter 'name'")
             arguments = _arguments(params.get("arguments"))
-            result = await self._mcp_client.call_tool(name, arguments)
+            result = await self.mcp_client.call_tool(name, arguments)
             # `isError: true` stays inside `result` and is deliberately NOT turned into
             # a JSON-RPC error. The call succeeded; the tool did not. Collapsing it here
             # would hide the content explaining why, and would make a tool failure
@@ -180,15 +196,15 @@ class LegacyActionHandler:
             return _result(request_id, result)
 
         if method == "prompts/list":
-            return _result(request_id, {"prompts": await self._mcp_client.list_prompts()})
+            return _result(request_id, {"prompts": await self.mcp_client.list_prompts()})
 
         if method == "prompts/get":
             name = _required_name(params.get("name"), "prompts/get", "parameter 'name'")
             arguments = _arguments(params.get("arguments"))
-            return _result(request_id, await self._mcp_client.get_prompt(name, arguments))
+            return _result(request_id, await self.mcp_client.get_prompt(name, arguments))
 
         if method == "resources/list":
-            return _result(request_id, {"resources": await self._mcp_client.list_resources()})
+            return _result(request_id, {"resources": await self.mcp_client.list_resources()})
 
         if method == "resources/read":
             resource = params.get("uri")
@@ -198,7 +214,7 @@ class LegacyActionHandler:
                 resource, "resources/read", "parameter 'uri' or 'name'"
             )
             arguments = _arguments(params.get("arguments"))
-            return _result(request_id, await self._mcp_client.read_resource(resource, arguments))
+            return _result(request_id, await self.mcp_client.read_resource(resource, arguments))
 
         # `is_legacy` gates entry, so this is unreachable unless LEGACY_METHODS and this
         # body disagree. Loud rather than a silent `None`, which a notification would

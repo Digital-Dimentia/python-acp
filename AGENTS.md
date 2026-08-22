@@ -157,8 +157,13 @@ Packaging targets:
   `ws://127.0.0.1:8766`.
 
 CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make test && make build`
-on Python 3.11. Release publishing (`.github/workflows/publish-artifacts.yml`) fires on
-a published GitHub release.
+across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version
+`requires-python = ">=3.11"` claims — with `fail-fast: false` so one version's failure
+does not mask the others. Build artifacts are uploaded from the 3.11 leg only. Keep the
+matrix and the `classifiers` list in `pyproject.toml` in lockstep. Release publishing
+(`.github/workflows/publish-artifacts.yml`) fires on a published GitHub release and
+deliberately stays on 3.11, the floor, so the published wheel is installable across the
+whole supported range.
 
 ## Architecture Overview
 

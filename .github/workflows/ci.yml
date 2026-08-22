@@ -11,11 +11,19 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      # Report every version's result; a failure on one must not mask the others.
+      fail-fast: false
+      matrix:
+        # Every version pyproject.toml's `requires-python = ">=3.11"` claims to
+        # support. 3.11 is the declared floor; 3.14 is what local development runs on.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    name: validate (py${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies and run validation
         run: |
           make venv
@@ -23,6 +31,9 @@ jobs:
           make test
           make build
       - name: Upload build artifacts
+        # Publish from the floor version only: it produces the widest-compatible
+        # wheel, and upload-artifact@v4 rejects duplicate names across matrix legs.
+        if: matrix.python-version == '3.11'
         uses: actions/upload-artifact@v4
         with:
           name: python-acp-dist

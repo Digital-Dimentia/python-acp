@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "ACP app that exposes MCP tools over WebSockets"
 readme = "README.md"
 requires-python = ">=3.11"
+# Kept in lockstep with the python-version matrix in .github/workflows/ci.yml:
+# every version listed here is one CI actually runs lint, tests, and build against.
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "websockets==12.0",
 ]

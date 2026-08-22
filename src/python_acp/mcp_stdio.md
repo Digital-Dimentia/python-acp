@@ -10,7 +10,7 @@ rather than only while one of our requests is in flight.
 
 ## Key Responsibilities
 
-- Spawn and terminate the MCP subprocess.
+- Spawn the MCP subprocess and shut it down in the order the transport prescribes.
 - Continuously drain the subprocess's stderr.
 - Serialize request and notification messages to JSON lines.
 - Read every stdout message and route it by shape: response, server request, or notification.
@@ -22,6 +22,7 @@ rather than only while one of our requests is in flight.
 
 - `MCPProtocolError`: protocol/runtime error type for MCP communication failures.
 - `MCPStdioClient.start()` / `stop()`: subprocess and background task lifecycle.
+- `MCPStdioClient._shutdown_process()`: the close-stdin / SIGTERM / SIGKILL escalation.
 - `MCPStdioClient.initialize()`: sends MCP `initialize` and `notifications/initialized`.
 - `MCPStdioClient.request()`: sends a request and awaits its correlated reply.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
@@ -128,6 +129,40 @@ demand, so these paths are tested against a real subprocess:
 - `start()` spawns two background tasks — the stdout read loop and the stderr
   drain — both cancelled and awaited by `stop()`.
 
+## Shutdown Sequence
+
+The MCP stdio transport prescribes how a client shuts its server down, and
+`stop()` follows it in order:
+
+1. **Close the server's stdin.** A conforming MCP server exits when its stdin
+   reaches EOF — that is the contract servers are written against.
+2. **Wait for it to exit** (`_STOP_STDIN_TIMEOUT`, 2s).
+3. **`SIGTERM`** if it is still running, then wait again
+   (`_STOP_TERMINATE_TIMEOUT`, 2s).
+4. **`SIGKILL`**, and wait unconditionally.
+
+```mermaid
+flowchart LR
+    A["close stdin"] --> B{"exited?"}
+    B -- yes --> Z["reap, cancel tasks"]
+    B -- "no, 2s" --> C["SIGTERM"]
+    C --> D{"exited?"}
+    D -- yes --> Z
+    D -- "no, 2s" --> E["SIGKILL"]
+    E --> Z
+```
+
+Starting at `SIGTERM` — as this module did before — signals every server that
+would have shut down cleanly on EOF, denying it the chance to flush state or
+run its own teardown. Each step is skipped when the process is already gone,
+and `ProcessLookupError` from a process reaped between the check and the signal
+is tolerated.
+
+The stdout read loop and stderr drain are cancelled **after** the process has
+exited, not before, so anything the server writes on its way out is still
+consumed. Once stdin is closed, `_write()` raises `MCPProtocolError` rather
+than writing into a closing transport.
+
 ## stderr Draining
 
 stderr is piped, and a piped stream nothing reads will fill its OS buffer — at
@@ -161,7 +196,9 @@ in the stdout loop would raise on it.
 - JSON-RPC `error` responses are surfaced as `MCPProtocolError`.
 - A list walk that repeats a cursor or exceeds `_MAX_LIST_PAGES` raises
   `MCPProtocolError` instead of looping forever.
-- A reply that cannot be written (process already gone) is logged, not raised.
+- A reply that cannot be written (process already gone, or stdin closed by
+  `stop()`) is logged, not raised.
+- A server that ignores both EOF and `SIGTERM` is `SIGKILL`ed after ~4s.
 
 ## Related
 

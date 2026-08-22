@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import socket
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pytest
 import websockets
@@ -286,6 +288,100 @@ async def test_stop_is_idempotent_with_stderr_drain() -> None:
     await client.stop()
 
     assert client._stderr_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_stdin_before_signalling_the_server() -> None:
+    """MCP stdio shutdown starts at EOF, not at SIGTERM.
+
+    The fixture server exits when its stdin closes, so a client that follows
+    the prescribed sequence never signals it: exit status 0 and no call to
+    terminate() or kill() can only happen if stdin was closed first.
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await client.initialize()
+
+    proc = client._proc
+    assert proc is not None
+
+    # Record the signals but still deliver them, so an implementation that
+    # skips the stdin close fails this assertion instead of hanging on a
+    # process nothing ever killed.
+    signals: list[str] = []
+    real_terminate, real_kill = proc.terminate, proc.kill
+
+    def spy(name: str, real: Callable[[], None]) -> Callable[[], None]:
+        def send() -> None:
+            signals.append(name)
+            real()
+
+        return send
+
+    proc.terminate = spy("SIGTERM", real_terminate)  # type: ignore[method-assign]
+    proc.kill = spy("SIGKILL", real_kill)  # type: ignore[method-assign]
+
+    await asyncio.wait_for(client.stop(), timeout=15)
+
+    assert signals == []
+    assert proc.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_escalates_to_sigterm_when_the_server_ignores_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MOCK_MCP_IGNORE_EOF", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    client._STOP_STDIN_TIMEOUT = 0.5  # type: ignore[misc]
+    await client.start()
+    await client.initialize()
+
+    proc = client._proc
+    assert proc is not None
+    await client.stop()
+
+    assert proc.returncode == -signal.SIGTERM
+
+
+@pytest.mark.asyncio
+async def test_stop_escalates_to_sigkill_when_sigterm_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MOCK_MCP_IGNORE_EOF", "1")
+    monkeypatch.setenv("MOCK_MCP_IGNORE_SIGTERM", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    client._STOP_STDIN_TIMEOUT = 0.5  # type: ignore[misc]
+    client._STOP_TERMINATE_TIMEOUT = 0.5  # type: ignore[misc]
+    await client.start()
+    await client.initialize()
+
+    proc = client._proc
+    assert proc is not None
+    await client.stop()
+
+    assert proc.returncode == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+async def test_stop_on_an_already_exited_server_is_clean() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await client.initialize()
+
+    proc = client._proc
+    assert proc is not None
+    proc.kill()
+    await proc.wait()
+
+    await client.stop()
+
+    assert client._proc is None
+    assert client._stdout_task is None
 
 
 @pytest.mark.asyncio

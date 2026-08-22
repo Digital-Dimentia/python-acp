@@ -1,6 +1,15 @@
 import json
 import os
+import signal
 import sys
+import time
+
+# Shutdown-behaviour knobs. A well-behaved MCP server exits when its stdin
+# reaches EOF; these two make it misbehave on purpose so the client's
+# close-stdin -> SIGTERM -> SIGKILL escalation can be exercised end to end.
+IGNORE_EOF = bool(os.environ.get("MOCK_MCP_IGNORE_EOF"))
+if os.environ.get("MOCK_MCP_IGNORE_SIGTERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 # Emit a burst of stderr before serving anything. With no drain on the client
 # side this fills the OS pipe buffer and blocks the server mid-write, before it
@@ -106,6 +115,10 @@ def resource_for_page(index):
 while True:
     line = sys.stdin.readline()
     if not line:
+        if IGNORE_EOF:
+            # Stall instead of exiting, so the client has to escalate.
+            while True:
+                time.sleep(0.05)
         break
 
     try:

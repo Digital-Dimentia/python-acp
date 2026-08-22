@@ -5,13 +5,14 @@ protocol edge: it validates, delegates, and serializes, and owns nothing else. S
 state (`sessions.py`), turn execution (`turns.py`), and MCP calls (`mcp_stdio.py`) all
 sit below it and arrive in later phases.
 
-> **Not yet reachable.** No transport binds this class yet — `transport_stdio.py`
-> (`pyacp-tzd.2`) and `transport_ws.py` (`pyacp-tzd.3`) do that. The live WebSocket path
-> is still `ws_bridge.py`. This module exists so later phases fill in method bodies
-> rather than restructure.
+**Both transports bind this class.** [transport_stdio.py](transport_stdio.md)
+(`pyacp-tzd.2`) and [transport_ws.py](transport_ws.md) (`pyacp-tzd.3`) each run it
+through `acp.run_agent`, one agent instance per connection, so a client gets the same
+answers whichever wire it arrived on. Session and prompt methods answer `-32601` until
+Phases 2 and 3 fill the bodies in.
 
-`transport_*` faces the ACP client; `mcp_*` faces the backend. Two stdio modules will
-eventually sit near each other in this directory meaning opposite directions.
+`transport_*` faces the ACP client; `mcp_*` faces the backend. Two stdio modules sit near
+each other in this directory meaning opposite directions.
 
 ## Dispatch is not ours
 

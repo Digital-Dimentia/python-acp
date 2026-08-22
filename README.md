@@ -4,10 +4,11 @@
 
 ## Features
 
+- Serves ACP over **stdio** (how an editor spawns an agent) and over **WebSocket**, both
+  binding the same agent through the `agent-client-protocol` SDK.
 - Connects to an MCP server over stdio.
 - Initializes the server and forwards MCP messages.
-- Exposes MCP tools, prompts, and resources through WebSocket actions.
-- Supports:
+- Exposes MCP tools, prompts, and resources through the deprecated WebSocket actions:
   - `list_tools`
   - `call_tool`
   - `list_prompts`
@@ -26,10 +27,11 @@
   - [agent.py](src/python_acp/agent.md)
   - [capabilities.py](src/python_acp/capabilities.md)
   - [errors.py](src/python_acp/errors.md)
+  - [legacy_ws.py](src/python_acp/legacy_ws.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
-  - [ws_bridge.py](src/python_acp/ws_bridge.md)
+  - [transport_ws.py](src/python_acp/transport_ws.md)
 - Design docs (target state, not yet built):
   - [ACP v1 plan](docs/full-apc-plan.md)
   - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md)
@@ -83,9 +85,26 @@ nothing else**, and all diagnostics go to stderr. The agent currently answers
 until Phases 2 and 3 land. See [agent.py](src/python_acp/agent.md) for the per-method
 state and [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
 
-`ws` remains the default transport while it still carries the legacy action surface.
+### As an ACP agent over WebSocket
 
-## WebSocket actions
+`--transport ws` serves **the same agent**. A WebSocket client that sends ACP JSON-RPC
+gets the same `initialize` negotiation, the same capability block, and the same error
+codes a stdio client gets:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
+```
+
+`ws` remains the default transport because it also carries the deprecated surface below,
+which stdio never had. See [transport_ws.py](src/python_acp/transport_ws.md).
+
+## WebSocket actions (deprecated)
+
+The `{"action": ...}` API and the MCP passthrough on JSON-RPC (`tools/*`, `prompts/*`,
+`resources/*`, `ping`) are **deprecated**. They keep working through the ACP v1 migration
+and are removed in Phase 7; the passthrough methods move to `_`-prefixed extension
+methods first. New work should use the ACP surface above. See
+[legacy_ws.py](src/python_acp/legacy_ws.md).
 
 Connect to `ws://127.0.0.1:8765` and send JSON messages.
 

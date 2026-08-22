@@ -146,7 +146,10 @@ Runtime dependencies are **exact-pinned** (`==`). They are protocol surface, not
 conveniences, so an upgrade is a deliberate, reviewed commit of its own rather than
 whatever a resolver picks on the day.
 
-- `websockets==12.0` — the WebSocket server transport.
+- `websockets==17.0.1` — the WebSocket server transport, driven through
+  `websockets.asyncio.server`. The pin left 12.0 in `pyacp-tzd.3`, which rebuilt
+  the binding: 12.0 only offered the deprecated legacy asyncio API. 17.0.1
+  declares `requires-python >=3.11`, exactly this project's floor.
 - `agent-client-protocol==0.12.1` — Zed's Agent Client Protocol SDK
   ([agentclientprotocol/python-sdk](https://github.com/agentclientprotocol/python-sdk)).
   It is pre-1.0, where a *minor* bump is allowed to break, which is why the pin is exact

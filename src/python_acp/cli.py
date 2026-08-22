@@ -8,7 +8,7 @@ import sys
 from python_acp.agent import PythonAcpAgent
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.transport_stdio import run_stdio
-from python_acp.ws_bridge import ACPWebSocketBridge
+from python_acp.transport_ws import WebSocketAgentServer
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +71,18 @@ async def _run(args: argparse.Namespace) -> None:
             # The backend is started and handshaked in both modes so --mcp-command
             # means the same thing either way and a bad one fails at startup rather
             # than mid-session. The agent cannot reach it yet — that wiring is the
-            # per-session backend registry in Phase 2 (pyacp-3rw.3, pyacp-db3).
+            # per-session backend registry in Phase 2 (pyacp-3rw.3, pyacp-db3). The
+            # WebSocket transport does hand it to the deprecated surface, which is the
+            # only thing still calling MCP directly.
             await run_stdio(PythonAcpAgent())
             return
 
-        bridge = ACPWebSocketBridge(mcp_client, args.host, args.port, debug=args.debug)
-        await bridge.start()
+        server = WebSocketAgentServer(mcp_client, args.host, args.port, debug=args.debug)
+        await server.start()
         # Never print(): under --transport stdio that corrupts the wire, and one
         # logging path in every mode is what keeps it from creeping back.
         logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
-        await bridge.serve_forever()
+        await server.serve_forever()
 
 
 def run() -> None:

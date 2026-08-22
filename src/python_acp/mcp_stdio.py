@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Sequence
 logger = logging.getLogger("python_acp.mcp_stdio")
 
 # The MCP revision this client proposes at `initialize`. It has nothing to do
-# with ws_bridge.py's `_SUPPORTED_PROTOCOL_VERSION` — that one is the ACP
+# with `capabilities.SUPPORTED_PROTOCOL_VERSIONS` — that one is the ACP
 # version, an int, on the other side of the bridge. Two protocols, two fields.
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 # The revisions we can actually speak. The server's answer is authoritative and

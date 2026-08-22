@@ -1,0 +1,125 @@
+# `turn_mcp_router.py` — the shipped default turn executor
+
+Decision D3 says `session/prompt` runs behind a swappable executor, and D1 says there is
+no LLM in this runtime. So the default cannot *interpret* a prompt — it can only **route**
+one. A client says which tool to run and with what; this executes it against that
+session's MCP backends, streams the call's real status transitions back as
+`session/update`, and returns.
+
+Nothing here reasons, plans, or retries. That is the point, not a limitation: an
+LLM-backed executor drops into the same [seam](turns.md) without reopening it.
+
+## The invocation convention
+
+**Invented here.** The ACP spec says what a prompt *is* — a list of content blocks — and
+nothing about how a block names a tool, because every other agent has a model to work that
+out. With no model the contract has to be explicit, so it is the one thing in this module
+a client codes against.
+
+A **text** content block whose entire text is a JSON object:
+
+```json
+{"type": "text", "text": "{\"tool\": \"echo\", \"arguments\": {\"text\": \"hi\"}}"}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `tool` | yes | The MCP tool name |
+| `arguments` | no, defaults to `{}` | Passed to `tools/call` unchanged |
+| `server` | only when the session opened **more than one** MCP server | Which server from `session/new`'s `mcpServers` |
+
+Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
+are arbitrary and may contain a slash, so a separator would be ambiguous exactly where
+being wrong is silent.
+
+Every text block in the prompt is one invocation, run **in order**.
+
+`server` may be omitted for a single-server session because there is nothing to guess.
+With two or more it is required — picking one is the kind of help nobody wants. The
+refusal names the servers that *are* open, so a client does not have to go looking.
+
+The tool-call title is **always** qualified (`tools/echo`), even when the client omitted
+`server`. The title outlives the turn — it is in the transcript `session/load` replays —
+and "which server ran this" is not recoverable later from a bare name.
+
+## Validate everything, then run anything
+
+A prompt is parsed completely before the first tool runs.
+
+Tools have side effects. A turn that wrote two files and *then* refused because the third
+block was malformed leaves no way to undo the first two, and no way to tell from the
+outside that it stopped early. So a prompt that does not fully parse runs **nothing at
+all** — `test_nothing_runs_when_a_later_block_fails_to_parse` is the guard.
+
+## A prompt that is not an invocation is a refusal, not an error
+
+`stopReason: "refusal"` exists for exactly this, and it comes with an
+`agent_message_chunk` carrying the reason *and* the convention.
+
+A JSON-RPC error would be wrong twice over: the request was well-formed ACP, and by the
+time a later block fails to parse the turn may already have emitted notifications a client
+cannot un-see. A silent refusal would be worse than either.
+
+An **empty prompt** refuses too. It names no tool, so it does not parse as an invocation,
+and silently completing is exactly the failure `IdleTurnExecutor` warns about.
+
+## Two kinds of failure, and only one of them fails the turn
+
+| | What MCP sends | What the client sees | `stopReason` |
+|---|---|---|---|
+| **The tool failed** | a *successful* result with `isError: true` | `tool_call_update` with `status: "failed"` and the tool's own content | `end_turn` |
+| **The backend failed** | a JSON-RPC error response | the error, backend code intact via [errors.py](errors.md) | — the request errors |
+
+The first row is MCP's design, not an accident: tool-level failure is meant to be visible
+to whatever is driving. Collapsing it into a `stopReason` would lose *which* tool failed
+and why, so the remaining calls still run and the turn still ends normally — the turn
+completed, one tool did not.
+
+## Status transitions
+
+`pending` → `in_progress` → `completed` / `failed`, as three notifications.
+
+The first two are separate on purpose: a client renders the call the moment it is known,
+and the move to `in_progress` is what tells it the wait has begun rather than the request
+sitting behind something else.
+
+## Where it gets its backends
+
+Constructed with the `McpBackendRegistry`, not by reading one off `TurnContext`.
+`docs/module-boundaries.md` has this module reach [mcp_registry.py](mcp_registry.md)
+directly, so the context does not widen for one executor's dependency. Servers were opened
+**and handshaked** during `session/new`, so every client here is live.
+
+## Main symbols
+
+| Symbol | Purpose |
+|---|---|
+| `McpToolRouterExecutor(backends)` | The executor. `agent.py`'s default |
+| `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title` |
+| `PromptConventionError` | A block that is not an invocation. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602` |
+| `CONVENTION` | The explanation appended to every refusal |
+
+## What later beads own
+
+- `pyacp-eg1.1` — the richer MCP-result mapping. `_as_tool_content` carries **text** and
+  skips what it does not understand rather than guessing, because a wrong `type` on the
+  wire is harder to notice than a missing block.
+- `pyacp-hnk.3` — content-block typing and the `promptCapabilities` gates. This module
+  only reads `.text`, so image and audio blocks refuse today, which is what those literals
+  being `false` promises.
+- `pyacp-hnk.4` — the rest of the `session/update` variant set.
+- `pyacp-hnk.5` — `stopReason` breadth beyond `end_turn`, `refusal`, and `cancelled`.
+
+## Tests
+
+`tests/test_turn_mcp_router.py`, against the real `tests/fixtures/mock_mcp_server.py`
+subprocess: what is under test is a tool call actually running and its result actually
+reaching a `session/update`, and a mock backend would prove neither. The parsing tests are
+exhaustive because the convention is invented here — every refusal it can produce is part
+of the contract.
+
+## Related
+
+- [turns.py docs](turns.md) — the seam this implements
+- [mcp_registry.py docs](mcp_registry.md) — where the backends come from
+- [agent.py docs](agent.md) — what runs the turn as a cancellable task

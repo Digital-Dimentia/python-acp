@@ -262,9 +262,10 @@ class IdleTurnExecutor:
     `session/prompt` gets a well-formed `PromptResponse`, the create-prompt-cancel cycle
     works end to end, and nothing pretends to have run a tool.
 
-    `pyacp-hnk.2` replaces this with the deterministic MCP tool-router. The warning fires
-    once per turn on purpose — a silent no-op turn is exactly the failure someone would
-    otherwise spend an afternoon on.
+    **No longer the default** — `agent.py` builds `turn_mcp_router.McpToolRouterExecutor`
+    when none is passed. This remains for a caller that genuinely wants a turn to do
+    nothing. The warning fires once per turn on purpose: a silent no-op turn is exactly
+    the failure someone would otherwise spend an afternoon on.
     """
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:

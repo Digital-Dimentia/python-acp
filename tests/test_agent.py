@@ -737,10 +737,15 @@ async def test_an_executor_that_raises_becomes_a_mapped_error() -> None:
     assert excinfo.value.data == {"reason": "the turn disagreed"}
 
 
-async def test_the_default_executor_completes_a_turn_without_doing_anything() -> None:
-    """A conforming no-op is the honest answer while pyacp-hnk.2 has not shipped."""
+async def test_the_default_executor_is_the_mcp_tool_router() -> None:
+    """Decision D3's shipped default. An empty prompt names no tool, so it is refused.
+
+    `turns.IdleTurnExecutor` is still there for a caller that wants a turn to do nothing;
+    it is no longer what an unconfigured agent does.
+    """
     agent = make_agent()
-    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    client = RecordingClient()
+    agent.on_connect(client)  # type: ignore[arg-type]
     router = build_agent_router(agent, use_unstable_protocol=True)
     created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
 
@@ -748,7 +753,8 @@ async def test_the_default_executor_completes_a_turn_without_doing_anything() ->
         "session/prompt", {"sessionId": created.session_id, "prompt": []}, False
     )
 
-    assert result.stop_reason == "end_turn"
+    assert result.stop_reason == "refusal"
+    assert "tool" in client.updates[0][1].content.text
 
 
 # ---------------------------------------------------------------------------

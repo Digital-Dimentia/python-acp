@@ -106,16 +106,17 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
 | `IdleTurnExecutor` | The default — a conforming turn that does nothing |
 
-`IdleTurnExecutor` is not a placeholder that raises and not one that invents content. A
-conforming turn that ends straight away is the honest answer while there is no executor:
-the create-prompt-cancel cycle works end to end and nothing pretends to have run a tool.
-It warns every turn, because a silent no-op turn is exactly the failure someone would
-otherwise spend an afternoon on. `pyacp-hnk.2` replaces it.
+`IdleTurnExecutor` is **no longer the default** — `pyacp-hnk.2` shipped
+[`McpToolRouterExecutor`](turn_mcp_router.md), which `agent.py` now builds when no
+executor is passed. It remains for a caller that genuinely wants a turn to do nothing, and
+it still warns every turn, because a silent no-op turn is exactly the failure someone
+would otherwise spend an afternoon on.
 
 ## What the later Phase 3 beads own
 
-- `pyacp-hnk.2` — the deterministic MCP tool-router, reading backends through
-  [mcp_registry.py](mcp_registry.md) rather than through the context.
+- `pyacp-hnk.2` ✔ — the deterministic MCP tool-router, reading backends through
+  [mcp_registry.py](mcp_registry.md) rather than through the context. Shipped as
+  [turn_mcp_router.py](turn_mcp_router.md), and the third implementer of this Protocol.
 - `pyacp-hnk.3` — content-block typing. `prompt` is `list[Any]` here, and the
   `promptCapabilities` literals stay `false` in [capabilities.py](capabilities.md) until
   that bead enforces the gates.

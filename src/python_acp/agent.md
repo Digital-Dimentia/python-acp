@@ -69,6 +69,10 @@ unambiguous answer to "did `session/cancel` reach it".
 `TurnAlreadyRunningError` from `attach_turn` cancels the task it just created rather than
 leaving one un-awaited.
 
+The executor defaults to [`McpToolRouterExecutor`](turn_mcp_router.md) over this agent's
+backend registry — decision D3's shipped default, deterministic and with no LLM in it.
+`turns.IdleTurnExecutor` is still available for a caller that wants a turn to do nothing.
+
 `detach_turn` runs in a `finally`, so a cancelled session accepts the next prompt, and
 the executor's `TurnResult` supplies both `stopReason` and `usage` — `PromptResponse`
 carries the second and nothing was filling it.

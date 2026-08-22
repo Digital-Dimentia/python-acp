@@ -98,9 +98,27 @@ never ahead of it.
 | `sessionCapabilities.list` | `null` | `{}` | `pyacp-3rw.3` (row 6) |
 | `sessionCapabilities.delete` | `null` | — | `session/delete` has **no route and no `Agent` member** in 0.12.1. Advertising it would promise a method the SDK cannot dispatch. |
 | `sessionCapabilities.additionalDirectories` | `null` | `{}` | `pyacp-3rw.4`, which is what enforces the absolute-path constraint on them |
+| `sessionCapabilities.fork` | `null` | `{}` | `pyacp-3rw.3` (row 8), **and** only while the connection carries `use_unstable_protocol` — with the flag off the router answers `-32601` and the advertisement would be a lie |
+| `sessionCapabilities.resume` | `null` | `{}` | `pyacp-3rw.3` (row 9), same unstable condition |
+| `sessionCapabilities.close` | `null` | `{}` | `pyacp-3rw.3` (row 7), same unstable condition |
 | `auth.logout` | `null` | — | No auth methods are offered, so there is nothing to log out of. Also unrouted — see below. |
 | `providers`, `nes`, `positionEncoding` | `null` | — | UNSTABLE in the schema and unrouted by the SDK. Out of scope for v1. |
 | `authMethods` (on `InitializeResponse`) | `[]` | — | The bridge authenticates nobody; it runs as a local subprocess under the user's own credentials. An empty list is the accurate statement, and it is what makes row 12 a refusal. |
+
+> **Amended by `pyacp-tzd.4`.** The `sessionCapabilities.fork` / `.resume` / `.close`
+> rows were absent from the table as ratified — `acp.schema.SessionCapabilities` in
+> 0.12.1 carries six fields, not three. They were found by walking the SDK model while
+> compiling this table into `src/python_acp/capabilities.py`, and
+> `tests/test_capabilities.py::test_the_manifest_covers_every_field_the_sdk_defines`
+> now walks it on every run, so the next field the SDK adds fails a test instead of
+> being advertised at whatever the SDK defaults it to.
+
+**Where this table lives in code.** `src/python_acp/capabilities.py` is this table as
+`AGENT_CAPABILITY_MANIFEST` — one `Capability` row per leaf, each carrying its value,
+its owner, and its reason — and `initialize` is built from it and nothing else. Turning
+a capability on takes four things in one commit: the feature, a test that exercises it,
+the changed row, and an entry in `CAPABILITY_EVIDENCE` naming that test. Leave any one
+out and the suite fails. See [../src/python_acp/capabilities.md](../src/python_acp/capabilities.md).
 
 ## Client surface — what we consume
 

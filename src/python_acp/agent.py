@@ -29,10 +29,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from acp import PROTOCOL_VERSION, RequestError
+from acp import RequestError
 from acp.interfaces import Client
 from acp.schema import (
-    AgentCapabilities,
     AuthenticateResponse,
     CloseSessionResponse,
     ClientCapabilities,
@@ -41,17 +40,20 @@ from acp.schema import (
     InitializeResponse,
     ListSessionsResponse,
     LoadSessionResponse,
-    McpCapabilities,
     NewSessionResponse,
-    PromptCapabilities,
     PromptResponse,
     ResumeSessionResponse,
-    SessionCapabilities,
     SetSessionConfigOptionResponse,
     SetSessionModeResponse,
 )
 
 from python_acp import __version__
+from python_acp.capabilities import (
+    AUTH_METHODS,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    build_agent_capabilities,
+    negotiate_protocol_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,48 +121,43 @@ class PythonAcpAgent:
     ) -> InitializeResponse:
         """Negotiate the protocol version and declare what this agent can do.
 
-        Version negotiation per the spec: echo the client's version when we support
-        it, otherwise answer with ours and let the client decide whether to
-        disconnect. We support exactly `acp.PROTOCOL_VERSION`.
+        Three things happen here, and the second is the one later phases depend on.
 
-        The capability block is a **promise**, and every literal in it is owned by a
-        row of `docs/acp-compliance-matrix.md`. It is all-false/null here because
-        nothing behind it is built yet; a literal flips in the same commit as the
-        feature it advertises, never ahead of it. `pyacp-tzd.4` owns the accurate
-        block once there are features to describe.
+        **Version.** `negotiate_protocol_version` echoes the client's version when it
+        is one we serve and answers with our newest when it is not. Either way this is
+        not a rejection point — the client decides whether our answer is usable.
+
+        **Client capabilities.** Whatever the client declared is stored for the life of
+        the connection. Phase 4 gates every `fs/*`, `terminal/*`, and `elicitation/*`
+        call on it, and a call made without checking is a conformance bug the client is
+        entitled to answer `-32601` to. `None` (no `initialize` yet) is kept distinct
+        from a `ClientCapabilities` that declares nothing.
+
+        **Capabilities.** The block is a **promise**, built from
+        `capabilities.AGENT_CAPABILITY_MANIFEST` and nothing else. It is not assembled
+        here, so that a literal cannot be flipped without a manifest row and a test
+        proving the feature it advertises actually runs.
         """
         self._client_capabilities = client_capabilities
+        negotiated = negotiate_protocol_version(protocol_version)
         logger.debug(
             "ACP initialize from %s (protocol %s)",
             client_info.name if client_info is not None else "<unnamed client>",
             protocol_version,
         )
-        if protocol_version != PROTOCOL_VERSION:
+        if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
             # Not an error: the spec has us answer with what we do support and lets
             # the client disconnect if that is unusable to it.
             logger.info(
                 "Client requested ACP protocol %s; answering with %s",
                 protocol_version,
-                PROTOCOL_VERSION,
+                negotiated,
             )
 
         return InitializeResponse(
-            protocolVersion=PROTOCOL_VERSION,
-            agentCapabilities=AgentCapabilities(
-                loadSession=False,
-                promptCapabilities=PromptCapabilities(
-                    image=False, audio=False, embeddedContext=False
-                ),
-                # MCP is a backend adapter (D6), and stdio is the only MCP transport
-                # this project drives. These three gate *client-supplied* servers of
-                # each transport, so they stay false until one is actually driven.
-                mcpCapabilities=McpCapabilities(http=False, sse=False, acp=False),
-                sessionCapabilities=SessionCapabilities(),
-            ),
-            # Empty on purpose: this process runs locally under the user's own
-            # credentials and authenticates nobody. It is what makes `authenticate`
-            # a refusal rather than a capability.
-            authMethods=[],
+            protocolVersion=negotiated,
+            agentCapabilities=build_agent_capabilities(),
+            authMethods=list(AUTH_METHODS),
             agentInfo=Implementation(name=_AGENT_NAME, version=__version__),
         )
 

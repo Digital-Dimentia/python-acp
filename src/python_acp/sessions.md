@@ -138,7 +138,10 @@ decides whether to cancel and retry.
   `cli.py` wires it (`SessionRegistry(on_close=backends.close)`); a deployment that
   forgot to would leak one subprocess per session.
 - **`stopReason`.** `cancel_turn()` delivers the cancellation; `pyacp-hnk.5` decides what
-  the turn reports.
+  the turn reports. `cancel_turn` sets `Session.cancellation` **before** cancelling the
+  task, which is what lets an executor tell `session/cancel` from the whole request dying
+  — see [turns.py](turns.md). `attach_turn` replaces the event, so a new turn never starts
+  already flagged by the previous turn's cancel.
 - **Pagination.** `list()` fixes the ordering — most recently active first — so a
   `pyacp-3rw.3` cursor means the same thing to every caller. The cursor itself is that
   bead's.

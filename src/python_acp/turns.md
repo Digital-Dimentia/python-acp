@@ -1,108 +1,135 @@
 # `turns.py` — the seam a prompt turn runs behind
 
-`session/prompt` is where an agent does its work, and decision D3 says *what* that work
-is must be swappable. The shipped default is a deterministic MCP tool-router with no LLM
-in the loop; an LLM-backed executor has to be droppable in later without reopening the
-interface. This module is the seam that makes that a design choice rather than a dead end.
+`session/prompt` is where an agent does its work, and decision D3 says *what* that work is
+must be swappable. The shipped default is a deterministic MCP tool-router with no LLM in
+the loop; an LLM-backed executor has to be droppable in later without reopening the
+interface. This module is what makes that a design choice rather than a dead end — and it
+is the same seam the original plan's "backend abstraction for non-MCP executors" asked
+for, satisfied once.
 
-> **This is the minimum `pyacp-3rw.2` needed to wire `session/prompt`, not the finished
-> interface.** `pyacp-hnk.1` owns that and depends on this bead. See
-> [What hnk.1 still owns](#what-pyacp-hnk1-still-owns).
-
-## The shape
+## One method, and nothing it forecloses
 
 ```python
 class TurnExecutor(Protocol):
-    async def execute(self, context: TurnContext, prompt: list[Any]) -> StopReason: ...
+    async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 ```
 
-One `async` method. That is deliberately the smallest shape that does not foreclose
-hnk.1's requirements: because the call is `async` and single-method, a turn may take as
-many steps and as many client round-trips as it likes, and nothing here assumes it is
-synchronous, single-step, or non-interactive.
+The interface must not assume a turn is single-step or non-interactive, so the parts that
+would have assumed it are **deliberately absent**: no step count, no "return the answer"
+shape, no rule against awaiting the client mid-turn. One `async` call may emit, wait on a
+client round trip, emit again, and repeat as many times as it likes.
 
-## Why the context is an object
+`tests/test_turns.py::test_a_turn_may_be_multi_step_and_interactive` is a *design*
+assertion rather than a behaviour one — it exists so that a later simplification into a
+single-shot call has something to break.
 
-An executor needs three things and they arrive from three places: the `Session`
-([sessions.py](sessions.md)), the `Client` facade ([agent.py](agent.md), from
-`on_connect`), and a way to push `session/update` — the two combined. Passing them
-separately would make every executor signature grow when a later phase adds a fourth;
-passing a context means `TurnContext` grows and executors do not.
+## What a turn is handed
 
-`TurnContext` is not a bag of public attributes. **`emit` supplies the session id
-itself**, so an executor cannot address someone else's session by accident. A context
-that merely exposed `client` would invite exactly that.
+Three things arrive from three places: the `Session` ([sessions.py](sessions.md)), the
+`Client` facade ([agent.py](agent.md), from `on_connect`), and what the client said it can
+do (`initialize`). Passing them separately would make every executor signature grow when a
+later phase adds a fourth; passing a context means `TurnContext` grows and executors do
+not.
 
-## Emission is not optional
+`TurnContext` is **not** a bag of public attributes. `emit` supplies the session id
+itself, so an executor cannot address someone else's session by accident.
 
-`session/update` is the only way a client sees anything before a turn ends, and
-`ClientCapabilities` has **no gate** for it — every ACP client must accept it. So `emit`
-is unconditional.
+## Capability gating belongs to the seam
 
-`pyacp-hnk.4`'s per-variant gating belongs on the *variant*, never on the call:
-`clientCapabilities.plan` governs whether the client accepts the `agent_plan_*` update
-variants, so a plan-less client means suppressing those updates, not skipping
-`session_update`.
+`ClientCapabilities` decides which client methods an agent may call at all. A call made
+without checking is a **conformance bug, not a runtime error** — the client is entitled to
+answer `-32601`, and the failure then surfaces as a broken turn far from the omission.
+`context.gates` answers the question once, per connection, in the vocabulary of the
+methods rather than of the schema: an executor asks "may I write a file", not "is
+`clientCapabilities.fs.writeTextFile` true".
 
-## `IdleTurnExecutor`
+Three gate shapes, and they are **not** interchangeable:
 
-The default until `pyacp-hnk.2` ships the tool-router: complete the turn immediately,
-having done nothing, and return `end_turn`.
+| Gate | Shape | The mistake it prevents |
+|---|---|---|
+| `READ_TEXT_FILE`, `WRITE_TEXT_FILE` | two independent booleans under `fs` | a read grant quietly satisfying a write |
+| `TERMINAL` | one boolean for all five `terminal/*` methods | inventing per-method granularity the schema does not have |
+| `ELICITATION`, `PLAN_UPDATES` | advertised by **presence** — empty marker models | checking `bool(model)` instead of `is not None` |
 
-Not a placeholder that raises, and not one that invents content. A conforming turn that
-ends straight away is the honest answer while there is no executor — the client's
-`session/prompt` gets a well-formed `PromptResponse`, the create-prompt-cancel cycle works
-end to end, and nothing pretends to have run a tool. It logs a **warning** every turn on
-purpose: a silent no-op turn is exactly the failure someone would otherwise spend an
-afternoon on.
+`PLAN_UPDATES` gates *update variants*, not a method. `session/update` itself is ungated,
+so a plan-less client means `pyacp-hnk.4` suppresses the `agent_plan_*` variants — never
+that it skips `emit`.
+
+**`session/update` and `session/request_permission` have no gate at all.**
+`ClientCapabilities` has no field for either and every ACP client must accept both. Do not
+invent one.
+
+A client that declared nothing — or a turn running before `initialize` — may call
+**nothing**. That is the only safe reading of an absent declaration.
+
+`UngatedClientCallError` is a `RuntimeError`, so [errors.py](errors.md) maps it to
+`-32603`. That code is the honest one: this is our bug, not a bad parameter.
 
 ## Cancellation is not an error
 
-An executor should let `asyncio.CancelledError` propagate rather than catching it to
-return early. [agent.py](agent.md) runs the turn as its own task and converts a cancelled
-one into `stopReason: "cancelled"`; an executor that swallowed the cancellation would
-return `end_turn` for a turn the client explicitly stopped.
+`session/cancel` cancels the turn's task, and an executor should let
+`asyncio.CancelledError` **propagate** rather than catching it to return early.
+[agent.py](agent.md) converts a cancelled turn into `stopReason: "cancelled"`, so an
+executor that swallowed the cancellation would report `end_turn` for a turn the client
+explicitly stopped.
 
-Raising anything else *is* an error and becomes a JSON-RPC error through
-[errors.py](errors.md) — a `ValueError` from an executor reaches the client as `-32602`,
-which is why an executor should raise `ValueError` for a prompt it cannot accept.
+`context.cancelled` is how an executor *knows* without being told by the exception, and
+**it is set before the task is cancelled**. That ordering is its entire value:
 
-## What `pyacp-hnk.1` still owns
+- inside an `except asyncio.CancelledError` handler it distinguishes "the client cancelled
+  this turn" from "the whole request died";
+- it lets async cleanup run under `asyncio.shield` instead of racing a cancellation
+  already in flight.
 
-Named here so that bead does not have to rediscover the gap:
+`context.wait_for_cancellation()` is for an executor that would rather *race* a long
+operation than be torn out of it —
+`asyncio.wait([work, cancel], return_when=FIRST_COMPLETED)`.
 
-- **`stopReason` semantics beyond `end_turn` and `cancelled`.** `max_tokens`,
-  `max_turn_requests`, and `refusal` have no producer yet (`pyacp-hnk.5`).
-- **Client-method access and its capability gating.** `context.client` is the raw facade;
-  Phase 4 (`pyacp-8bv.*`) decides how `fs/*`, `terminal/*`, and `elicitation/*` are
-  reached and gated.
-- **A cancellation token.** Today cancellation is task cancellation, which is enough for
-  `session/cancel` but gives an executor no way to run cleanup that is itself async
-  without racing the cancel.
-- **Content-block typing.** `prompt` is `list[Any]`; `pyacp-hnk.3` decides how the
-  `promptCapabilities` gates (`image`, `audio`, `embeddedContext`) are enforced, and those
-  literals stay `false` in `capabilities.AGENT_CAPABILITY_MANIFEST` until it does.
-- **A `TurnResult`** carrying usage alongside the stop reason — `PromptResponse.usage`
-  exists and nothing fills it.
+## `TurnResult`
+
+A record rather than a bare `StopReason`, because `PromptResponse` already carries `usage`
+and nothing was filling it — and because the next field the schema grows should widen this
+type instead of every executor signature. `TurnResult.ended()` names the ordinary
+completion so the common case does not read as a string literal.
+
+The `stopReason` contract beyond `end_turn` and `cancelled` — `max_tokens`,
+`max_turn_requests`, `refusal`, and how each interleaves with in-flight updates and a
+running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 
 ## Main symbols
 
 | Symbol | Purpose |
 |---|---|
-| `TurnContext` | What a turn may reach: `session`, `client`, `session_id`, `emit(update)` |
 | `TurnExecutor` | The Protocol one turn runs behind |
+| `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
+| `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
+| `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
 | `IdleTurnExecutor` | The default — a conforming turn that does nothing |
+
+`IdleTurnExecutor` is not a placeholder that raises and not one that invents content. A
+conforming turn that ends straight away is the honest answer while there is no executor:
+the create-prompt-cancel cycle works end to end and nothing pretends to have run a tool.
+It warns every turn, because a silent no-op turn is exactly the failure someone would
+otherwise spend an afternoon on. `pyacp-hnk.2` replaces it.
+
+## What the later Phase 3 beads own
+
+- `pyacp-hnk.2` — the deterministic MCP tool-router, reading backends through
+  [mcp_registry.py](mcp_registry.md) rather than through the context.
+- `pyacp-hnk.3` — content-block typing. `prompt` is `list[Any]` here, and the
+  `promptCapabilities` literals stay `false` in [capabilities.py](capabilities.md) until
+  that bead enforces the gates.
+- `pyacp-hnk.4` — the full `session/update` variant set, including `PLAN_UPDATES`
+  suppression.
+- `pyacp-hnk.5` — the rest of the `stopReason` contract.
 
 ## Tests
 
-`tests/test_agent.py`, under "Baseline session lifecycle". They drive executors through
-the SDK router rather than calling `execute` directly, because the parts worth testing —
-that a turn is a cancellable task, that `emit` reaches the client with the right session
-id, that a raising executor becomes a mapped error — only exist once the agent is wiring
-it up.
+`tests/test_turns.py` for the seam itself; `tests/test_agent.py` for the wiring, since a
+turn only becomes a cancellable task once the agent is running it.
 
 ## Related
 
 - [agent.py docs](agent.md) — runs the turn as a task and owns the cancelled path
-- [sessions.py docs](sessions.md) — `attach_turn` / `cancel_turn`
+- [sessions.py docs](sessions.md) — `attach_turn` / `cancel_turn` / `cancellation`
 - [errors.py docs](errors.md) — what a raising executor becomes

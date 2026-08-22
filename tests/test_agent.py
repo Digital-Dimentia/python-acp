@@ -30,7 +30,7 @@ from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
-from python_acp.turns import TurnContext
+from python_acp.turns import TurnContext, TurnResult
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
@@ -441,7 +441,7 @@ class RecordingExecutor:
     """
 
     def __init__(self, stop_reason: StopReason = "end_turn", updates: list | None = None) -> None:
-        self.stop_reason = stop_reason
+        self.stop_reason: StopReason = stop_reason
         self.updates = updates or []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -458,7 +458,7 @@ class RecordingExecutor:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
-        return self.stop_reason
+        return TurnResult(self.stop_reason)
 
 
 class RecordingClient:

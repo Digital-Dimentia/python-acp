@@ -411,7 +411,7 @@ class PythonAcpAgent:
         interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s.
         """
         session = self._sessions.get(session_id)
-        context = TurnContext(session, self.client)
+        context = TurnContext(session, self.client, self._client_capabilities)
         turn = asyncio.create_task(
             self._executor.execute(context, prompt), name=f"acp-turn-{session_id}"
         )
@@ -435,7 +435,8 @@ class PythonAcpAgent:
         if turn.cancelled():
             return PromptResponse(stopReason="cancelled")
         # Re-raises whatever the executor raised, for `as_request_error` to map.
-        return PromptResponse(stopReason=turn.result())
+        result = turn.result()
+        return PromptResponse(stopReason=result.stop_reason, usage=result.usage)
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """Cancel the running turn for a session.

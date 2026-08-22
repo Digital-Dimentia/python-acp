@@ -16,7 +16,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
 - Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
-- Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind, and the `session/update` emission channel. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
+- Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
@@ -59,6 +59,7 @@ flowchart LR
     Agent --> Backends
     Sessions -. "on_close" .-> Backends
     Turns -. "session/update via the Client handle" .-> SDK
+    Turns -. "gated client calls (Phase 4)" .-> SDK
     Backends --> MCPClient
     MCPClient <--> MCPProc
     Legacy --> StartupProc

@@ -26,6 +26,9 @@
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [ws_bridge.py](src/python_acp/ws_bridge.md)
+- Design docs (target state, not yet built):
+  - [ACP v1 plan](docs/full-apc-plan.md)
+  - [Module boundaries](docs/module-boundaries.md)
 
 ## Local setup
 

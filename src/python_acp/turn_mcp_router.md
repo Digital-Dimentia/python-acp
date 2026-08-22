@@ -139,6 +139,66 @@ plan-less client still gets everything else — see [turns.md](turns.md).
 The full disposition of all thirteen `session/update` variants — emitted, deferred, and
 declined, each with a reason — is `turns.SESSION_UPDATE_DISPOSITIONS`.
 
+## Permission
+
+**Every tool call is consequential**, so every one is asked about. That is not caution
+for its own sake: MCP `2024-11-05` has no tool annotations — `readOnlyHint`,
+`destructiveHint`, and friends arrive in `2025-03-26` — so there is no way to tell a read
+from a delete. Treating everything as consequential is the only setting that cannot
+silently do damage, and `allow_always` is what keeps it to once per tool per session.
+Refining this is tied to the MCP protocol-version bump, not to a heuristic.
+
+*"But the client already chose the tool"* — the client that sent `session/prompt` and the
+human at the ACP client are not necessarily the same party. Automation asks; the
+permission prompt is how a person sees and approves it.
+
+The request goes out **after** the `tool_call` notification and **before**
+`in_progress`, which is what `pending` is for: the request carries the tool call, so the
+client has something to attach its prompt to, and nothing has run yet.
+
+`session/request_permission` has **no capability gate** — `ClientCapabilities` has no
+field for it and every ACP client must accept it — so it is called with nothing to check
+first.
+
+### Denial is a selected option; the only other outcome is cancellation
+
+This is the part worth reading twice. `RequestPermissionResponse.outcome` is:
+
+| Model | Literal | Means |
+|---|---|---|
+| `AllowedOutcome` | `"selected"` + `optionId` | the user picked one of the options — which may be a **reject** one |
+| `DeniedOutcome` | **`"cancelled"`** | the turn was cancelled while the prompt was open |
+
+Despite the class name, `DeniedOutcome` does not mean denied. Reading it as a rejection
+would turn a "no" into `stopReason: "cancelled"`, and reading a rejection as one would do
+the reverse — which is the inversion this bead was told to get right.
+
+| Answer | What happens |
+|---|---|
+| `allow_once` / `allow_always` | the call runs |
+| `reject_once` / `reject_always` | the call does **not** run; its update is `failed` with a "Denied by the client" note, and the remaining calls still run |
+| an option we never offered | treated as a refusal, and logged — the safe reading |
+| outcome `cancelled` | the turn stops immediately with `stopReason: "cancelled"`, its plan entry left unfinished |
+
+The `_always` variants are remembered on the `Session` for its lifetime and copied (not
+shared) by a fork — a fork answering "always allow" must not decide for its parent. The
+scope is the session because the SDK's own option is named *"Approve for session"*.
+
+**A client that refuses the request gets a refusal.** Neither "assume consent" nor "deny
+forever" is a safe reading of a broken client, so the turn stops and says which is which.
+
+### `acp.contrib.permissions` is used, with one addition
+
+`PermissionBroker` builds the `RequestPermissionRequest` from the `ToolCallTracker` the
+router already keeps, so the tool call in the prompt is the same object the client was
+sent — used for the same reason as the tracker itself.
+
+Its `default_permission_options()` offers `allow_once`, `allow_always`, and
+`reject_once`. **A user can say "always yes" but not "always no"**, and is asked again
+about a tool they have already turned down. That asymmetry looks like an oversight rather
+than a design, and `reject_always` is one of the four kinds the protocol defines, so
+`PERMISSION_OPTIONS` adds the fourth.
+
 ## Status transitions
 
 `pending` → `in_progress` → `completed` / `failed`, as three notifications.
@@ -170,6 +230,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `PromptConventionError` | A block that is not an invocation. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602` |
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
+| `PERMISSION_OPTIONS` | The four options offered before every tool call |
 | `McpToolRouterExecutor.supported_prompt_blocks` | `{"text"}` — what `promptCapabilities` is derived from |
 
 ## What later beads own

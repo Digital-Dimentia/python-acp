@@ -67,7 +67,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from acp.contrib.permissions import PermissionBroker, default_permission_options
 from acp.contrib.tool_calls import ToolCallTracker
+from acp.exceptions import RequestError
 from acp.helpers import (
     plan_entry,
     text_block,
@@ -77,7 +79,14 @@ from acp.helpers import (
     update_plan,
     update_user_message_text,
 )
-from acp.schema import AvailableCommand, ContentToolCallContent, PlanEntry
+from acp.schema import (
+    AvailableCommand,
+    ContentToolCallContent,
+    PermissionOption,
+    PlanEntry,
+    RequestPermissionRequest,
+    RequestPermissionResponse,
+)
 
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
@@ -91,6 +100,19 @@ CONVENTION = (
     '"arguments" defaults to {}; "server" may be omitted only when the session opened '
     "exactly one MCP server."
 )
+
+
+class _TurnCancelled(Exception):
+    """The client cancelled the turn while its permission prompt was open.
+
+    Internal to this module: `execute` turns it into `stopReason: "cancelled"`. Not an
+    `asyncio.CancelledError`, because nothing was actually cancelled — the client
+    answered, and answering "cancelled" is a normal response to a normal request.
+    """
+
+
+class _PermissionUnavailable(Exception):
+    """The client refused `session/request_permission`, which it must not."""
 
 
 class PromptConventionError(ValueError):
@@ -120,6 +142,26 @@ class Invocation:
         from an unqualified name.
         """
         return f"{self.server}/{self.tool}" if self.server else self.tool
+
+
+#: What a client is offered before a tool runs.
+#:
+#: The SDK's `default_permission_options()` plus one. It offers `allow_once`,
+#: `allow_always`, and `reject_once` — so a user can say "always yes" but has no way to
+#: say "always no", and is asked again about a tool they have already turned down. The
+#: asymmetry looks like an oversight rather than a design, and `reject_always` is one of
+#: the four `PermissionOptionKind`s the protocol defines, so the fourth option is added
+#: here rather than worked around.
+PERMISSION_OPTIONS: tuple[PermissionOption, ...] = (
+    *default_permission_options(),
+    PermissionOption(optionId="reject_for_session", name="Reject for session", kind="reject_always"),
+)
+
+#: Which of those options mean "run it". `reject_once` / `reject_always` are the other two.
+_ALLOWING_KINDS = frozenset({"allow_once", "allow_always"})
+
+#: Which of them mean "and do not ask again this session".
+_REMEMBERING_KINDS = frozenset({"allow_always", "reject_always"})
 
 
 #: Why each non-text prompt block is declined, keyed by its `type` discriminator.
@@ -172,10 +214,27 @@ class McpToolRouterExecutor:
         plan = _plan_for(invocations)
         await self._emit_plan(context, plan)
         tracker = ToolCallTracker()
+        broker = PermissionBroker(
+            context.session_id,
+            _requester(context),
+            tracker=tracker,
+            default_options=PERMISSION_OPTIONS,
+        )
         for index, invocation in enumerate(invocations):
             plan[index].status = "in_progress"
             await self._emit_plan(context, plan)
-            failed = await self._run(context, tracker, backends, invocation, index)
+            try:
+                failed = await self._run(context, tracker, broker, backends, invocation, index)
+            except _TurnCancelled:
+                # The client cancelled while its permission prompt was open. It said so in
+                # the response, which is a different route to the same answer as
+                # `session/cancel` cancelling our task — and the only one available when
+                # the client chose not to send the notification too.
+                plan[index].status = "pending"
+                await self._emit_plan(context, plan)
+                return TurnResult("cancelled")
+            except _PermissionUnavailable as exc:
+                return await self._refuse(context, PromptConventionError(str(exc)))
             plan[index].status = "failed" if failed else "completed"
             await self._emit_plan(context, plan)
         return TurnResult.ended()
@@ -316,6 +375,7 @@ class McpToolRouterExecutor:
         self,
         context: TurnContext,
         tracker: ToolCallTracker,
+        broker: PermissionBroker,
         backends: Any,
         invocation: Invocation,
         index: int,
@@ -340,6 +400,17 @@ class McpToolRouterExecutor:
                 raw_input=invocation.arguments,
             )
         )
+        if not await self._permitted(context, broker, invocation, key):
+            await context.emit(
+                tracker.progress(
+                    key,
+                    status="failed",
+                    content=[tool_content(text_block("Denied by the client."))],
+                )
+            )
+            tracker.forget(key)
+            return True
+
         await context.emit(tracker.progress(key, status="in_progress"))
 
         client = backends[invocation.server]
@@ -359,6 +430,66 @@ class McpToolRouterExecutor:
         )
         tracker.forget(key)
         return failed
+
+    async def _permitted(
+        self,
+        context: TurnContext,
+        broker: PermissionBroker,
+        invocation: Invocation,
+        key: str,
+    ) -> bool:
+        """Ask the client whether this call may run, unless it already said always.
+
+        Asked **after** the `tool_call` notification and before `in_progress`, which is
+        what `pending` is for: the request carries the tool call, so the client has
+        something to attach its prompt to.
+        """
+        remembered = context.session.remembered_permissions.get(invocation.title)
+        if remembered is not None:
+            logger.debug("Permission for %s remembered: %s", invocation.title, remembered)
+            return remembered
+
+        try:
+            response = await broker.request_for(
+                key, description=f"Run the MCP tool {invocation.title}"
+            )
+        except RequestError as exc:
+            # `session/request_permission` is mandatory — `ClientCapabilities` has no field
+            # for it, so every ACP client must accept it. One that refuses is broken, and
+            # the safe reading is neither "assume consent" nor "deny forever" but "say so".
+            raise _PermissionUnavailable(
+                f"This client answered {exc.code} to session/request_permission, which "
+                "every ACP client must accept. Nothing was run, because assuming consent "
+                "for a tool nobody approved is not a choice this agent will make."
+            ) from exc
+
+        return self._decide(context, invocation, response)
+
+    @staticmethod
+    def _decide(
+        context: TurnContext, invocation: Invocation, response: RequestPermissionResponse
+    ) -> bool:
+        """Read one permission answer.
+
+        **Denial is a selected option, not an outcome.** `RequestPermissionResponse.outcome`
+        is `AllowedOutcome` (`"selected"`, with an `optionId`) or `DeniedOutcome` — whose
+        literal is `"cancelled"`, despite the class name. So the only non-selected answer
+        the protocol has is *the turn was cancelled*, and reading a rejection as one would
+        turn a "no" into `stopReason: cancelled`. That inversion is exactly what this bead
+        was told to get right.
+        """
+        outcome = response.outcome
+        if getattr(outcome, "outcome", None) != "selected":
+            raise _TurnCancelled
+        kind = _KIND_BY_OPTION.get(getattr(outcome, "option_id", ""))
+        if kind is None:
+            # An option we never offered. Refusing to run is the only safe reading.
+            logger.warning("Client chose unknown permission option %r", outcome)
+            return False
+        allowed = kind in _ALLOWING_KINDS
+        if kind in _REMEMBERING_KINDS:
+            context.session.remembered_permissions[invocation.title] = allowed
+        return allowed
 
     async def _refuse(self, context: TurnContext, exc: PromptConventionError) -> TurnResult:
         """Say why, then stop. A silent refusal is worse than a wrong one."""
@@ -380,6 +511,27 @@ def _as_tool_content(result: dict[str, Any]) -> list[ContentToolCallContent] | N
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
     ]
     return blocks or None
+
+
+#: Option id to kind, for reading an answer back. Built from `PERMISSION_OPTIONS` so the
+#: two cannot disagree about what an id means.
+_KIND_BY_OPTION: dict[str, str] = {option.option_id: option.kind for option in PERMISSION_OPTIONS}
+
+
+def _requester(context: TurnContext):
+    """Adapt the `Client` facade to the shape `PermissionBroker` calls.
+
+    `session/request_permission` has **no capability gate** — `ClientCapabilities` has no
+    field for it and every ACP client must accept it — so this is called straight off the
+    client with nothing to check first.
+    """
+
+    async def request(payload: RequestPermissionRequest) -> RequestPermissionResponse:
+        return await context.client.request_permission(
+            session_id=payload.session_id, tool_call=payload.tool_call, options=payload.options
+        )
+
+    return request
 
 
 def _plan_for(invocations: list[Invocation]) -> list[PlanEntry]:

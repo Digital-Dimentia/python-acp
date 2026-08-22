@@ -151,6 +151,14 @@ class Session:
     #: what a replay needs — order across categories, and duplicate chunks, are exactly
     #: the information it discards. See `sessions.md`.
     history: list[Any] = field(default_factory=list)
+    #: Permission decisions the user asked to be remembered, keyed by qualified tool
+    #: name. `allow_always` / `reject_always` are the ACP options that write here, and
+    #: **session** is their scope — the SDK's own default option is literally named
+    #: "Approve for session". Keeping it on the session rather than in the executor means
+    #: it dies with the session instead of outliving it in a process-wide map.
+    #:
+    #: This module does not interpret the values; `turn_mcp_router.py` does.
+    remembered_permissions: dict[str, bool] = field(default_factory=dict)
     _clock: Clock = field(default=_utc_now, repr=False, compare=False)
     _turn: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
     _cancel_requested: asyncio.Event = field(
@@ -342,6 +350,9 @@ class Session:
             # are never mutated after `record`, only appended — but it must be a *copy*,
             # or the child's next turn would append to the parent's transcript.
             history=list(self.history),
+            # Copied, not shared: a fork answering "always allow" must not decide for its
+            # parent. Same reasoning as the mode and config state above.
+            remembered_permissions=dict(self.remembered_permissions),
             created_at=self._clock(),
             updated_at=self._clock(),
             _clock=self._clock,

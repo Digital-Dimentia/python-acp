@@ -129,6 +129,8 @@ which beads redraw it.
 ## Design Documents
 
 - [ACP v1 plan](docs/full-apc-plan.md) — phases, decisions D1-D6, and delivery sequencing.
+- [ACP v1 compliance matrix](docs/acp-compliance-matrix.md) — per-method disposition for every
+  `acp.interfaces.Agent` and `Client` member, and the `initialize` capability block it dictates.
 - [Module boundaries](docs/module-boundaries.md) — the target module layout and the fate of `ws_bridge.py`.
 
 ## Notes

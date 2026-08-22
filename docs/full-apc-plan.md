@@ -30,7 +30,7 @@ most of what the original Phase 1 described as work to be done.
 
 - **`acp.schema`** — generated Pydantic models tracking every ACP release (~200 KB of
   generated types). This *is* the compliance matrix; there is nothing to freeze by hand.
-- **`acp.interfaces.Agent`** — the Protocol we implement. 16 methods, enumerated below.
+- **`acp.interfaces.Agent`** — the Protocol we implement. 15 members, enumerated below.
 - **`acp.interfaces.Client`** — the Protocol the *client* implements. We **call** these;
   we do not implement them.
 - **`acp.stdio`**, **`acp.ws.server`** — both transports we need, already written.
@@ -55,7 +55,15 @@ Note the SDK's `Agent` includes `fork_session` — absent from the original plan
 
 `request_permission`, `session_update`, `read_text_file`, `write_text_file`,
 `create_terminal`, `terminal_output`, `release_terminal`, `wait_for_terminal_exit`,
-`kill_terminal`, `create_elicitation`, `complete_elicitation`.
+`kill_terminal`, `create_elicitation`, `complete_elicitation`, plus `ext_method`,
+`ext_notification`, and `on_connect` — 14 members in total. The last three are not wire
+methods, which is why they are easy to miss, but `on_connect` is how the agent obtains the
+`Client` facade every other call goes through.
+
+**Per-method dispositions for both protocols live in
+[docs/acp-compliance-matrix.md](acp-compliance-matrix.md)** (`pyacp-4ns.2`), which is derived
+from the pinned SDK and is the source of truth for the `initialize` capability block (1.4)
+and the Phase 8 conformance suite.
 
 **The original Phase 4 had this backwards.** It read "Implement `fs/read_text_file`",
 "Implement `terminal/create`", "Implement `session/request_permission`". An ACP *agent*
@@ -71,6 +79,7 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
      CI matrix; assess the `pydantic` dependency's effect on wheel and container size.
 0.2. Derive the compliance matrix from `acp.interfaces` — record, per method, whether we
      implement it, stub it, or decline it, and which client capabilities we consume.
+     **Done:** [docs/acp-compliance-matrix.md](acp-compliance-matrix.md).
 0.3. Define module boundaries: agent runtime, session registry, turn executor, MCP backend
      adapter, transport bindings.
 0.4. Update the `acp-protocol` skill to describe the SDK-based contract rather than the

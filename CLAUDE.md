@@ -129,6 +129,10 @@ yet — `session/*` returns `-32601`.
   surface is the future; the action surface is slated for removal. Error codes are
   mapped from exception type, not built by hand. Use the **`acp-protocol` skill**
   before touching either dispatcher.
+- **MCP backend** — `mcp_stdio.py` is an MCP *client* driving the server subprocess. Its
+  stdio framing, `initialize` handshake, and capability block are protocol surface, not
+  implementation detail, and the stderr drain and 8 MiB stream limit exist to prevent
+  deadlocks. Use the **`mcp-protocol` skill** before touching it.
 - **Co-located docs** — every production module in `src/python_acp/` has a sibling
   `.md` of the same basename, and both `ARCHITECTURE.md` and `README.md` link them.
   Use the **`repo-docs-sync` skill** when adding, renaming, or deleting a module.

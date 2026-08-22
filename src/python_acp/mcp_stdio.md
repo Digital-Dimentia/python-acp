@@ -123,6 +123,8 @@ in the stdout loop would raise on it.
 
 ## Related
 
+- [MCP protocol skill](../../.claude/skills/mcp-protocol/SKILL.md) — transport MUSTs,
+  lifecycle, capability rules, and the checklist for adding an MCP call
 - [Repository architecture](../../ARCHITECTURE.md)
 - [cli.py docs](cli.md)
 - [ws_bridge.py docs](ws_bridge.md)

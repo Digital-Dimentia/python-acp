@@ -152,6 +152,8 @@ activemq-data/
 .env
 .envrc
 .venv
+# Matrix-leg venvs: `make venv PYTHON=python3.12 VENV_DIR=.venv312`.
+.venv*/
 env/
 venv/
 ENV/

@@ -156,9 +156,20 @@ block must be a JSON object naming an MCP tool:
 | `arguments` | no, defaults to `{}` | Passed to `tools/call` unchanged |
 | `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
 
-Each text block is one call, run in order. The turn streams `tool_call` and
-`tool_call_update` notifications with real `pending` → `in_progress` →
-`completed`/`failed` transitions, and returns `stopReason: "end_turn"`.
+Each text block is one call, run in order, and returns `stopReason: "end_turn"`. The turn
+streams, in this order:
+
+1. `user_message_chunk` — the prompt, echoed, so a reloaded session shows both halves;
+2. `available_commands_update` — the session's MCP tools, **including on a refusal**, so
+   a client is told what it could have called;
+3. `plan` — the whole plan up front, then re-emitted with statuses advanced after each
+   call. Only when the client advertised `clientCapabilities.plan`;
+4. `tool_call` and `tool_call_update` — real `pending` → `in_progress` →
+   `completed`/`failed` transitions carrying the tool's own output.
+
+`agent_thought_chunk` and `usage_update` are never sent: there is no LLM here, so there
+is no reasoning trace and no token count to report. The full disposition of every
+`session/update` variant is in [turns.py](src/python_acp/turns.md).
 
 A prompt that is not an invocation — prose, malformed JSON, an empty prompt — is answered
 with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convention. It is

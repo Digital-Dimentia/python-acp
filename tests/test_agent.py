@@ -754,7 +754,11 @@ async def test_the_default_executor_is_the_mcp_tool_router() -> None:
     )
 
     assert result.stop_reason == "refusal"
-    assert "tool" in client.updates[0][1].content.text
+    # An empty prompt echoes nothing, so the turn's updates are the command list (empty:
+    # this session opened no MCP servers) and the refusal that names the convention.
+    kinds = [update.session_update for _session_id, update in client.updates]
+    assert kinds == ["available_commands_update", "agent_message_chunk"]
+    assert '"tool"' in client.updates[-1][1].content.text
 
 
 # ---------------------------------------------------------------------------

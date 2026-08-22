@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import typing
 
 import pytest
 from acp.schema import (
+    SessionNotification,
     AgentMessageChunk,
     ClientCapabilities,
     ElicitationCapabilities,
@@ -26,7 +28,9 @@ from acp.schema import (
 from python_acp.errors import to_request_error
 from python_acp.sessions import SessionRegistry
 from python_acp.turns import (
+    SESSION_UPDATE_DISPOSITIONS,
     ClientGates,
+    Disposition,
     Gate,
     IdleTurnExecutor,
     TurnContext,
@@ -290,3 +294,68 @@ def test_both_implementers_expose_the_same_single_async_method() -> None:
 
     for implementer in (IdleTurnExecutor(), Double()):
         assert inspect.iscoroutinefunction(implementer.execute)
+
+
+# ---------------------------------------------------------------------------
+# The session/update variant dispositions (pyacp-hnk.4)
+# ---------------------------------------------------------------------------
+
+
+def test_every_variant_the_sdk_defines_has_a_disposition() -> None:
+    """The point of the table: nothing is silently missing.
+
+    Walks the SDK's own union, so a release that grows a variant forces a decision
+    instead of letting us inherit silence.
+    """
+    defined = {
+        member.__name__
+        for member in typing.get_args(SessionNotification.model_fields["update"].annotation)
+    }
+    recorded = {variant.name for variant in SESSION_UPDATE_DISPOSITIONS}
+
+    assert defined - recorded == set(), "SDK variant with no recorded disposition"
+    assert recorded - defined == set(), "disposition for a variant the SDK dropped"
+
+
+def test_no_variant_is_recorded_twice() -> None:
+    names = [variant.name for variant in SESSION_UPDATE_DISPOSITIONS]
+
+    assert len(names) == len(set(names))
+
+
+@pytest.mark.parametrize(
+    "variant", SESSION_UPDATE_DISPOSITIONS, ids=lambda v: getattr(v, "name", str(v))
+)
+def test_every_disposition_says_who_and_why(variant) -> None:
+    """A variant we do not send is either waiting on a named bead or structurally
+    impossible. "Not done yet" with no owner is the state this table exists to prevent."""
+    assert variant.owner
+    assert len(variant.why) > 30
+    if variant.disposition is Disposition.DEFERRED:
+        assert variant.owner.startswith("pyacp-")
+    if variant.disposition is Disposition.DECLINED:
+        assert variant.owner == "never"
+
+
+def test_the_deferred_variants_are_the_phase_5_ones() -> None:
+    """Both need a feature that does not exist: nothing offers modes or config options."""
+    deferred = {
+        v.name for v in SESSION_UPDATE_DISPOSITIONS if v.disposition is Disposition.DEFERRED
+    }
+
+    assert deferred == {"CurrentModeUpdate", "ConfigOptionUpdate"}
+
+
+def test_the_declined_variants_share_a_structural_reason() -> None:
+    """Declined is not "unfinished" — each of these has no source and never will."""
+    declined = {
+        v.name for v in SESSION_UPDATE_DISPOSITIONS if v.disposition is Disposition.DECLINED
+    }
+
+    assert declined == {
+        "AgentThoughtChunk",
+        "AgentPlanContentUpdate",
+        "AgentPlanRemovedUpdate",
+        "SessionInfoUpdate",
+        "UsageUpdate",
+    }

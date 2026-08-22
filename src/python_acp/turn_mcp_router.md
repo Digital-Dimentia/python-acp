@@ -75,6 +75,37 @@ to whatever is driving. Collapsing it into a `stopReason` would lose *which* too
 and why, so the remaining calls still run and the turn still ends normally — the turn
 completed, one tool did not.
 
+## What a turn emits, in order
+
+| Order | Variant | Always? |
+|---|---|---|
+| 1 | `user_message_chunk`, one per text block | yes — the prompt, echoed |
+| 2 | `available_commands_update` | yes, **including a turn about to be refused** |
+| 3 | `agent_message_chunk` | only on a refusal, and then the turn ends |
+| 4 | `plan`, all entries `pending` | only when `clientCapabilities.plan` is set |
+| 5 | per call: `plan` (this entry `in_progress`) → `tool_call` → `tool_call_update` ×2 → `plan` (entry `completed`/`failed`) | plan lines gated as above |
+
+**The echo is not redundant.** The transcript `session/load` replays is built from what a
+turn *emitted*, so without it a reloaded session shows the agent talking to itself.
+
+**The command list on a refusal is the point.** A refusal that also says what *could*
+have been called is actionable; one that only says "that was not an invocation" is not.
+It costs one `tools/list` per server per turn — sub-millisecond against a local
+subprocess, and caching it would need `notifications/tools/list_changed` handling to stay
+honest, which is `pyacp-eg1.1`'s neighbourhood.
+
+**The plan is honest rather than aspirational.** Every invocation is validated before the
+first tool runs, so the whole plan is known up front — this agent is in the unusual
+position of never having to guess at one. It is re-emitted with statuses advanced after
+each call, which is the protocol's own mechanism: `AgentPlanUpdate` carries the full
+entry list and there is no per-entry patch.
+
+`clientCapabilities.plan` gates the **variant**, never the `session/update` call. A
+plan-less client still gets everything else — see [turns.md](turns.md).
+
+The full disposition of all thirteen `session/update` variants — emitted, deferred, and
+declined, each with a reason — is `turns.SESSION_UPDATE_DISPOSITIONS`.
+
 ## Status transitions
 
 `pending` → `in_progress` → `completed` / `failed`, as three notifications.
@@ -82,6 +113,13 @@ completed, one tool did not.
 The first two are separate on purpose: a client renders the call the moment it is known,
 and the move to `in_progress` is what tells it the wait has begun rather than the request
 sitting behind something else.
+
+`acp.contrib.tool_calls.ToolCallTracker` generates the ids and merges each partial update
+into tracked state. **Used rather than hand-rolled**: the tracker makes "a
+`tool_call_update` for a call that never started" impossible instead of merely unlikely,
+which is the fiddly part of this variant, and unlike `acp.contrib.session_state` it
+carries no experimental marker. The `external_id` indirection is the price; the router
+keys it by position in the prompt.
 
 ## Where it gets its backends
 

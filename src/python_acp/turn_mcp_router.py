@@ -64,21 +64,24 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from acp.schema import (
-    AgentMessageChunk,
-    ContentToolCallContent,
-    TextContentBlock,
-    ToolCallProgress,
-    ToolCallStart,
+from acp.contrib.tool_calls import ToolCallTracker
+from acp.helpers import (
+    plan_entry,
+    text_block,
+    tool_content,
+    update_agent_message_text,
+    update_available_commands,
+    update_plan,
+    update_user_message_text,
 )
+from acp.schema import AvailableCommand, ContentToolCallContent, PlanEntry
 
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
-from python_acp.turns import TurnContext, TurnResult
+from python_acp.turns import Gate, TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
 
@@ -132,14 +135,78 @@ class McpToolRouterExecutor:
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         backends = self._backends.backends(context.session_id)
+        await self._echo_prompt(context, prompt)
+        await self._announce_tools(context, backends)
+
         try:
             invocations = self._parse(prompt, backends)
         except PromptConventionError as exc:
             return await self._refuse(context, exc)
 
-        for invocation in invocations:
-            await self._run(context, backends, invocation)
+        plan = _plan_for(invocations)
+        await self._emit_plan(context, plan)
+        tracker = ToolCallTracker()
+        for index, invocation in enumerate(invocations):
+            plan[index].status = "in_progress"
+            await self._emit_plan(context, plan)
+            failed = await self._run(context, tracker, backends, invocation, index)
+            plan[index].status = "failed" if failed else "completed"
+            await self._emit_plan(context, plan)
         return TurnResult.ended()
+
+    # ------------------------------------------------------------------
+    # What happened, before and around the tools
+    # ------------------------------------------------------------------
+
+    async def _echo_prompt(self, context: TurnContext, prompt: list[Any]) -> None:
+        """Send the prompt back as `user_message_chunk`s.
+
+        Not redundant: the transcript `session/load` replays is built from what this turn
+        *emitted*, so without the echo a reloaded session shows the agent talking to
+        itself. Ungated, like every `session/update`.
+        """
+        for block in prompt:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                await context.emit(update_user_message_text(text))
+
+    async def _announce_tools(self, context: TurnContext, backends: Any) -> None:
+        """List the session's MCP tools as `available_commands`.
+
+        Emitted at the start of **every** turn, including one about to be refused — that
+        is the point. A refusal that also says what *could* have been called is
+        actionable; one that only says "that was not an invocation" is not.
+
+        Costs one `tools/list` per server per turn. Against a local subprocess that is
+        sub-millisecond, and caching it would need `notifications/tools/list_changed`
+        handling to stay honest, which is `pyacp-eg1.1`'s neighbourhood.
+        """
+        commands: list[AvailableCommand] = []
+        for server, client in sorted(backends.items()):
+            for tool in await client.list_tools():
+                name = tool.get("name")
+                if not isinstance(name, str):
+                    continue
+                commands.append(
+                    AvailableCommand(
+                        name=f"{server}/{name}",
+                        description=tool.get("description") or f"MCP tool {name!r}",
+                    )
+                )
+        await context.emit(update_available_commands(commands))
+
+    async def _emit_plan(self, context: TurnContext, plan: list[PlanEntry]) -> None:
+        """Send the plan, if the client accepts plans and there is one.
+
+        `clientCapabilities.plan` gates the *variant*, never the `session/update` call —
+        see `turns.md`. So this suppresses the notification rather than skipping `emit`
+        for everything else in the turn.
+
+        The whole entry list goes every time, which is what `AgentPlanUpdate` carries;
+        the protocol has no per-entry patch.
+        """
+        if plan and context.allows(Gate.PLAN_UPDATES):
+            await context.emit(update_plan(entry.model_copy(deep=True) for entry in plan))
 
     # ------------------------------------------------------------------
     # Parsing — all of it, before any of it runs
@@ -213,57 +280,58 @@ class McpToolRouterExecutor:
     # Running
     # ------------------------------------------------------------------
 
-    async def _run(self, context: TurnContext, backends: Any, invocation: Invocation) -> None:
+    async def _run(
+        self,
+        context: TurnContext,
+        tracker: ToolCallTracker,
+        backends: Any,
+        invocation: Invocation,
+        index: int,
+    ) -> bool:
         """One tool call, announced before it starts and updated when it ends.
 
         `pending` → `in_progress` → `completed`/`failed`. The first two are separate
         notifications on purpose: a client renders the call the moment it is known, and
         the transition to `in_progress` is what tells it the wait has begun rather than
         the request being queued behind something else.
+
+        Returns whether the *tool* failed — not whether the call did. See the module
+        docstring for why those are different.
         """
-        tool_call_id = uuid.uuid4().hex
+        key = str(index)
         await context.emit(
-            ToolCallStart(
-                sessionUpdate="tool_call",
-                toolCallId=tool_call_id,
+            tracker.start(
+                key,
                 title=invocation.title,
                 kind="other",
                 status="pending",
-                rawInput=invocation.arguments,
+                raw_input=invocation.arguments,
             )
         )
-        await context.emit(
-            ToolCallProgress(
-                sessionUpdate="tool_call_update", toolCallId=tool_call_id, status="in_progress"
-            )
-        )
+        await context.emit(tracker.progress(key, status="in_progress"))
 
         client = backends[invocation.server]
         logger.debug("Calling %s for session %s", invocation.title, context.session_id)
         result = await client.call_tool(invocation.tool, invocation.arguments)
 
+        # `isError` is the MCP-sanctioned way for a tool to report its own failure on an
+        # otherwise successful call. It becomes a status, never an exception.
+        failed = bool(result["isError"])
         await context.emit(
-            ToolCallProgress(
-                sessionUpdate="tool_call_update",
-                toolCallId=tool_call_id,
-                # `isError` is the MCP-sanctioned way for a tool to report its own
-                # failure on an otherwise successful call. It becomes a status, never an
-                # exception — see the module docstring.
-                status="failed" if result["isError"] else "completed",
+            tracker.progress(
+                key,
+                status="failed" if failed else "completed",
                 content=_as_tool_content(result),
-                rawOutput=result,
+                raw_output=result,
             )
         )
+        tracker.forget(key)
+        return failed
 
     async def _refuse(self, context: TurnContext, exc: PromptConventionError) -> TurnResult:
         """Say why, then stop. A silent refusal is worse than a wrong one."""
         logger.info("Refusing prompt for session %s: %s", context.session_id, exc)
-        await context.emit(
-            AgentMessageChunk(
-                sessionUpdate="agent_message_chunk",
-                content=TextContentBlock(type="text", text=f"{exc} {CONVENTION}"),
-            )
-        )
+        await context.emit(update_agent_message_text(f"{exc} {CONVENTION}"))
         return TurnResult("refusal")
 
 
@@ -275,13 +343,20 @@ def _as_tool_content(result: dict[str, Any]) -> list[ContentToolCallContent] | N
     because a wrong `type` on the wire is harder to notice than a missing block.
     """
     blocks = [
-        ContentToolCallContent(
-            type="content", content=TextContentBlock(type="text", text=block["text"])
-        )
+        tool_content(text_block(block["text"]))
         for block in result.get("content") or []
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
     ]
     return blocks or None
+
+
+def _plan_for(invocations: list[Invocation]) -> list[PlanEntry]:
+    """The turn's plan, complete before the first tool runs.
+
+    That completeness is what makes it an honest plan rather than a guess: the router
+    validates every invocation up front, so it already knows every step it will take.
+    """
+    return [plan_entry(f"Run {invocation.title}", status="pending") for invocation in invocations]
 
 
 def _describe(block: Any) -> str:

@@ -7,22 +7,46 @@ name = "python-acp"
 version = "0.1.0"
 description = "ACP app that exposes MCP tools over WebSockets"
 readme = "README.md"
-requires-python = ">=3.11"
+# Floor is ours (3.11); the ceiling is imposed by agent-client-protocol, whose
+# own requires-python is ">=3.10,<3.15". Raising it here without the SDK raising
+# it first produces an uninstallable release, so the two move together.
+requires-python = ">=3.11,<3.15"
 # Kept in lockstep with the python-version matrix in .github/workflows/ci.yml:
 # every version listed here is one CI actually runs lint, tests, and build against.
+# The list must also stay inside the requires-python window above.
 classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
+# Version policy for runtime dependencies: exact pins. These are protocol
+# surface, not conveniences -- agent-client-protocol's generated models *are*
+# the ACP wire contract this bridge implements, and it is pre-1.0, so a minor
+# bump is allowed to be breaking. Upgrades are therefore deliberate, reviewed,
+# single-purpose commits, never a resolver's choice at install time.
+#
+# agent-client-protocol is Zed's Agent *Client* Protocol SDK
+# (github.com/agentclientprotocol/python-sdk). It is NOT PyPI `acp-sdk`, which
+# is IBM's Agent *Communication* Protocol -- a different protocol, same
+# abbreviation. Do not substitute one for the other.
+#
+# It pulls pydantic>=2.7 (and pydantic-core, typing-extensions,
+# typing-inspection, annotated-types) transitively; that is this project's
+# first non-pure-Python dependency. Its WebSocket/HTTP transport lives behind
+# the SDK's `http` extra (httpx[http2]>=0.27 + websockets>=12.0), which we do
+# not take: we already pin websockets directly and drive our own transport.
 dependencies = [
+  "agent-client-protocol==0.12.1",
   "websockets==12.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "build==1.2.2",
+  # Already arrives transitively via pytest; declared explicitly because
+  # tests/test_sdk_dependency.py imports it to parse the SDK's requires-python.
+  "packaging>=24.0",
   "pytest>=8.4.2",
   "pytest-asyncio>=1.0.0",
   "ruff==0.6.9",

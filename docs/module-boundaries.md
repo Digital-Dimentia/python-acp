@@ -94,7 +94,7 @@ pre-empt that matrix; it only places boundaries.
 | `cli.py` | Argument parsing; transport selection (`--transport stdio\|ws`); process bootstrap and shutdown | Any protocol logic; **any `print()` — see [B6](#b6-stdout-is-reserved-in-stdio-mode)** | `build_parser`, `run` | `pyacp-tzd.2` |
 | `agent.py` | The `acp.interfaces.Agent` implementation. Method-shaped translation only: validate, delegate, serialize. Holds the `Client` handle received via `on_connect`. Owns the `initialize` capability block. | Session state, turn logic, MCP calls, transport lifecycle | `PythonAcpAgent` | `pyacp-tzd.1`, `pyacp-tzd.4` |
 | `sessions.py` | `Session` records — id, cwd, `additionalDirectories`, mode id, config options, title, timestamps, the in-flight turn — and the registry that creates, looks up, forks, resumes, lists, and closes them | JSON-RPC shapes; MCP subprocesses; prompt execution; **path validation**, which is `pyacp-3rw.4`'s | `Session`, `SessionRegistry`, `UnknownSessionError`, `TurnAlreadyRunningError` | `pyacp-3rw.1` ✔, `pyacp-3rw.3` |
-| `turns.py` | The `TurnExecutor` Protocol (D3), the turn context handed to it (session handle, client handle, cancellation token), and `stopReason` semantics | Any concrete execution strategy | `TurnExecutor`, `TurnContext`, `TurnResult` | `pyacp-hnk.1`, `pyacp-hnk.5` |
+| `turns.py` | The `TurnExecutor` Protocol (D3), the turn context handed to it (session handle, client handle, `session/update` channel), and `stopReason` semantics | Any concrete execution strategy | `TurnExecutor`, `TurnContext`, `IdleTurnExecutor`, later `TurnResult` | seeded by `pyacp-3rw.2` ✔; **completed by `pyacp-hnk.1`**, `pyacp-hnk.5` |
 | `turn_mcp_router.py` | The shipped default executor: map prompt content blocks to MCP tool calls, emit `session/update` through the client handle, return a `stopReason` | Being the only possible executor; being imported by `agent.py` directly (it is selected, not hardcoded) | `McpToolRouterExecutor` | `pyacp-hnk.2`, `pyacp-hnk.4`, `pyacp-eg1.1` |
 | `mcp_registry.py` | Per-session MCP backends: spawn/reuse/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session, with lifetime bound to the session | The stdio wire protocol itself | `McpBackendRegistry` | `pyacp-3rw.3`, `pyacp-db3` |
 | `mcp_stdio.py` | **Unchanged role.** One MCP server subprocess: stdio framing, `initialize` handshake, stderr drain, request correlation, `MCPProtocolError` | Knowing about ACP, sessions, or more than one server | `MCPStdioClient`, `MCPProtocolError` | already exists; hardened by `pyacp-eg1.1`, `pyacp-z3y`, `pyacp-pb7`, `pyacp-a92`, `pyacp-k5w`, `pyacp-ua1`, `pyacp-x8l` |
@@ -258,6 +258,21 @@ what says so — but it says so by id, and what that means is `mcp_registry.py`'
 This is also what "cleanup of backends on close" in the bead's acceptance means in
 practice: the lifetime is defined and the hook is called; what gets torn down is the other
 module's business.
+
+### B6b. `turns.py` is seeded by `pyacp-3rw.2`, not by `pyacp-hnk.1` (`pyacp-3rw.2`)
+
+`pyacp-hnk.1` owns the `TurnExecutor` interface and **depends on** `pyacp-3rw.2`, which
+has to wire `session/prompt` to *something*. Rather than put a provisional seam in
+`agent.py` — where module-boundaries says only method-shaped translation lives — 3rw.2
+created `turns.py` with the smallest shape that does not foreclose hnk.1's requirements:
+one `async execute(context, prompt) -> StopReason`, plus a `TurnContext` carrying the
+session, the client handle, and `emit`.
+
+Because the call is `async` and single-method, nothing about it assumes the turn is
+synchronous, single-step, or free of client round-trips — which is hnk.1's stated
+constraint. `turns.md` names what hnk.1 must still add: `stopReason` beyond
+`end_turn`/`cancelled`, capability-gated client-method access, a cancellation token,
+content-block typing, and a `TurnResult` carrying usage.
 
 ### B7. `errors.py` exists even though it is small
 

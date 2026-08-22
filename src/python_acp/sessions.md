@@ -6,9 +6,10 @@ no MCP subprocesses, no prompt execution. [agent.py](agent.md) translates reques
 calls on `SessionRegistry`; `mcp_registry.py` (Phase 2.3) owns the backends a session's
 turns use.
 
-> **Not yet wired.** `session/*` still answers `-32601`. `pyacp-3rw.2` connects
-> `new_session` / `prompt` / `cancel` to this registry and `pyacp-3rw.3` the rest. The
-> module exists first so those beads add call sites rather than invent state.
+> **Partly wired.** `session/new`, `session/prompt`, and `session/cancel` run against this
+> registry (`pyacp-3rw.2`). `session/load`, `/list`, `/fork`, `/resume`, and `/close` still
+> answer `-32601` until `pyacp-3rw.3`, even though `fork`, `resume`, `list`, and `close`
+> are implemented here.
 
 ## Why not `acp.contrib.session_state`
 

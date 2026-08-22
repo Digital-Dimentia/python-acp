@@ -7,6 +7,7 @@ import sys
 
 from python_acp.agent import PythonAcpAgent
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.sessions import SessionRegistry
 from python_acp.transport_stdio import run_stdio
 from python_acp.transport_ws import WebSocketAgentServer
 
@@ -67,6 +68,11 @@ async def _run(args: argparse.Namespace) -> None:
     async with MCPStdioClient(args.mcp_command) as mcp_client:
         await mcp_client.initialize()
 
+        # One registry for the process, whichever transport is bound. A session must
+        # outlive the connection that created it or `session/resume` means nothing, so
+        # this is created here rather than inside a transport or an agent.
+        sessions = SessionRegistry()
+
         if args.transport == "stdio":
             # The backend is started and handshaked in both modes so --mcp-command
             # means the same thing either way and a bad one fails at startup rather
@@ -74,10 +80,12 @@ async def _run(args: argparse.Namespace) -> None:
             # per-session backend registry in Phase 2 (pyacp-3rw.3, pyacp-db3). The
             # WebSocket transport does hand it to the deprecated surface, which is the
             # only thing still calling MCP directly.
-            await run_stdio(PythonAcpAgent())
+            await run_stdio(PythonAcpAgent(sessions))
             return
 
-        server = WebSocketAgentServer(mcp_client, args.host, args.port, debug=args.debug)
+        server = WebSocketAgentServer(
+            mcp_client, args.host, args.port, debug=args.debug, sessions=sessions
+        )
         await server.start()
         # Never print(): under --transport stdio that corrupts the wire, and one
         # logging path in every mode is what keeps it from creeping back.

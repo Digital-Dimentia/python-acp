@@ -8,16 +8,26 @@ direct call would hide.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from acp import PROTOCOL_VERSION, RequestError
 from acp.agent.router import build_agent_router
-from acp.schema import ClientCapabilities, FileSystemCapabilities
+from acp.schema import (
+    AgentMessageChunk,
+    ClientCapabilities,
+    FileSystemCapabilities,
+    StopReason,
+    TextContentBlock,
+)
 
 from python_acp import __version__
 from python_acp.agent import PythonAcpAgent
 from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
 from python_acp.errors import as_request_error
 from python_acp.mcp_stdio import MCPProtocolError
+from python_acp.sessions import SessionRegistry
+from python_acp.turns import TurnContext
 
 # Every wire method the SDK routes to an agent, and whether it is gated behind
 # use_unstable_protocol. Derived from docs/acp-compliance-matrix.md.
@@ -58,13 +68,24 @@ PARAMS = {
 }
 
 
-def make_router(*, unstable: bool = True):
-    return build_agent_router(PythonAcpAgent(), use_unstable_protocol=unstable)
+def make_agent(**kwargs) -> PythonAcpAgent:
+    """A fresh agent over a fresh registry. Sharing one would let tests leak sessions.
+
+    `is None` rather than `or`: an empty `SessionRegistry` is falsy — it defines
+    `__len__` — so `registry or SessionRegistry()` would silently discard the one a test
+    passed in and hand back a different, empty one.
+    """
+    sessions = kwargs.pop("sessions", None)
+    return PythonAcpAgent(SessionRegistry() if sessions is None else sessions, **kwargs)
+
+
+def make_router(*, unstable: bool = True, agent: PythonAcpAgent | None = None):
+    return build_agent_router(agent or make_agent(), use_unstable_protocol=unstable)
 
 
 def test_every_protocol_member_is_present() -> None:
     """A missing member is a silent -32601, so assert on the class, not the wire."""
-    agent = PythonAcpAgent()
+    agent = make_agent()
     members = [
         "initialize",
         "new_session",
@@ -174,7 +195,7 @@ async def test_an_unsupported_protocol_version_is_answered_not_rejected(requeste
 
 
 async def test_initialize_stores_client_capabilities_for_phase_4() -> None:
-    agent = PythonAcpAgent()
+    agent = make_agent()
     router = build_agent_router(agent, use_unstable_protocol=True)
     assert agent.client_capabilities is None
 
@@ -201,7 +222,7 @@ async def test_client_capabilities_are_per_connection() -> None:
     Phase 4 gates `fs/*` and `terminal/*` on these. Two clients declaring different
     capabilities must not be able to unlock each other's calls.
     """
-    permissive, restricted = PythonAcpAgent(), PythonAcpAgent()
+    permissive, restricted = make_agent(), make_agent()
 
     await build_agent_router(permissive, use_unstable_protocol=True)(
         "initialize",
@@ -218,7 +239,7 @@ async def test_client_capabilities_are_per_connection() -> None:
 
 async def test_a_client_that_declares_nothing_is_not_the_same_as_no_initialize() -> None:
     """`None` means the handshake has not happened; a defaults-only object means it has."""
-    agent = PythonAcpAgent()
+    agent = make_agent()
     assert agent.client_capabilities is None
 
     await build_agent_router(agent, use_unstable_protocol=True)(
@@ -241,10 +262,12 @@ async def test_meta_keys_do_not_break_dispatch() -> None:
     assert result.protocol_version == PROTOCOL_VERSION
 
 
-@pytest.mark.parametrize(
-    "method",
-    [m for m in ROUTED_REQUESTS if m not in ("initialize", "authenticate")],
-)
+# Methods with a body. Everything else still answers -32601, and moving a name here is
+# the same commit as implementing it.
+IMPLEMENTED = {"initialize", "authenticate", "session/new", "session/prompt"}
+
+
+@pytest.mark.parametrize("method", [m for m in ROUTED_REQUESTS if m not in IMPLEMENTED])
 async def test_unbuilt_methods_answer_method_not_found(method: str) -> None:
     """Until its phase lands, a member's wire behaviour matches an absent one."""
     router = make_router()
@@ -312,7 +335,7 @@ async def test_unknown_extension_notification_is_silent() -> None:
 
 
 def test_client_handle_is_stored_on_connect() -> None:
-    agent = PythonAcpAgent()
+    agent = make_agent()
     sentinel = object()
 
     with pytest.raises(RuntimeError, match="on_connect"):
@@ -370,7 +393,7 @@ async def test_a_backend_failure_reaches_the_client_with_its_own_code() -> None:
                 {"code": -32601, "message": "Unknown tool"}
             )
 
-    router = build_agent_router(BackendFails(), use_unstable_protocol=True)
+    router = build_agent_router(BackendFails(SessionRegistry()), use_unstable_protocol=True)
 
     with pytest.raises(RequestError) as excinfo:
         await router("session/list", {}, False)
@@ -387,10 +410,301 @@ async def test_a_bad_parameter_from_below_becomes_invalid_params() -> None:
         async def list_sessions(self, cursor=None, **kwargs):  # type: ignore[override]
             raise ValueError("'cursor' must be a string")
 
-    router = build_agent_router(Picky(), use_unstable_protocol=True)
+    router = build_agent_router(Picky(SessionRegistry()), use_unstable_protocol=True)
 
     with pytest.raises(RequestError) as excinfo:
         await router("session/list", {}, False)
 
     assert excinfo.value.code == -32602
     assert excinfo.value.data == {"reason": "'cursor' must be a string"}
+
+
+# ---------------------------------------------------------------------------
+# Baseline session lifecycle (pyacp-3rw.2)
+# ---------------------------------------------------------------------------
+
+
+class RecordingExecutor:
+    """A turn that emits what it is told to, then stops on command.
+
+    `started` lets a test wait until the turn is genuinely running before cancelling it —
+    without that, a cancel can land before `attach_turn` and pass for the wrong reason.
+    """
+
+    def __init__(self, stop_reason: StopReason = "end_turn", updates: list | None = None) -> None:
+        self.stop_reason = stop_reason
+        self.updates = updates or []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.seen_prompts: list[list] = []
+        self.cancelled = False
+
+    async def execute(self, context, prompt):
+        self.seen_prompts.append(prompt)
+        for update in self.updates:
+            await context.emit(update)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return self.stop_reason
+
+
+class RecordingClient:
+    """Captures `session/update` calls the way the SDK's Client facade would receive them."""
+
+    def __init__(self) -> None:
+        self.updates: list[tuple[str, object]] = []
+
+    async def session_update(self, session_id: str, update: object, **kwargs) -> None:
+        self.updates.append((session_id, update))
+
+
+async def test_new_session_registers_a_session_and_returns_its_id() -> None:
+    registry = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=registry))
+
+    result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    assert result.session_id in registry
+    assert registry.get(result.session_id).cwd == "/work"
+    # Nothing offers modes or config options yet (pyacp-fln.2, pyacp-fln.3).
+    assert result.modes is None
+    assert result.config_options is None
+
+
+async def test_new_session_keeps_additional_directories() -> None:
+    registry = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=registry))
+
+    result = await router(
+        "session/new",
+        {"cwd": "/work", "additionalDirectories": ["/extra"], "mcpServers": []},
+        False,
+    )
+
+    assert registry.get(result.session_id).additional_directories == ("/extra",)
+
+
+async def test_new_session_accepts_a_stdio_mcp_server() -> None:
+    """stdio needs no capability, so it is the one transport that may be handed to us."""
+    router = make_router()
+
+    result = await router(
+        "session/new",
+        {
+            "cwd": "/work",
+            "mcpServers": [
+                {"name": "tools", "command": "/bin/true", "args": [], "env": []}
+            ],
+        },
+        False,
+    )
+
+    assert result.session_id
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        {"type": "http", "name": "remote", "url": "https://example.invalid", "headers": []},
+        {"type": "sse", "name": "streamy", "url": "https://example.invalid", "headers": []},
+    ],
+)
+async def test_new_session_rejects_transports_initialize_never_advertised(server: dict) -> None:
+    """mcpCapabilities.http/.sse are false; accepting one would make that a lie."""
+    router = make_router()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/new", {"cwd": "/work", "mcpServers": [server]}, False)
+
+    assert excinfo.value.code == -32602
+    assert server["name"] in excinfo.value.data["reason"]
+
+
+async def test_a_malformed_mcp_server_is_dropped_before_we_see_it() -> None:
+    """A hazard inherited from the SDK, pinned so `pyacp-db3` does not rediscover it.
+
+    `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an
+    entry that fails validation — a stdio server missing the required `env`, say — is
+    silently removed from the list. The agent cannot refuse what never arrives, and the
+    client gets a session whose server is simply absent. Refusing the *well-formed*
+    transports we do not advertise is the part we can control.
+    """
+    registry = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=registry))
+
+    result = await router(
+        "session/new",
+        {"cwd": "/work", "mcpServers": [{"name": "tools", "command": "/bin/true"}]},
+        False,
+    )
+
+    assert result.session_id in registry
+
+
+async def test_prompt_runs_the_executor_and_returns_its_stop_reason() -> None:
+    executor = RecordingExecutor(stop_reason="end_turn")
+    executor.release.set()
+    agent = make_agent(executor=executor)
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    result = await router(
+        "session/prompt",
+        {"sessionId": created.session_id, "prompt": [{"type": "text", "text": "hi"}]},
+        False,
+    )
+
+    assert result.stop_reason == "end_turn"
+    assert len(executor.seen_prompts) == 1
+
+
+async def test_a_turn_streams_session_updates_through_the_client_handle() -> None:
+    """`session/update` has no capability gate; every ACP client must accept it."""
+    chunk = AgentMessageChunk(sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text="working"))
+    executor = RecordingExecutor(updates=[chunk])
+    executor.release.set()
+    client = RecordingClient()
+    agent = make_agent(executor=executor)
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    await router(
+        "session/prompt", {"sessionId": created.session_id, "prompt": []}, False
+    )
+
+    assert client.updates == [(created.session_id, chunk)]
+
+
+async def test_the_turn_cannot_address_another_session() -> None:
+    """The context supplies the session id, so an executor cannot get it wrong."""
+    client = RecordingClient()
+    session = SessionRegistry().create("/work")
+    context = TurnContext(session, client)  # type: ignore[arg-type]
+
+    await context.emit("anything")
+
+    assert client.updates == [(session.session_id, "anything")]
+
+
+async def test_prompting_an_unknown_session_is_invalid_params() -> None:
+    router = make_router()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/prompt", {"sessionId": "nope", "prompt": []}, False)
+
+    assert excinfo.value.code == -32602
+    assert "nope" in excinfo.value.data["reason"]
+
+
+async def test_cancel_stops_an_in_flight_turn_with_stop_reason_cancelled() -> None:
+    """The whole point of running the turn as a task: a notification can reach it."""
+    executor = RecordingExecutor()
+    agent = make_agent(executor=executor)
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    await router("session/cancel", {"sessionId": created.session_id}, True)
+
+    result = await asyncio.wait_for(turn, timeout=5)
+    assert result.stop_reason == "cancelled"
+    assert executor.cancelled is True
+
+
+async def test_a_cancelled_session_is_idle_again_afterwards() -> None:
+    """`detach_turn` runs in a finally, so a cancelled session accepts the next prompt."""
+    executor = RecordingExecutor()
+    registry = SessionRegistry()
+    agent = make_agent(sessions=registry, executor=executor)
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    await router("session/cancel", {"sessionId": created.session_id}, True)
+    await asyncio.wait_for(turn, timeout=5)
+
+    assert registry.get(created.session_id).turn_is_running is False
+
+
+async def test_a_second_concurrent_prompt_is_refused() -> None:
+    """Two turns on one session would interleave session/update with nothing to sort them."""
+    executor = RecordingExecutor()
+    agent = make_agent(executor=executor)
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    first = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    try:
+        with pytest.raises(RequestError) as excinfo:
+            await router(
+                "session/prompt", {"sessionId": created.session_id, "prompt": []}, False
+            )
+        assert excinfo.value.code == -32603
+    finally:
+        await router("session/cancel", {"sessionId": created.session_id}, True)
+        await asyncio.wait_for(first, timeout=5)
+
+
+async def test_cancelling_a_session_with_no_turn_running_is_silent() -> None:
+    """A client cancelling a turn that already finished is behaving correctly."""
+    registry = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=registry))
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    assert await router("session/cancel", {"sessionId": created.session_id}, True) is None
+
+
+async def test_cancelling_an_unknown_session_is_silent() -> None:
+    """A notification has no reply channel, so there is nowhere to report the id."""
+    router = make_router()
+
+    assert await router("session/cancel", {"sessionId": "nope"}, True) is None
+
+
+async def test_an_executor_that_raises_becomes_a_mapped_error() -> None:
+    class Exploding:
+        async def execute(self, context, prompt):
+            raise ValueError("the turn disagreed")
+
+    agent = make_agent(executor=Exploding())
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data == {"reason": "the turn disagreed"}
+
+
+async def test_the_default_executor_completes_a_turn_without_doing_anything() -> None:
+    """A conforming no-op is the honest answer while pyacp-hnk.2 has not shipped."""
+    agent = make_agent()
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    result = await router(
+        "session/prompt", {"sessionId": created.session_id, "prompt": []}, False
+    )
+
+    assert result.stop_reason == "end_turn"

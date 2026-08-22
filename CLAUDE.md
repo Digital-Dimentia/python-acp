@@ -60,16 +60,47 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-All work goes through the Makefile, which manages a repo-local virtual environment
-(`.venv` if present, otherwise `venv`). Do not invoke `pip` or `pytest` directly —
-the targets bootstrap the venv first.
+All work goes through the Makefile, which manages a repo-local virtual environment.
+**`.venv` is canonical** — it is pinned, not discovered, so every developer and every
+CI leg uses the same directory. A checkout that still has the older `venv/` is renamed
+to `.venv/` on the first `make venv` (re-activate your shell afterwards). Do not invoke
+`pip` or `pytest` directly — the targets bootstrap the venv first.
 
 ```bash
-make venv     # create venv + pip install -e '.[dev]'
+make venv     # create/refresh .venv; a no-op when it is already current
+make sync     # force pip install -e '.[dev]' even when the venv looks current
 make lint     # ruff check src tests
 make test     # pytest tests
 make build    # python -m build → dist/*.whl, dist/*.tar.gz
 ```
+
+`make venv` writes `.venv/.python-acp-venv.json`, a stamp recording the interpreter the
+venv was built from and a hash of `pyproject.toml`. While that stamp matches, `lint`,
+`test`, and `build` skip `pip` entirely and need **no network**. Editing `pyproject.toml`
+invalidates it and the next `make venv` reinstalls; `make sync` forces a reinstall
+without editing anything.
+
+Knobs, all overridable on the command line:
+
+- `PYTHON` — the interpreter the venv is built *from*. Changing it rebuilds the venv
+  instead of installing into the old one, so `make venv PYTHON=python3.12
+  VENV_DIR=.venv312` produces a real 3.12 environment even though `.venv` already
+  exists; `make lint VENV_DIR=.venv312` then runs against it. That is how a CI matrix
+  leg is reproduced locally (it needs that interpreter installed on the machine).
+  If `PYTHON` resolves to an interpreter *inside* a virtual environment — an activated
+  shell, where `python3` is `.venv/bin/python3` — the bootstrap steps out to its base
+  interpreter rather than building a venv from inside the venv it is replacing.
+- `VENV_DIR` — where the environment lives. Defaults to `.venv`; `.venv*/` is gitignored.
+- `OFFLINE=1` — forbid the network. Succeeds only when the venv already satisfies
+  `pyproject.toml`, and otherwise fails with the list of unmet requirements.
+- `PIP_TRUSTED_HOST` — empty by default. Behind a TLS-intercepting proxy, pip fails with
+  `SSLCertVerificationError` because the proxy's CA is not in pip's certifi bundle. The
+  clean fix is `PIP_CERT=/path/to/proxy-ca.pem`; for a *trusted local* proxy,
+  `make venv PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org"` is the documented
+  opt-in. Nothing in the default build path relaxes TLS verification.
+
+The venv logic lives in [scripts/venv_bootstrap.py](scripts/venv_bootstrap.py), not in a
+Makefile recipe, because the rules are conditional in ways `make` expresses badly.
 
 Before handing off any code change: `make lint && make test`.
 
@@ -84,7 +115,8 @@ Packaging targets:
   container tar if a previous target left one), tarred to
   `artifacts/python-acp-release-bundle.tar.gz`.
 - `make run` — starts the bridge against `tests/fixtures/mock_mcp_server.py` on
-  `ws://127.0.0.1:8766`.
+  `ws://127.0.0.1:8766`. Both the bridge and the MCP subprocess run on
+  `$(VENV_DIR)/bin/python`, so they cannot drift onto different interpreters.
 
 CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make test && make build`
 across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version
@@ -93,7 +125,9 @@ does not mask the others. Build artifacts are uploaded from the 3.11 leg only. K
 matrix and the `classifiers` list in `pyproject.toml` in lockstep. Release publishing
 (`.github/workflows/publish-artifacts.yml`) fires on a published GitHub release and
 deliberately stays on 3.11, the floor, so the published wheel is installable across the
-whole supported range.
+whole supported range. Each leg starts from a bare runner with no venv, so it takes the
+create-and-install path; the stamp then keeps `lint`, `test`, and `build` from
+reinstalling three more times.
 
 ## Architecture Overview
 

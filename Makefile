@@ -1,23 +1,50 @@
 SHELL := /bin/bash
 
+# --- environment contract -------------------------------------------------
+# VENV_DIR is pinned, not inferred: every developer and every CI leg uses the
+# same directory unless they deliberately override it. `.venv` is canonical; a
+# pre-existing `venv/` is migrated to it on the first `make venv`.
+# PYTHON is the interpreter the venv is *built from*. If it resolves to an
+# interpreter inside a virtual environment (an activated shell), the bootstrap
+# script steps out to its base interpreter first.
 PYTHON ?= python3
-VENV_DIR ?= $(if $(wildcard .venv),.venv,$(if $(wildcard venv),venv,.venv))
+VENV_DIR ?= .venv
 PYTHON_BIN := $(VENV_DIR)/bin/python
-PIP_BIN := $(VENV_DIR)/bin/pip
+VENV_STAMP := $(VENV_DIR)/.python-acp-venv.json
+VENV_BOOTSTRAP := scripts/venv_bootstrap.py
 BUILD_DIR := dist
 ARTIFACTS_DIR := artifacts
-DEMO_MCP_COMMAND ?= python3 tests/fixtures/mock_mcp_server.py
+DEMO_MCP_COMMAND ?= $(PYTHON_BIN) tests/fixtures/mock_mcp_server.py
 HOST ?= 127.0.0.1
 PORT ?= 8766
 
-.PHONY: venv install lint test build wheel sdist container-image package release-bundle run clean
+# Opt-in escape hatch for a TLS-intercepting proxy whose CA pip does not trust.
+# Empty by default, so nothing is exported and no verification is relaxed on a
+# normal machine. Space-separated; pip reads PIP_TRUSTED_HOST natively.
+PIP_TRUSTED_HOST ?=
+ifneq ($(strip $(PIP_TRUSTED_HOST)),)
+export PIP_TRUSTED_HOST
+endif
 
-venv:
-	@if [ ! -d "$(VENV_DIR)" ]; then \
-		$(PYTHON) -m venv $(VENV_DIR); \
-	fi
-	$(PYTHON_BIN) -m pip install --upgrade pip
-	$(PYTHON_BIN) -m pip install -e '.[dev]'
+# OFFLINE=1 forbids the bootstrap from touching the network; it succeeds only if
+# the venv already satisfies pyproject.toml.
+OFFLINE ?=
+VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
+
+.PHONY: venv sync install lint test build wheel sdist container-image package release-bundle run clean
+
+venv: $(VENV_STAMP)
+
+# The stamp records the interpreter and the pyproject.toml digest the venv was
+# built for. It is why `make test` no longer runs `pip install` (and therefore
+# no longer needs the network) on every invocation.
+$(VENV_STAMP): pyproject.toml $(VENV_BOOTSTRAP)
+	$(PYTHON) $(VENV_BOOTSTRAP) --venv-dir $(VENV_DIR) --python $(PYTHON) $(VENV_FLAGS)
+
+# Force a dependency install even when the stamp is current (dependencies
+# changed outside pyproject.toml, or a half-finished install needs repairing).
+sync:
+	$(PYTHON) $(VENV_BOOTSTRAP) --venv-dir $(VENV_DIR) --python $(PYTHON) --sync
 
 install: venv
 

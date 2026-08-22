@@ -32,14 +32,30 @@
 
 ## Local setup
 
-This project prefers a repo-local virtual environment.
+This project uses a repo-local virtual environment in `.venv`, provisioned by the
+Makefile. `.venv` is the canonical directory; an older `venv/` from a previous checkout
+is renamed to it on the first `make venv`.
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+make venv                 # create .venv and install the project with its dev extras
+source .venv/bin/activate # optional; every make target uses .venv/bin/python directly
 ```
+
+`make venv` stamps the environment with the interpreter it used and a hash of
+`pyproject.toml`. While that stamp is current, `make lint`, `make test`, and `make build`
+skip `pip` and need no network. `make sync` forces a reinstall.
+
+Useful overrides:
+
+```bash
+make venv PYTHON=python3.12 VENV_DIR=.venv312   # a second env on another interpreter
+make lint VENV_DIR=.venv312                     # ...and run against it
+make venv OFFLINE=1                             # fail rather than touch the network
+make venv PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org"  # TLS-intercepting proxy
+```
+
+`PIP_TRUSTED_HOST` is empty by default; the default build path never relaxes TLS
+verification. Prefer `PIP_CERT=/path/to/proxy-ca.pem` when you have the proxy's CA.
 
 ## Run the bridge
 
@@ -97,6 +113,7 @@ Connect to `ws://127.0.0.1:8765` and send JSON messages.
 
 ```bash
 make venv
+make sync
 make install
 make lint
 make test

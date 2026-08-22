@@ -70,12 +70,18 @@ async def test_a_real_acp_client_initializes_over_the_subprocess() -> None:
 
 
 async def test_unbuilt_methods_answer_method_not_found_over_the_wire() -> None:
-    """The -32601 must survive the round trip, not just the router."""
+    """The -32601 must survive the round trip, not just the router.
+
+    `session/set_mode` is one of the two members left unbuilt (`pyacp-fln.2`,
+    `pyacp-fln.3`); swap it for another when they land.
+    """
     async with agent_process() as (conn, _proc):
         await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
 
         with pytest.raises(RequestError) as excinfo:
-            await asyncio.wait_for(conn.list_sessions(), timeout=30)
+            await asyncio.wait_for(
+                conn.set_session_mode(session_id="s1", mode_id="ask"), timeout=30
+            )
 
     assert excinfo.value.code == -32601
 
@@ -135,20 +141,39 @@ async def test_a_stale_session_id_is_invalid_params_over_the_wire() -> None:
 
 
 async def test_the_unstable_methods_are_reachable_over_stdio() -> None:
-    """run_stdio passes use_unstable_protocol=True, so these reach the agent.
+    """`run_stdio` passes `use_unstable_protocol=True`, so these reach the agent.
 
-    They answer -32601 today because Phase 2 has not filled them in — but that error
-    comes from `PythonAcpAgent`, not from the router refusing to dispatch. If the flag
-    were dropped the code would be identical and this test would still pass, which is
-    why the router-level direction test in test_agent.py exists alongside it.
+    Now that the extended lifecycle is implemented this is unambiguous: a real
+    `session/close` succeeds, which the router would never have allowed with the flag
+    off — it answers `method_not_found` there without calling the agent at all.
     """
     async with agent_process() as (conn, _proc):
         await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+        created = await asyncio.wait_for(
+            conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30
+        )
+
+        await asyncio.wait_for(conn.close_session(session_id=created.session_id), timeout=30)
 
         with pytest.raises(RequestError) as excinfo:
-            await asyncio.wait_for(conn.close_session(session_id="s1"), timeout=30)
+            await asyncio.wait_for(
+                conn.prompt(session_id=created.session_id, prompt=[]), timeout=30
+            )
 
-    assert excinfo.value.code == -32601
+    assert excinfo.value.code == -32602
+
+
+async def test_the_unstable_lifecycle_is_advertised_over_stdio() -> None:
+    """The capability block and the router must agree on one connection."""
+    async with agent_process() as (conn, _proc):
+        result = await asyncio.wait_for(
+            conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30
+        )
+
+    capabilities = result.agent_capabilities.session_capabilities
+    assert capabilities.fork is not None
+    assert capabilities.resume is not None
+    assert capabilities.close is not None
 
 
 async def test_the_agent_exits_cleanly_when_the_client_disconnects() -> None:

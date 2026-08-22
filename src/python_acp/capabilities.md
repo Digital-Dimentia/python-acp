@@ -36,19 +36,28 @@ offered", and anything else owes the suite a proof.
 
 ### Current state
 
-Everything is off. Phase 1 implements no features, so it promises none.
-
 | Path | Value | Owner |
 |---|---|---|
-| `loadSession` | `false` | `pyacp-3rw.3` |
+| `loadSession` | **`true`** | `pyacp-3rw.3` |
+| `sessionCapabilities.list` | **`{}`** | `pyacp-3rw.3` |
+| `sessionCapabilities.fork` / `.resume` / `.close` | **`{}`**, *only on an unstable connection* | `pyacp-3rw.3` |
 | `promptCapabilities.image` / `.audio` / `.embeddedContext` | `false` | `pyacp-hnk.3` |
-| `mcpCapabilities.http` / `.sse` / `.acp` | `false` | `pyacp-db3` — and these stay false |
-| `sessionCapabilities.list` | `null` | `pyacp-3rw.3` |
 | `sessionCapabilities.additionalDirectories` | `null` | `pyacp-3rw.4` |
-| `sessionCapabilities.fork` / `.resume` / `.close` | `null` | `pyacp-3rw.3`, and also need `use_unstable_protocol` |
+| `mcpCapabilities.http` / `.sse` / `.acp` | `false` | never — transports we do not drive |
 | `sessionCapabilities.delete` | `null` | never — no route, no `Agent` member in 0.12.1 |
 | `auth.logout` | `null` | never — nothing to log out of, and `logout` is unrouted |
 | `providers`, `nes`, `positionEncoding` | `null` | never — UNSTABLE and unrouted |
+
+### The unstable gate
+
+`build_agent_capabilities(unstable=...)` takes the connection's `use_unstable_protocol`,
+and the three rows marked `requires_unstable` are withheld when it is off.
+
+That is not caution. `session/close`, `/fork`, and `/resume` are registered
+`unstable=True` in the SDK's agent router, which answers `method_not_found` for them
+**without calling the agent** on a connection without the flag — so advertising them
+there would be a promise the SDK itself refuses to keep. It is per-connection because the
+flag is. Both transports pass `True`.
 
 `mcpCapabilities.*` are the three worth reading twice: they gate the **transport** of a
 client-supplied MCP server, not the ability to accept one at all. `McpServerStdio` needs
@@ -71,8 +80,8 @@ Four things, in one commit. Any three without the fourth fails the suite:
 4. Add `path -> "module:test_name"` to `CAPABILITY_EVIDENCE` in
    `tests/test_capabilities.py`.
 
-Also delete `test_phase_1_advertises_nothing`, which exists to assert the block is
-entirely off and is meant to die with the first flip.
+(`test_phase_1_advertises_nothing` existed to assert the block was entirely off and died
+with the first flip, as intended.)
 
 ## `AUTH_METHODS`
 

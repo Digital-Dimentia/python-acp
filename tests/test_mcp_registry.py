@@ -247,6 +247,53 @@ async def test_declared_env_reaches_the_subprocess_on_top_of_our_own() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Forking (pyacp-3rw.3)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_fork_reopens_the_parents_specs_as_its_own_clients() -> None:
+    """Its own subprocesses: sharing would make close on the fork kill the parent's tools."""
+    registry, connector = fake_registry()
+    await registry.open("parent", [spec("a")])
+
+    await registry.fork("parent", "child")
+
+    assert registry.get("parent", "a") is not registry.get("child", "a")
+    assert len(connector.opened) == 2
+
+
+async def test_a_fork_may_supply_its_own_servers() -> None:
+    """`session/fork` carries `mcpServers`; a fork into a different tree wants its own."""
+    registry, _ = fake_registry()
+    await registry.open("parent", [spec("a")])
+
+    await registry.fork("parent", "child", [spec("b")])
+
+    assert list(registry.backends("child")) == ["b"]
+
+
+async def test_forking_a_session_that_opened_nothing_opens_nothing() -> None:
+    registry, connector = fake_registry()
+    await registry.open("parent", [])
+
+    await registry.fork("parent", "child")
+
+    assert registry.backends("child") == {}
+    assert connector.opened == []
+
+
+async def test_closing_a_fork_leaves_its_parent_running() -> None:
+    """The reason forks do not share, stated as a test."""
+    registry, connector = fake_registry()
+    await registry.open("parent", [spec("a")])
+    await registry.fork("parent", "child")
+
+    await registry.close("child")
+
+    assert registry.get("parent", "a").stopped == 0
+
+
+# ---------------------------------------------------------------------------
 # The seam to sessions.py (decision B6a)
 # ---------------------------------------------------------------------------
 

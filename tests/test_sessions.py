@@ -479,3 +479,104 @@ async def test_close_all_empties_the_registry() -> None:
 
 async def _record(sink: list[str], session_id: str) -> None:
     sink.append(session_id)
+
+
+# ---------------------------------------------------------------------------
+# History (pyacp-3rw.3)
+# ---------------------------------------------------------------------------
+
+
+def test_history_is_append_only_and_ordered() -> None:
+    """`session/load` replays it, so order across categories is the whole value.
+
+    `acp.contrib.SessionAccumulator` *merges* updates into a snapshot, which discards
+    exactly that — which is why the registry keeps a list instead.
+    """
+    registry, clock = make_registry()
+    session = registry.create("/work")
+    clock.advance()
+
+    session.record("first")
+    session.record("second")
+
+    assert session.history == ["first", "second"]
+    assert session.updated_at == clock.now
+
+
+def test_a_fork_takes_the_transcript_up_to_the_fork_point() -> None:
+    registry, _ = make_registry()
+    parent = registry.create("/work")
+    parent.record("before")
+
+    forked = registry.fork(parent.session_id)
+    forked.record("after the fork")
+    parent.record("also after")
+
+    assert forked.history == ["before", "after the fork"]
+    assert parent.history == ["before", "also after"]
+
+
+# ---------------------------------------------------------------------------
+# Pagination (pyacp-3rw.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_page_reports_no_next_cursor() -> None:
+    registry, _ = make_registry()
+    registry.create("/a")
+
+    page, cursor = registry.page()
+
+    assert len(page) == 1
+    assert cursor is None
+
+
+def test_paging_walks_every_session_exactly_once() -> None:
+    registry, clock = make_registry()
+    for index in range(5):
+        registry.create(f"/w{index}")
+        clock.advance()
+
+    seen: list[str] = []
+    cursor: str | None = None
+    while True:
+        page, cursor = registry.page(cursor=cursor, limit=2)
+        seen.extend(session.cwd for session in page)
+        if cursor is None:
+            break
+
+    assert seen == ["/w4", "/w3", "/w2", "/w1", "/w0"]
+
+
+def test_a_cursor_survives_a_session_being_created_mid_walk() -> None:
+    """A keyset cursor, not an offset: an insertion must not skip or repeat an entry."""
+    registry, clock = make_registry()
+    for index in range(4):
+        registry.create(f"/w{index}")
+        clock.advance()
+
+    first, cursor = registry.page(limit=2)
+    registry.create("/inserted")  # sorts to the front, after the page already taken
+    second, _ = registry.page(cursor=cursor, limit=10)
+
+    assert [s.cwd for s in first] == ["/w3", "/w2"]
+    assert [s.cwd for s in second] == ["/w1", "/w0"]
+
+
+def test_paging_respects_the_cwd_filter() -> None:
+    registry, clock = make_registry()
+    registry.create("/here")
+    clock.advance()
+    registry.create("/there")
+
+    page, _ = registry.page(cwd="/here")
+
+    assert [s.cwd for s in page] == ["/here"]
+
+
+def test_a_malformed_cursor_is_refused_rather_than_restarting() -> None:
+    """Silently starting over would loop a client forever without telling it why."""
+    registry, _ = make_registry()
+
+    with pytest.raises(ValueError, match="Malformed session/list cursor"):
+        registry.page(cursor="not-a-cursor")

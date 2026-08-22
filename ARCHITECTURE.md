@@ -10,11 +10,11 @@ capability block, and one error mapping, whichever wire a client arrives on.
 
 - CLI runtime: parses startup arguments and bootstraps async services. Owns the one MCP subprocess.
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire, and nothing else.
-- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. `initialize`, `session/new`, `session/prompt`, and `session/cancel` are live; the extended lifecycle answers `-32601` until `pyacp-3rw.3`.
+- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. Every routed method is live except `session/set_mode` and `session/set_config_option` (`pyacp-fln.2`, `pyacp-fln.3`).
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
-- Session registry (`sessions.py`): the `Session` record and the registry that creates, forks, resumes, lists, and closes them. One per process, shared by every connection.
+- Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind, and the `session/update` emission channel. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.

@@ -143,41 +143,45 @@ async def test_initialize_advertises_the_manifest_and_nothing_else() -> None:
     assert result.auth_methods == []
 
 
-async def test_initialize_promises_nothing_it_cannot_do() -> None:
+async def test_initialize_promises_exactly_what_is_built() -> None:
     """Spelled out per field, so the promise is legible without running the walker."""
     router = make_router()
 
     capabilities = (await router("initialize", PARAMS["initialize"], False)).agent_capabilities
 
-    assert capabilities.load_session is False
+    # Built: the session lifecycle (pyacp-3rw.2, pyacp-3rw.3).
+    assert capabilities.load_session is True
+    assert capabilities.session_capabilities.list is not None
+    assert capabilities.session_capabilities.fork is not None
+    assert capabilities.session_capabilities.resume is not None
+    assert capabilities.session_capabilities.close is not None
+    # Not built: content-block handling is pyacp-hnk.3's.
     assert capabilities.prompt_capabilities.image is False
     assert capabilities.prompt_capabilities.audio is False
     assert capabilities.prompt_capabilities.embedded_context is False
+    # Never: transports we do not drive, and members the SDK does not route.
     assert capabilities.mcp_capabilities.http is False
     assert capabilities.mcp_capabilities.sse is False
     assert capabilities.mcp_capabilities.acp is False
-    assert capabilities.session_capabilities.list is None
     assert capabilities.session_capabilities.delete is None
-    assert capabilities.session_capabilities.additional_directories is None
-    # Advertising these three would promise session/fork, /resume, and /close, which
-    # are unstable-gated in the router and unimplemented until pyacp-3rw.3.
-    assert capabilities.session_capabilities.fork is None
-    assert capabilities.session_capabilities.resume is None
-    assert capabilities.session_capabilities.close is None
     assert capabilities.auth.logout is None
     assert capabilities.providers is None
     assert capabilities.nes is None
     assert capabilities.position_encoding is None
+    # Not built yet: pyacp-3rw.4 is what enforces the absolute-path constraint.
+    assert capabilities.session_capabilities.additional_directories is None
 
 
 async def test_the_capability_block_is_not_shared_between_connections() -> None:
     """A client that mutated its response must not be able to reach the next one's."""
     first = (await make_router()("initialize", PARAMS["initialize"], False)).agent_capabilities
-    first.load_session = True
+    first.prompt_capabilities.image = True
+    first.session_capabilities.fork.field_meta = {"mutated": True}
 
     second = (await make_router()("initialize", PARAMS["initialize"], False)).agent_capabilities
 
-    assert second.load_session is False
+    assert second.prompt_capabilities.image is False
+    assert second.session_capabilities.fork.field_meta is None
 
 
 @pytest.mark.parametrize("requested", sorted(SUPPORTED_PROTOCOL_VERSIONS))
@@ -269,7 +273,8 @@ async def test_meta_keys_do_not_break_dispatch() -> None:
 
 # Methods with a body. Everything else still answers -32601, and moving a name here is
 # the same commit as implementing it.
-IMPLEMENTED = {"initialize", "authenticate", "session/new", "session/prompt"}
+# Only the two Phase 5 methods are left unbuilt.
+IMPLEMENTED = set(ROUTED_REQUESTS) - {"session/set_mode", "session/set_config_option"}
 
 
 @pytest.mark.parametrize("method", [m for m in ROUTED_REQUESTS if m not in IMPLEMENTED])
@@ -745,3 +750,203 @@ async def test_the_default_executor_completes_a_turn_without_doing_anything() ->
     )
 
     assert result.stop_reason == "end_turn"
+
+
+# ---------------------------------------------------------------------------
+# Extended session lifecycle (pyacp-3rw.3)
+# ---------------------------------------------------------------------------
+
+
+async def _lifecycle_agent(**kwargs):
+    """An agent with a connected recording client and a session already created."""
+    agent = make_agent(**kwargs)
+    client = RecordingClient()
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    return agent, router, client, created.session_id
+
+
+async def test_load_replays_the_sessions_transcript() -> None:
+    """Evidence for `agentCapabilities.loadSession`.
+
+    The replay must go out *before* the response: a client that got the result first
+    would have no way to tell replayed updates from live ones on a running session.
+    """
+    chunk = AgentMessageChunk(
+        sessionUpdate="agent_message_chunk",
+        content=TextContentBlock(type="text", text="earlier"),
+    )
+    executor = RecordingExecutor(updates=[chunk])
+    executor.release.set()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+    await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    client.updates.clear()
+
+    result = await router(
+        "session/load", {"cwd": "/work", "sessionId": session_id, "mcpServers": []}, False
+    )
+
+    assert client.updates == [(session_id, chunk)]
+    # `session/load` and `session/close` are the two routes the SDK registers with
+    # `adapt_result=normalize_result`, so an optional response arrives as a plain dict.
+    assert result == {}
+
+
+async def test_load_on_a_session_we_no_longer_hold_is_invalid_params() -> None:
+    """`loadSession: true` claims the method works, not that a session outlives us."""
+    _agent, router, _client, _session_id = await _lifecycle_agent()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/load", {"cwd": "/work", "sessionId": "gone", "mcpServers": []}, False)
+
+    assert excinfo.value.code == -32602
+
+
+async def test_list_sessions_pages_most_recent_first() -> None:
+    """Evidence for `sessionCapabilities.list`."""
+    sessions = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=sessions))
+    for index in range(3):
+        await router("session/new", {"cwd": f"/w{index}", "mcpServers": []}, False)
+
+    result = await router("session/list", {}, False)
+
+    assert [info.cwd for info in result.sessions] == ["/w2", "/w1", "/w0"]
+    assert result.next_cursor is None
+
+
+async def test_list_sessions_can_be_filtered_by_cwd() -> None:
+    router = make_router()
+    await router("session/new", {"cwd": "/here", "mcpServers": []}, False)
+    await router("session/new", {"cwd": "/there", "mcpServers": []}, False)
+
+    result = await router("session/list", {"cwd": "/here"}, False)
+
+    assert [info.cwd for info in result.sessions] == ["/here"]
+
+
+async def test_a_cursor_this_agent_did_not_issue_is_refused() -> None:
+    """Silently restarting from page one would loop a client forever."""
+    router = make_router()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/list", {"cursor": "not-a-cursor"}, False)
+
+    assert excinfo.value.code == -32602
+
+
+async def test_fork_copies_the_session_under_a_new_id() -> None:
+    """Evidence for `sessionCapabilities.fork`."""
+    sessions = SessionRegistry()
+    _agent, router, _client, session_id = await _lifecycle_agent(sessions=sessions)
+
+    result = await router("session/fork", {"sessionId": session_id, "cwd": "/elsewhere"}, False)
+
+    assert result.session_id != session_id
+    assert sessions.get(result.session_id).cwd == "/elsewhere"
+    assert len(sessions) == 2
+
+
+async def test_a_fork_gets_its_own_mcp_subprocesses() -> None:
+    """Sharing the parent's would make close on the fork tear down the parent's tools."""
+    backends = McpBackendRegistry()
+    _agent, router, _client, session_id = await _lifecycle_agent(backends=backends)
+    await backends.close(session_id)
+    await backends.open(
+        session_id, [_stdio_spec("tools")]
+    )
+    try:
+        result = await router("session/fork", {"sessionId": session_id, "cwd": "/work"}, False)
+
+        parent = backends.backends(session_id)["tools"]
+        child = backends.backends(result.session_id)["tools"]
+        assert parent is not child
+        assert [tool["name"] for tool in await child.list_tools()] == ["echo"]
+    finally:
+        await backends.close_all()
+
+
+async def test_resume_returns_the_same_session_without_replaying() -> None:
+    """Evidence for `sessionCapabilities.resume`.
+
+    Load reconstitutes; resume reattaches. A client resuming a session it was already
+    attached to already has the transcript, so re-sending it would duplicate everything.
+    """
+    chunk = AgentMessageChunk(
+        sessionUpdate="agent_message_chunk",
+        content=TextContentBlock(type="text", text="earlier"),
+    )
+    executor = RecordingExecutor(updates=[chunk])
+    executor.release.set()
+    sessions = SessionRegistry()
+    _agent, router, client, session_id = await _lifecycle_agent(
+        sessions=sessions, executor=executor
+    )
+    await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    client.updates.clear()
+
+    await router("session/resume", {"sessionId": session_id, "cwd": "/work"}, False)
+
+    assert client.updates == []
+    assert len(sessions) == 1
+
+
+async def test_close_ends_the_session_and_releases_its_backends() -> None:
+    """Evidence for `sessionCapabilities.close`."""
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry(on_close=backends.close)
+    _agent, router, _client, session_id = await _lifecycle_agent(
+        sessions=sessions, backends=backends
+    )
+
+    await router("session/close", {"sessionId": session_id}, False)
+
+    assert len(sessions) == 0
+    assert session_id not in backends
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    assert excinfo.value.code == -32602
+
+
+async def test_closing_a_session_twice_is_an_error() -> None:
+    """A request has no notification-shaped silence available, and a double close is a bug."""
+    _agent, router, _client, session_id = await _lifecycle_agent()
+    await router("session/close", {"sessionId": session_id}, False)
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/close", {"sessionId": session_id}, False)
+
+    assert excinfo.value.code == -32602
+
+
+async def test_closing_a_session_cancels_its_running_turn() -> None:
+    executor = RecordingExecutor()
+    _agent, router, _client, session_id = await _lifecycle_agent(executor=executor)
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+
+    await router("session/close", {"sessionId": session_id}, False)
+
+    assert (await asyncio.wait_for(turn, timeout=5)).stop_reason == "cancelled"
+
+
+async def test_the_unstable_lifecycle_is_not_advertised_without_the_flag() -> None:
+    """The agent's own view of the connection, not just the router's."""
+    agent = make_agent(unstable=False)
+    router = build_agent_router(agent, use_unstable_protocol=False)
+
+    result = await router("initialize", PARAMS["initialize"], False)
+
+    assert result.agent_capabilities.session_capabilities.fork is None
+    assert result.agent_capabilities.session_capabilities.list is not None
+
+
+def _stdio_spec(name: str):
+    from acp.schema import McpServerStdio
+
+    return McpServerStdio(
+        name=name, command=sys.executable, args=[str(FIXTURE_SERVER)], env=[]
+    )

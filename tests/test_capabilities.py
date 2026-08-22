@@ -38,7 +38,13 @@ from python_acp.capabilities import (
 # Empty at Phase 1 because the manifest advertises nothing. Flipping a row means adding
 # the feature, adding its test, and adding a line here, in one commit; leaving any of the
 # three out fails `test_every_advertised_capability_names_a_feature_test`.
-CAPABILITY_EVIDENCE: dict[tuple[str, ...], str] = {}
+CAPABILITY_EVIDENCE: dict[tuple[str, ...], str] = {
+    ("load_session",): "test_agent:test_load_replays_the_sessions_transcript",
+    ("session_capabilities", "list"): "test_agent:test_list_sessions_pages_most_recent_first",
+    ("session_capabilities", "fork"): "test_agent:test_fork_copies_the_session_under_a_new_id",
+    ("session_capabilities", "resume"): "test_agent:test_resume_returns_the_same_session_without_replaying",
+    ("session_capabilities", "close"): "test_agent:test_close_ends_the_session_and_releases_its_backends",
+}
 
 
 def _leaf_paths(model: BaseModel, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
@@ -97,9 +103,30 @@ def test_the_advertised_block_is_exactly_the_manifest(capability: Capability) ->
     assert _read(build_agent_capabilities(), capability.path) == capability.advertised
 
 
-def test_phase_1_advertises_nothing() -> None:
-    """The whole block is off. Delete this test in the commit that flips a row on."""
-    assert [c.name for c in AGENT_CAPABILITY_MANIFEST if c.is_advertised] == []
+def test_the_unstable_lifecycle_is_withheld_on_a_stable_connection() -> None:
+    """Advertising them there would be a promise the SDK's own router refuses to keep.
+
+    `session/close`, `/fork`, and `/resume` are registered `unstable=True`, so with the
+    flag off the router answers `method_not_found` *without calling the agent*.
+    """
+    gated = build_agent_capabilities(unstable=False)
+
+    assert gated.session_capabilities.fork is None
+    assert gated.session_capabilities.resume is None
+    assert gated.session_capabilities.close is None
+    # Everything not behind that gate is unchanged.
+    assert gated.load_session is True
+    assert gated.session_capabilities.list is not None
+
+
+def test_only_the_lifecycle_rows_carry_the_unstable_gate() -> None:
+    gated = {c.name for c in AGENT_CAPABILITY_MANIFEST if c.requires_unstable}
+
+    assert gated == {
+        "session_capabilities.fork",
+        "session_capabilities.resume",
+        "session_capabilities.close",
+    }
 
 
 def test_every_advertised_capability_names_a_feature_test() -> None:
@@ -122,8 +149,11 @@ def test_each_call_builds_an_independent_block() -> None:
     """One connection's response must not be reachable from another's."""
     first = build_agent_capabilities()
     first.prompt_capabilities.image = True
+    first.session_capabilities.list.field_meta = {"mutated": True}
 
-    assert build_agent_capabilities().prompt_capabilities.image is False
+    second = build_agent_capabilities()
+    assert second.prompt_capabilities.image is False
+    assert second.session_capabilities.list.field_meta is None
 
 
 def test_no_auth_method_is_offered() -> None:

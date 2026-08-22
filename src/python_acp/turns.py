@@ -65,6 +65,10 @@ class TurnContext:
         cannot address someone else's session by accident.
         """
         logger.debug("session/update for %s: %s", self.session_id, type(update).__name__)
+        # Recorded before the send, not after: a notification that failed on the wire
+        # still happened as far as this session is concerned, and `session/load` replaying
+        # it is the client's chance to see what it missed.
+        self.session.record(update)
         await self.client.session_update(session_id=self.session_id, update=update)
 
 

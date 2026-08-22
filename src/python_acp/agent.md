@@ -73,6 +73,39 @@ The `stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals
 interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s. The executor
 itself is [turns.py](turns.md).
 
+## Load reconstitutes, resume reattaches
+
+Both take a session id and both return the same settings, so the difference is easy to
+collapse and expensive to get wrong. It is the **replay**:
+
+| | `session/load` | `session/resume` |
+|---|---|---|
+| Sends the transcript again | **yes**, before the response | no |
+| For a client that | lost its copy — restarted, reconnected | still has it and is picking the session back up |
+
+Replaying on resume would duplicate every message the client already rendered.
+
+The replay goes out **before** the response, which is the ordering the spec asks for: a
+client that received the result first would have no way to tell replayed updates from
+live ones on a session that is already running.
+
+**`loadSession: true` claims the method works, not that a session outlives the agent.**
+Nothing here persists across a restart, so `session/load` succeeds for a session this
+process still holds and answers `-32602` for anything else.
+
+`resume_session` receives `cwd` and `mcpServers` and applies neither. Changing either
+mid-session would silently invalidate paths and tool names the transcript already refers
+to; a client that wants different ones wants a fork.
+
+## The unstable three are advertised per connection
+
+`session/close`, `/fork`, and `/resume` are registered `unstable=True` in the SDK's
+router, which answers `method_not_found` for them **without calling the agent** when the
+connection lacks `use_unstable_protocol`. Advertising them there would be a promise the
+SDK itself refuses to keep, so `PythonAcpAgent(unstable=...)` mirrors the connection's
+flag and `capabilities.build_agent_capabilities(unstable=...)` withholds those three rows
+when it is off. Both transports pass `True`.
+
 ## `session/new` refuses what `initialize` did not advertise
 
 `mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in
@@ -111,11 +144,11 @@ member.
 | `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
 | `new_session` | `session/new` | **live** — registers a session, opens its MCP servers, rejects the transports `initialize` did not advertise | — |
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
-| `load_session` | `session/load` | `-32601` | `pyacp-3rw.3` |
-| `list_sessions` | `session/list` | `-32601` | `pyacp-3rw.3` |
-| `close_session` | `session/close` | `-32601` *(unstable-gated)* | `pyacp-3rw.3` |
-| `fork_session` | `session/fork` | `-32601` *(unstable-gated)* | `pyacp-3rw.3` |
-| `resume_session` | `session/resume` | `-32601` *(unstable-gated)* | `pyacp-3rw.3` |
+| `load_session` | `session/load` | **live** — replays the session's transcript, then returns its settings | — |
+| `list_sessions` | `session/list` | **live** — one keyset-paginated page, most recently active first | — |
+| `close_session` | `session/close` | **live** *(unstable-gated)* — cancels the turn, drops the session, releases its backends | — |
+| `fork_session` | `session/fork` | **live** *(unstable-gated)* — deep copy under a new id, with its own MCP subprocesses | — |
+| `resume_session` | `session/resume` | **live** *(unstable-gated)* — reattaches; deliberately does **not** replay | — |
 | `set_session_mode` | `session/set_mode` | `-32601` | `pyacp-fln.2` |
 | `set_config_option` | `session/set_config_option` | `-32601` | `pyacp-fln.3` |
 

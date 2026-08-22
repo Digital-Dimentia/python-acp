@@ -80,6 +80,8 @@ class PythonAcpAgent:
         sessions: SessionRegistry,
         executor: TurnExecutor | None = None,
         backends: McpBackendRegistry | None = None,
+        *,
+        unstable: bool = True,
     ) -> None:
         # `sessions` is required rather than defaulted, and that is the point. One
         # registry serves the whole process: the WebSocket transport builds an agent per
@@ -93,6 +95,10 @@ class PythonAcpAgent:
         # (`SessionRegistry(on_close=backends.close)`), which is the only place that can,
         # because it is the only place that constructs both.
         self._backends = backends if backends is not None else McpBackendRegistry()
+        # Mirrors the connection's `use_unstable_protocol`. It changes what `initialize`
+        # may advertise, because the SDK's router refuses `session/close`, `/fork`, and
+        # `/resume` outright when the flag is off — see `capabilities.py`.
+        self._unstable = unstable
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
 
@@ -190,7 +196,7 @@ class PythonAcpAgent:
 
         return InitializeResponse(
             protocolVersion=negotiated,
-            agentCapabilities=build_agent_capabilities(),
+            agentCapabilities=build_agent_capabilities(unstable=self._unstable),
             authMethods=list(AUTH_METHODS),
             agentInfo=Implementation(name=_AGENT_NAME, version=__version__),
         )
@@ -255,13 +261,41 @@ class PythonAcpAgent:
         additional_directories: list[str] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse | None:
-        raise self._not_implemented("session/load")
+        """Replay a session's transcript, then hand back its current settings.
+
+        **In-process only.** Nothing here persists across a restart, so `session/load`
+        succeeds for a session this process still holds and answers `-32602` for anything
+        else. That is what `agentCapabilities.loadSession: true` claims — that the method
+        works — not that a session outlives the agent.
+
+        The replay goes out **before** the response, which is the ordering the spec asks
+        for: a client that received the result first would have no way to tell the
+        replayed updates from live ones on a session that is already running.
+        """
+        session = self._sessions.get(session_id)
+        logger.debug("Replaying %d update(s) for session %s", len(session.history), session_id)
+        for update in session.history:
+            await self.client.session_update(session_id=session_id, update=update)
+        return LoadSessionResponse(
+            modes=session.modes,
+            configOptions=list(session.config_options) or None,
+        )
 
     @as_request_error
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        raise self._not_implemented("session/list")
+        """One page of sessions, most recently active first.
+
+        A single page is a conforming answer, so the pagination is a courtesy — but a
+        long-lived process accumulates sessions, and a client that asked for a list should
+        not receive all of them at once. A cursor this agent did not issue is `-32602`
+        rather than a silent restart from page one, which would loop a client forever.
+        """
+        page, next_cursor = self._sessions.page(cwd=cwd, cursor=cursor)
+        return ListSessionsResponse(
+            sessions=[session.to_info() for session in page], nextCursor=next_cursor
+        )
 
     @as_request_error
     async def fork_session(
@@ -272,7 +306,32 @@ class PythonAcpAgent:
         mcp_servers: list[Any] | None = None,
         **kwargs: Any,
     ) -> ForkSessionResponse:
-        raise self._not_implemented("session/fork")
+        """Copy a session under a new id, sharing nothing mutable with its parent.
+
+        Deep-copies mode and config state and opens the fork **its own** MCP
+        subprocesses — sharing the parent's would make `session/close` on the fork tear
+        down the parent's tools. `sessions.py` and `mcp_registry.py` both record that
+        decision; this method is where the two meet.
+
+        `mcpServers` is optional here and means "use the parent's recipe" when omitted,
+        which is why `mcp_registry` keeps the specs rather than only the clients.
+        """
+        stdio_servers = (
+            None if mcp_servers is None else self._reject_unsupported_mcp_servers(mcp_servers)
+        )
+        forked = self._sessions.fork(
+            session_id, cwd=cwd, additional_directories=additional_directories
+        )
+        try:
+            await self._backends.fork(session_id, forked.session_id, stdio_servers)
+        except Exception:
+            await self._sessions.close(forked.session_id)
+            raise
+        return ForkSessionResponse(
+            sessionId=forked.session_id,
+            modes=forked.modes,
+            configOptions=list(forked.config_options) or None,
+        )
 
     @as_request_error
     async def resume_session(
@@ -283,11 +342,33 @@ class PythonAcpAgent:
         mcp_servers: list[Any] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
-        raise self._not_implemented("session/resume")
+        """Continue a session this process still holds. Shares everything.
+
+        Distinct from `load_session`, and the difference is the replay: resume does
+        **not** re-send history, because the client resuming a session it was already
+        attached to has it. Load reconstitutes; resume reattaches.
+
+        `cwd` and `mcpServers` arrive on the request but are not applied. Changing either
+        mid-session would silently invalidate paths and tool names the transcript already
+        refers to; a client that wants different ones wants a fork.
+        """
+        session = self._sessions.resume(session_id)
+        return ResumeSessionResponse(
+            modes=session.modes,
+            configOptions=list(session.config_options) or None,
+        )
 
     @as_request_error
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse | None:
-        raise self._not_implemented("session/close")
+        """End a session and release everything bound to it.
+
+        The registry cancels any running turn and then fires its `on_close` hook, which
+        `cli.py` wires to the MCP backend registry. Closing an id we do not hold is
+        `-32602`: a client that closes twice has a bug worth hearing about, and a
+        notification-shaped silence is not available on a request.
+        """
+        await self._sessions.close(session_id)
+        return CloseSessionResponse()
 
     @as_request_error
     async def set_session_mode(

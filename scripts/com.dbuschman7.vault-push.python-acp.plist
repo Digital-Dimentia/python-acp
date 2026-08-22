@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hourly off-machine push for the python-acp repo.
+
+  Install:
+    cp scripts/com.dbuschman7.vault-push.python-acp.plist ~/Library/LaunchAgents/
+    mkdir -p ~/.local/state/vault-push
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dbuschman7.vault-push.python-acp.plist
+    launchctl kickstart -k gui/$(id -u)/com.dbuschman7.vault-push.python-acp
+
+  A SEPARATE plist per repo, deliberately -- vault-push.sh accepts several
+  directory arguments, but a shared job buries one repo's failure in another's log.
+
+  Minute is :27 because :07, :17, :37, and :47 are already taken by the vaults.
+
+  Runs in the gui domain, not cron: git push and `bd dolt push` both need Keychain
+  for the SSH key (origin is git@github.com:Digital-Dimentia/python-acp.git), which
+  is unreachable from a cron context. This is also why the sandboxed agent working
+  in the repo cannot push for itself.
+
+  vault-push.sh never commits and pushes `main` only, by explicit refspec. Work on
+  feature branches such as feat/* stays local until it is merged to main -- that is
+  the contract, not an oversight.
+
+  This repo has a .beads/ directory, so `bd dolt push` runs too; git push alone does
+  not carry issue data (it rides on refs/dolt/data).
+
+  Two logs, matching the convention in ~/.local/state/vault-push/:
+    python-acp.log          written by vault-push.sh itself (it tees)
+    launchd.python-acp.log  launchd's stdout AND stderr, both below
+  The second is a superset -- it also catches what the script cannot log itself,
+  such as the interpreter failing to start.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dbuschman7.vault-push.python-acp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dave/.local/bin/vault-push.sh</string>
+        <string>/Users/dave/dev/other/python-acp</string>
+    </array>
+
+    <!-- Every hour at :27. No Hour key means all hours. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>27</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/dave/.local/state/vault-push/launchd.python-acp.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/dave/.local/state/vault-push/launchd.python-acp.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dave/dev/other/python-acp</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Do not RunAtLoad: a push on every login is noise, and the :27 tick is the
+         contract. Use `launchctl kickstart -k` to test on demand. -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

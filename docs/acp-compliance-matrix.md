@@ -208,6 +208,12 @@ as this file:
 
 ## What Phase 8 tests
 
+**Built: `tests/test_conformance.py` (`pyacp-6ni.1`).** This document made executable —
+one `CONFORMANCE` table of all 15 `Agent` members with their dispositions, and three
+structural tests that walk the SDK (`Agent.__protocol_attrs__`, the router's registered
+routes, and `acp.meta.AGENT_METHODS`) so that a member with no coverage is a **failure
+rather than a silence**. Verified by deleting a row: four independent tests catch it.
+
 `pyacp-6ni.1` derives its cases from this document mechanically:
 
 - Every **implement** row: the method is routed and answers a well-formed request.

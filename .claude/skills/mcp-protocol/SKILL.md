@@ -72,9 +72,8 @@ symptom is a successful handshake followed by confusing failures later. If you t
 mismatch.
 
 **Shutdown has a prescribed order** — close stdin, wait, `SIGTERM`, wait, `SIGKILL`.
-`stop()` implements exactly that, escalating only when the server fails to exit within
-2s at each step. Do not reorder it: a conforming server exits on EOF, and starting at
-`terminate()` denies it the teardown it was written to run.
+`stop()` currently starts at `terminate()` and skips the stdin close, so servers that
+exit cleanly on EOF get signalled instead.
 
 ## Capabilities are a promise you must keep
 
@@ -188,6 +187,7 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
 
 - `initialize` ignores the server's returned `protocolVersion` — no negotiation.
 - `"capabilities": {}` is sent, so no server will ever exercise `on_server_request`.
+- `stop()` skips the stdin close before `SIGTERM`.
 - No pagination: `nextCursor` is ignored by all three `*_list` wrappers, so a paginated
   server silently returns only its first page.
 - Timeouts do not send `notifications/cancelled`.

@@ -14,6 +14,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
+- Session registry (`sessions.py`): the `Session` record and the registry that creates, forks, resumes, lists, and closes them. **Built but not yet wired** — `session/*` still answers `-32601` until `pyacp-3rw.2`.
 - MCP stdio client (`mcp_stdio.py`): drives an MCP server subprocess over newline-delimited JSON-RPC.
 
 ```mermaid
@@ -207,6 +208,7 @@ there is no legacy surface on stdio, and never was.
 - [Capability manifest module](src/python_acp/capabilities.md)
 - [Error mapping module](src/python_acp/errors.md)
 - [Deprecated WebSocket surface module](src/python_acp/legacy_ws.md)
+- [Session registry module](src/python_acp/sessions.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)

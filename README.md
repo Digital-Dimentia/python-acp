@@ -28,6 +28,7 @@
   - [capabilities.py](src/python_acp/capabilities.md)
   - [errors.py](src/python_acp/errors.md)
   - [legacy_ws.py](src/python_acp/legacy_ws.md)
+  - [sessions.py](src/python_acp/sessions.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)

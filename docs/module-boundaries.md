@@ -93,7 +93,7 @@ pre-empt that matrix; it only places boundaries.
 |---|---|---|---|---|
 | `cli.py` | Argument parsing; transport selection (`--transport stdio\|ws`); process bootstrap and shutdown | Any protocol logic; **any `print()` — see [B6](#b6-stdout-is-reserved-in-stdio-mode)** | `build_parser`, `run` | `pyacp-tzd.2` |
 | `agent.py` | The `acp.interfaces.Agent` implementation. Method-shaped translation only: validate, delegate, serialize. Holds the `Client` handle received via `on_connect`. Owns the `initialize` capability block. | Session state, turn logic, MCP calls, transport lifecycle | `PythonAcpAgent` | `pyacp-tzd.1`, `pyacp-tzd.4` |
-| `sessions.py` | `Session` records — id, cwd, `additionalDirectories`, mode id, config options, timestamps, cancellation scope — and the registry that creates, looks up, forks, resumes, lists, and closes them | JSON-RPC shapes; MCP subprocesses; prompt execution | `Session`, `SessionRegistry` | `pyacp-3rw.1`, `pyacp-3rw.3` |
+| `sessions.py` | `Session` records — id, cwd, `additionalDirectories`, mode id, config options, title, timestamps, the in-flight turn — and the registry that creates, looks up, forks, resumes, lists, and closes them | JSON-RPC shapes; MCP subprocesses; prompt execution; **path validation**, which is `pyacp-3rw.4`'s | `Session`, `SessionRegistry`, `UnknownSessionError`, `TurnAlreadyRunningError` | `pyacp-3rw.1` ✔, `pyacp-3rw.3` |
 | `turns.py` | The `TurnExecutor` Protocol (D3), the turn context handed to it (session handle, client handle, cancellation token), and `stopReason` semantics | Any concrete execution strategy | `TurnExecutor`, `TurnContext`, `TurnResult` | `pyacp-hnk.1`, `pyacp-hnk.5` |
 | `turn_mcp_router.py` | The shipped default executor: map prompt content blocks to MCP tool calls, emit `session/update` through the client handle, return a `stopReason` | Being the only possible executor; being imported by `agent.py` directly (it is selected, not hardcoded) | `McpToolRouterExecutor` | `pyacp-hnk.2`, `pyacp-hnk.4`, `pyacp-eg1.1` |
 | `mcp_registry.py` | Per-session MCP backends: spawn/reuse/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session, with lifetime bound to the session | The stdio wire protocol itself | `McpBackendRegistry` | `pyacp-3rw.3`, `pyacp-db3` |
@@ -242,6 +242,22 @@ the transport swap, to two files.
 `transport_stdio.py` that single line corrupts the JSON-RPC stream. **`cli.py` emits
 diagnostics through `logging` to stderr only, in every mode.** `pyacp-tzd.2` fixes the
 banner as part of adding the stdio entry point — it is not a drive-by.
+
+### B6a. `sessions.py` does not hold MCP backends (`pyacp-3rw.1`)
+
+`pyacp-3rw.1`'s description says the registry holds "the handle to its MCP backend(s)".
+The table above says the opposite, and the table wins: `mcp_registry.py` keys backends by
+session id, and a `sessions.py` that imported `MCPStdioClient` would make the session
+record depend on the backend transport.
+
+**The seam is a callback.** `SessionRegistry(on_close=...)` is awaited when a session is
+destroyed. The registry is the only thing that knows when a session ends, so it has to be
+what says so — but it says so by id, and what that means is `mcp_registry.py`'s to decide.
+`pyacp-3rw.3` and `pyacp-db3` wire it.
+
+This is also what "cleanup of backends on close" in the bead's acceptance means in
+practice: the lifetime is defined and the hook is called; what gets torn down is the other
+module's business.
 
 ### B7. `errors.py` exists even though it is small
 

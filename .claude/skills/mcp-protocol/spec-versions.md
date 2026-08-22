@@ -20,8 +20,11 @@ Spec index: <https://modelcontextprotocol.io/specification/>
 
 Cheap, and the transport does not move. What it buys and costs:
 
-- Send `"protocolVersion": "2025-06-18"` and **actually check the response**. Servers
-  that only speak `2024-11-05` will say so, and the current code ignores that.
+- Send `"protocolVersion": "2025-06-18"` and **widen what the response may say**.
+  `initialize` already checks the reply, so bumping `_MCP_PROTOCOL_VERSION` alone turns
+  every `2024-11-05`-only server into a hard failure. Put both revisions in
+  `_SUPPORTED_MCP_PROTOCOL_VERSIONS` so a server that counters with the older one is
+  accepted rather than hung up on.
 - `elicitation` becomes declarable. This is the one that matters here: it is the MCP
   primitive that maps onto ACP `session/request_permission`, and `on_server_request` is
   already the hook for it. Declaring `elicitation: {}` in the capability block is what

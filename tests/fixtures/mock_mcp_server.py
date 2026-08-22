@@ -1,5 +1,16 @@
 import json
+import os
 import sys
+
+# Emit a burst of stderr before serving anything. With no drain on the client
+# side this fills the OS pipe buffer and blocks the server mid-write, before it
+# can answer a single request.
+_stderr_bytes = int(os.environ.get("MOCK_MCP_STDERR_BYTES", "0"))
+if _stderr_bytes:
+    _written = 0
+    while _written < _stderr_bytes:
+        _written += sys.stderr.write("mock-mcp noise " + "x" * 240 + "\n")
+    sys.stderr.flush()
 
 
 def write(payload):

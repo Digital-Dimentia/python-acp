@@ -238,3 +238,51 @@ async def test_call_tool_raises_for_unknown_tool() -> None:
         await client.initialize()
         with pytest.raises(MCPProtocolError):
             await client.call_tool("missing", {})
+
+
+@pytest.mark.asyncio
+async def test_noisy_stderr_does_not_deadlock_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that floods stderr must still be able to answer requests.
+
+    256 KiB comfortably exceeds the OS pipe buffer, so without a drain the
+    server blocks on its own stderr write and never reads stdin.
+    """
+    monkeypatch.setenv("MOCK_MCP_STDERR_BYTES", str(256 * 1024))
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        tools = await asyncio.wait_for(client.list_tools(), timeout=10)
+
+    assert tools[0]["name"] == "echo"
+
+
+@pytest.mark.asyncio
+async def test_stderr_lines_are_logged_at_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MOCK_MCP_STDERR_BYTES", "512")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    with caplog.at_level(logging.DEBUG, logger="python_acp.mcp_stdio"):
+        async with MCPStdioClient(cmd) as client:
+            await client.initialize()
+            for _ in range(100):
+                if any("MCP server stderr" in message for message in caplog.messages):
+                    break
+                await asyncio.sleep(0.01)
+
+    assert any("mock-mcp noise" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_stop_is_idempotent_with_stderr_drain() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await client.initialize()
+    await client.stop()
+    await client.stop()
+
+    assert client._stderr_task is None

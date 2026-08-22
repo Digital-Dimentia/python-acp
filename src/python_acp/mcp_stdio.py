@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
+
+logger = logging.getLogger("python_acp.mcp_stdio")
 
 
 class MCPProtocolError(RuntimeError):
@@ -15,10 +18,14 @@ class MCPStdioClient:
     command: Sequence[str]
     request_timeout: float = 30.0
 
+    # Bare assignment (no annotation) keeps this a class attribute, not a field.
+    _STDERR_CHUNK = 4096
+
     def __post_init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._id = 0
         self._lock = asyncio.Lock()
+        self._stderr_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._proc is not None:
@@ -29,6 +36,7 @@ class MCPStdioClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
 
     async def stop(self) -> None:
         if self._proc is None:
@@ -40,7 +48,59 @@ class MCPStdioClient:
             except asyncio.TimeoutError:
                 self._proc.kill()
                 await self._proc.wait()
+        await self._stop_stderr_drain()
         self._proc = None
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        """Continuously read the server's stderr so its pipe buffer cannot fill.
+
+        stderr is piped, so nothing consuming it means the OS buffer fills and the
+        server blocks mid-write — deadlocking every request on this client. Lines
+        are logged at debug, which surfaces them under the CLI's --debug flag.
+        """
+        stream = proc.stderr
+        if stream is None:
+            return
+        buffer = b""
+        try:
+            while True:
+                chunk = await stream.read(self._STDERR_CHUNK)
+                if not chunk:
+                    break
+                buffer += chunk
+                *lines, buffer = buffer.split(b"\n")
+                for line in lines:
+                    self._log_stderr_line(line)
+                if len(buffer) > self._STDERR_CHUNK:
+                    # One line longer than a chunk; flush it rather than letting
+                    # the buffer grow without bound.
+                    self._log_stderr_line(buffer)
+                    buffer = b""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Draining is best-effort; it must never take down the client.
+            logger.debug("MCP stderr drain stopped early", exc_info=True)
+        finally:
+            if buffer:
+                self._log_stderr_line(buffer)
+
+    @staticmethod
+    def _log_stderr_line(line: bytes) -> None:
+        text = line.decode("utf-8", errors="replace").rstrip()
+        if text:
+            logger.debug("MCP server stderr: %s", text)
+
+    async def _stop_stderr_drain(self) -> None:
+        task = self._stderr_task
+        self._stderr_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def __aenter__(self) -> "MCPStdioClient":
         await self.start()

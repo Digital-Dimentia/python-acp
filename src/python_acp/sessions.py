@@ -153,6 +153,9 @@ class Session:
     history: list[Any] = field(default_factory=list)
     _clock: Clock = field(default=_utc_now, repr=False, compare=False)
     _turn: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
+    _cancel_requested: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False, compare=False
+    )
 
     # ------------------------------------------------------------------
     # Mutation — every one of these moves `updated_at`
@@ -245,6 +248,9 @@ class Session:
         """
         if self.turn_is_running:
             raise TurnAlreadyRunningError(f"Session {self.session_id} already has a running turn")
+        # A fresh event per turn. Reusing one would leave the next turn already flagged
+        # as cancelled by the previous turn's `session/cancel`.
+        self._cancel_requested = asyncio.Event()
         self._turn = turn
         self.touch()
 
@@ -263,9 +269,23 @@ class Session:
         if not self.turn_is_running:
             return False
         assert self._turn is not None
+        # Flagged **before** the task is cancelled, so an executor's `except
+        # CancelledError` handler can already tell `session/cancel` from the whole
+        # request dying. The order is the entire value of the flag.
+        self._cancel_requested.set()
         self._turn.cancel()
         self.touch()
         return True
+
+    @property
+    def cancellation(self) -> asyncio.Event:
+        """Set when `session/cancel` asks the running turn to stop.
+
+        Task cancellation is still the mechanism — this is how an executor *knows*, so it
+        can run async cleanup under `asyncio.shield` instead of racing the cancel, and
+        can distinguish a cancelled turn from a cancelled request.
+        """
+        return self._cancel_requested
 
     # ------------------------------------------------------------------
     # Views and copies

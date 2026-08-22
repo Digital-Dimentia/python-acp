@@ -69,9 +69,15 @@ unambiguous answer to "did `session/cancel` reach it".
 `TurnAlreadyRunningError` from `attach_turn` cancels the task it just created rather than
 leaving one un-awaited.
 
-The `stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals,
-interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s. The executor
-itself is [turns.py](turns.md).
+`detach_turn` runs in a `finally`, so a cancelled session accepts the next prompt, and
+the executor's `TurnResult` supplies both `stopReason` and `usage` — `PromptResponse`
+carries the second and nothing was filling it.
+
+The client's declared capabilities are handed to the `TurnContext`, because gating is
+per-connection and an executor must not have to reach back through the agent for it. The
+`stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals, interleaving
+with in-flight updates and MCP calls — is `pyacp-hnk.5`'s. The seam itself is
+[turns.py](turns.md).
 
 ## Load reconstitutes, resume reattaches
 

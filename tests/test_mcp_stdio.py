@@ -396,3 +396,85 @@ async def test_pending_requests_fail_when_the_process_stops() -> None:
 
     with pytest.raises(MCPProtocolError):
         await client.request("tools/list", {})
+
+
+@pytest.mark.asyncio
+async def test_list_wrappers_follow_next_cursor_to_the_last_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every page is accumulated, not just the first one the server sends."""
+    monkeypatch.setenv("MOCK_MCP_LIST_PAGES", "3")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        tools = await asyncio.wait_for(client.list_tools(), timeout=10)
+        prompts = await asyncio.wait_for(client.list_prompts(), timeout=10)
+        resources = await asyncio.wait_for(client.list_resources(), timeout=10)
+
+    assert [t["name"] for t in tools] == ["echo", "echo-1", "echo-2"]
+    assert [p["name"] for p in prompts] == ["greeting", "greeting-1", "greeting-2"]
+    assert [r["name"] for r in resources] == [
+        "greeting-resource",
+        "greeting-resource-1",
+        "greeting-resource-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_page_is_not_a_terminator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absent nextCursor ends the walk; a page with no items does not."""
+    monkeypatch.setenv("MOCK_MCP_LIST_PAGES", "2")
+    monkeypatch.setenv("MOCK_MCP_LIST_EMPTY_MIDDLE", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        tools = await asyncio.wait_for(client.list_tools(), timeout=10)
+
+    assert [t["name"] for t in tools] == ["echo-1"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_cursor_raises_instead_of_looping_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MOCK_MCP_LIST_STUCK", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        with pytest.raises(MCPProtocolError, match="repeated cursor"):
+            await asyncio.wait_for(client.list_tools(), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_unbounded_page_count_raises_at_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct cursors forever still terminate, via the hard page bound."""
+    monkeypatch.setenv(
+        "MOCK_MCP_LIST_PAGES", str(MCPStdioClient._MAX_LIST_PAGES + 5)
+    )
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        with pytest.raises(MCPProtocolError, match="exceeded"):
+            await asyncio.wait_for(client.list_tools(), timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_single_page_list_sends_no_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first request must omit `cursor` entirely, not send null."""
+    sent: list[dict] = []
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        original = client.request
+
+        async def spy(method: str, params: dict | None = None) -> dict:
+            sent.append({"method": method, "params": params})
+            return await original(method, params)
+
+        client.request = spy  # type: ignore[method-assign]
+        tools = await asyncio.wait_for(client.list_tools(), timeout=10)
+
+    assert [t["name"] for t in tools] == ["echo"]
+    assert sent == [{"method": "tools/list", "params": {}}]

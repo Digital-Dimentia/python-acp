@@ -761,7 +761,12 @@ async def test_mcp_error_data_is_forwarded_to_the_client() -> None:
 async def test_codeless_backend_failure_still_maps_to_internal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failure with no server code keeps the generic -32603."""
+    """A failure with no server code keeps the generic -32603 and never claims a source.
+
+    `data.source == "mcp"` means "this code is the backend's". A timeout is ours, so the
+    key must be absent — asserting that is what keeps a client able to trust the
+    discriminator, and it survives `data` gaining other keys.
+    """
     monkeypatch.setenv("MOCK_MCP_LIST_STUCK", "1")
     cmd = [sys.executable, str(FIXTURE_SERVER)]
     async with MCPStdioClient(cmd) as client:
@@ -775,7 +780,8 @@ async def test_codeless_backend_failure_still_maps_to_internal_error(
         )
 
     assert response["error"]["code"] == -32603
-    assert "data" not in response["error"]
+    assert "source" not in response["error"].get("data", {})
+    assert "stuck" in response["error"]["data"]["reason"]
 
 
 @pytest.mark.asyncio

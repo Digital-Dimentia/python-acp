@@ -7,6 +7,9 @@ from typing import Any
 import websockets
 from websockets.server import WebSocketServerProtocol
 
+from acp import RequestError
+
+from python_acp.errors import to_error_object, to_request_error
 from python_acp.mcp_stdio import MCPProtocolError, MCPStdioClient, tool_result_text
 
 logger = logging.getLogger("python_acp.ws_bridge")
@@ -61,7 +64,7 @@ class ACPWebSocketBridge:
         try:
             request = json.loads(raw_message)
             if not isinstance(request, dict):
-                return self._jsonrpc_error(None, -32600, "Invalid request")
+                return self._error(None, RequestError.invalid_request())
 
             logger.debug("WebSocket request: %s", request)
             if "action" in request:
@@ -75,50 +78,27 @@ class ACPWebSocketBridge:
             if "method" in request:
                 method = request.get("method")
                 if not isinstance(method, str) or not method:
-                    return self._jsonrpc_error(request.get("id"), -32600, "Invalid request")
+                    return self._error(request.get("id"), RequestError.invalid_request())
                 try:
                     return await self._dispatch_jsonrpc(request)
-                except ValueError as exc:
-                    logger.debug("JSON-RPC params error for request %s: %s", raw_message, exc)
-                    return self._jsonrpc_error(request.get("id"), -32602, str(exc))
-                except MCPProtocolError as exc:
-                    logger.debug("JSON-RPC backend error for request %s: %s", raw_message, exc)
-                    return self._mcp_error(request.get("id"), exc)
-            return self._jsonrpc_error(request.get("id"), -32600, "Invalid request")
+                except (ValueError, MCPProtocolError) as exc:
+                    logger.debug("JSON-RPC error for request %s: %s", raw_message, exc)
+                    return self._error(request.get("id"), to_request_error(exc))
+            return self._error(request.get("id"), RequestError.invalid_request())
         except json.JSONDecodeError:
             logger.debug("JSON parse error for request %s", raw_message)
-            return self._jsonrpc_error(None, -32700, "Parse error")
+            return self._error(None, RequestError.parse_error())
 
     @staticmethod
-    def _jsonrpc_error(
-        request_id: Any, code: int, message: str, data: Any = None
-    ) -> dict[str, Any]:
-        error: dict[str, Any] = {"code": code, "message": message}
-        if data is not None:
-            error["data"] = data
-        return {"jsonrpc": "2.0", "id": request_id, "error": error}
+    def _error(request_id: Any, error: RequestError) -> dict[str, Any]:
+        """Frame a mapped error as a JSON-RPC response.
 
-    @classmethod
-    def _mcp_error(cls, request_id: Any, exc: MCPProtocolError) -> dict[str, Any]:
-        """Translate a backend failure into a JSON-RPC error, code intact.
-
-        The MCP server's own code is forwarded rather than collapsed, so a
-        backend `-32601` (no such tool) stays distinguishable from a backend
-        `-32602` (bad arguments). Because that code is now shared between two
-        namespaces — the bridge's own errors and the backend's — `data.source`
-        marks which one produced it; without that marker a client could not
-        tell "this bridge has no such method" from "the MCP server behind it
-        has no such method".
-
-        Failures with no server-assigned code (timeout, transport death, a
-        malformed result) keep the generic `-32603`.
+        This class builds its own envelopes because it predates the SDK connection;
+        what it must not do is decide *codes*. Every one comes from `errors.py`, which
+        is also what `agent.py` and the SDK-dispatched path answer with, so the two
+        surfaces cannot drift apart on what a `-32602` means.
         """
-        if exc.code is None:
-            return cls._jsonrpc_error(request_id, -32603, str(exc))
-        data: dict[str, Any] = {"source": "mcp", "mcpCode": exc.code}
-        if exc.data is not None:
-            data["mcpData"] = exc.data
-        return cls._jsonrpc_error(request_id, exc.code, str(exc), data)
+        return {"jsonrpc": "2.0", "id": request_id, "error": to_error_object(error)}
 
     async def _dispatch_legacy_action(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -301,5 +281,4 @@ class ACPWebSocketBridge:
         if request_id is None:
             return None
 
-        error = {"code": -32601, "message": f"Unsupported method: {method}"}
-        return {"jsonrpc": "2.0", "id": request_id, "error": error}
+        return self._error(request_id, RequestError.method_not_found(str(method)))

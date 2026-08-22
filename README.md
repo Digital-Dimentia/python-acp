@@ -25,6 +25,7 @@
 - Module docs:
   - [agent.py](src/python_acp/agent.md)
   - [capabilities.py](src/python_acp/capabilities.md)
+  - [errors.py](src/python_acp/errors.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
@@ -148,8 +149,19 @@ bridge itself:
 }}
 ```
 
-Failures with no server-assigned code — a timeout, a dead backend — keep
-`-32603` and carry no `data`.
+Failures with no server-assigned code — a timeout, a dead backend — keep `-32603`.
+They carry no `data.source`; that key is present only when the code is the backend's.
+
+Errors the bridge originates put a concise sentence in `message` and the specifics in
+`data.reason`, matching what the ACP SDK produces on the stdio transport:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "error": {
+  "code": -32602,
+  "message": "Invalid params",
+  "data": {"reason": "'arguments' must be an object"}
+}}
+```
 
 **The tool failed** — the call ran and the tool reported an error. MCP reports
 this as a *successful* result carrying `isError: true`, and the bridge passes it

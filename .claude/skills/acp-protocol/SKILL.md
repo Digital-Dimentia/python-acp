@@ -20,10 +20,12 @@ Dispatch is chosen in `ACPWebSocketBridge._dispatch` by which key is present:
 
 Neither key present, or a non-dict payload → JSON-RPC `-32600`.
 
-**`action` is the legacy surface.** `docs/full-apc-plan.md` Phase 0.4 freezes a
-JSON-RPC-only surface and Phase 1.1 removes the action API. Do not add new
-capabilities to `_dispatch_legacy_action` unless the task explicitly says to keep
-parity. Add to `_dispatch_jsonrpc` first.
+**`action` is the legacy surface.** Under decision D4 in `docs/full-apc-plan.md` it
+keeps working — with a deprecation warning — through the whole migration, and is
+removed only in Phase 7 (`pyacp-sld.3`), after Phase 8 proves JSON-RPC parity. D5 is
+the terminal JSON-RPC-only state. Do not add new capabilities to
+`_dispatch_legacy_action` unless the task explicitly says to keep parity. Add to
+`_dispatch_jsonrpc` first.
 
 ## Error-code mapping
 
@@ -36,11 +38,40 @@ Preserve this mapping — tests assert on the codes:
 | Non-dict payload, missing/empty `method`, no `action` or `method` | `-32600` | returned directly |
 | Known shape, unhandled method | `-32601` | fallthrough at end of `_dispatch_jsonrpc` |
 | Bad or missing params | `-32602` | **raise `ValueError`** |
-| MCP backend failed | `-32603` | **raise `MCPProtocolError`** |
+| MCP backend failed, server sent a code | *the server's own code* | **raise `MCPProtocolError`** with `code=` |
+| MCP backend failed, no code available | `-32603` | **raise `MCPProtocolError`** with `code=None` |
 
 So inside `_dispatch_jsonrpc` you never build an error envelope for validation
 problems — you `raise ValueError("...")` and let `_dispatch` map it. Legacy handlers
 raise the same two exception types; `_dispatch` flattens both to `{"ok": false}`.
+
+### Backend codes are forwarded, not collapsed
+
+`_mcp_error` does not flatten every backend failure to `-32603`. When the MCP server
+returned a JSON-RPC error, `MCPProtocolError.from_error_response` captures its `code`
+and `data`, and the bridge re-emits **that code** so a backend `-32601` (no such tool)
+stays distinguishable from a backend `-32602` (bad arguments).
+
+That makes the code space ambiguous — the same integer can now come from the bridge or
+from the server — so a forwarded error always carries a `data` marker:
+
+```json
+{"jsonrpc": "2.0", "id": 1,
+ "error": {"code": -32601, "message": "MCP error -32601: Unknown tool",
+           "data": {"source": "mcp", "mcpCode": -32601, "mcpData": {...}}}}
+```
+
+- `data.source == "mcp"` is the discriminator. **The bridge's own errors carry no
+  `data.source`.** Never emit `source: "mcp"` for an error the bridge originated.
+- `mcpData` is present only when the server supplied `data`.
+- Failures the client raises itself — timeout, transport death, a malformed result —
+  have no server code, so they take the `-32603` path with no `data` at all.
+- A malformed `error` member (not a dict, or a non-int `code`) degrades to the codeless
+  path rather than forwarding junk; `from_error_response` enforces that.
+
+A failed **tool call** is not a protocol error at all: `tools/call` reports tool-level
+failure via `isError` on an otherwise successful result. Do not translate it into a
+JSON-RPC error.
 
 ## Notifications
 
@@ -90,15 +121,28 @@ Every one of these is required. Docs are not optional here; see the
 
 ## Known constraints in the MCP backend
 
-Before extending the backend, know what is not there yet (tracked in beads):
+Before extending the backend, know what is and is not there. The **`mcp-protocol`
+skill** is the authority on `mcp_stdio.py`; this list exists only so a wire-contract
+change does not assume a capability the backend lacks.
+
+Still missing (tracked in beads):
 
 - `MCPStdioClient` binds **one** server, fixed at process start from `--mcp-command`,
   shared by every WebSocket client. There is no per-session MCP registry.
-- `_read_response` discards any message whose `id` does not match the pending request,
-  so server-initiated requests and notifications are silently dropped.
-- `request()` holds `self._lock` across both the write and the read, fully serializing
-  every call.
-- `start()` pipes stderr but nothing drains it.
+- No `notifications/cancelled` is sent when a request times out (`pyacp-ua1`), and the
+  `initialize` request declares no client capabilities (`pyacp-pb7`).
+
+Already there — do not "fix" these, and do not design around their absence:
+
+- A background `_read_loop` demultiplexes stdout into a `_pending` map of futures, so
+  responses are matched by `id` and nothing is dropped for arriving out of order.
+  Server-initiated requests and notifications reach `_handle_server_request` /
+  `_handle_notification`.
+- `request()` holds `_write_lock` across id allocation and the write **only**. It
+  awaits the reply outside the lock, so concurrent requests pipeline rather than
+  serialize.
+- `_drain_stderr` runs for the process lifetime and is load-bearing: stderr is piped,
+  so an undrained pipe would fill and deadlock every request on the client.
 
 ## Verify
 

@@ -104,6 +104,7 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 | `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
 | `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
+| `SESSION_UPDATE_DISPOSITIONS`, `UpdateVariant`, `Disposition` | Every `session/update` variant and its fate — see above |
 | `IdleTurnExecutor` | The default — a conforming turn that does nothing |
 
 `IdleTurnExecutor` is **no longer the default** — `pyacp-hnk.2` shipped
@@ -111,6 +112,24 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 executor is passed. It remains for a caller that genuinely wants a turn to do nothing, and
 it still warns every turn, because a silent no-op turn is exactly the failure someone
 would otherwise spend an afternoon on.
+
+## The `session/update` variant set
+
+`SESSION_UPDATE_DISPOSITIONS` records all thirteen members of the SDK's
+`SessionNotification.update` union and what this project does about each. The point is
+that **nothing is silently missing**: a variant we do not send is either waiting on a
+feature (`DEFERRED`, naming the bead) or will never have a source (`DECLINED`, with the
+structural reason).
+
+| Disposition | Variants |
+|---|---|
+| **emitted** | `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, `ToolCallProgress`, `AgentPlanUpdate`, `AvailableCommandsUpdate` |
+| **deferred** | `CurrentModeUpdate` (`pyacp-fln.2`), `ConfigOptionUpdate` (`pyacp-fln.3`) — both need a feature that does not exist yet |
+| **declined** | `AgentThoughtChunk`, `UsageUpdate` — no LLM, so no reasoning trace and no tokens; `AgentPlanContentUpdate`, `AgentPlanRemovedUpdate` — the plan is complete before the first tool runs and no step is ever withdrawn; `SessionInfoUpdate` — nothing mutates a session's title or cwd after creation, by design |
+
+`tests/test_turns.py::test_every_variant_the_sdk_defines_has_a_disposition` walks the
+SDK's union, so a release that grows a variant forces a decision rather than letting us
+inherit silence. Deferred rows must name a bead; declined rows must say `never`.
 
 ## What the later Phase 3 beads own
 
@@ -120,8 +139,8 @@ would otherwise spend an afternoon on.
 - `pyacp-hnk.3` — content-block typing. `prompt` is `list[Any]` here, and the
   `promptCapabilities` literals stay `false` in [capabilities.py](capabilities.md) until
   that bead enforces the gates.
-- `pyacp-hnk.4` — the full `session/update` variant set, including `PLAN_UPDATES`
-  suppression.
+- `pyacp-hnk.4` ✔ — the full `session/update` variant set, including `PLAN_UPDATES`
+  suppression, and the disposition table above.
 - `pyacp-hnk.5` — the rest of the `stopReason` contract.
 
 ## Tests

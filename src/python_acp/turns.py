@@ -84,6 +84,129 @@ from python_acp.sessions import Session
 logger = logging.getLogger(__name__)
 
 
+class Disposition(str, Enum):
+    """What this project does about one `session/update` variant."""
+
+    #: Something produces it today.
+    EMITTED = "emitted"
+    #: Nothing produces it yet, and a named bead will.
+    DEFERRED = "deferred"
+    #: Nothing will produce it, and the reason is structural rather than unfinished.
+    DECLINED = "declined"
+
+
+@dataclass(frozen=True)
+class UpdateVariant:
+    """One `SessionNotification.update` member and what we do about it."""
+
+    name: str
+    disposition: Disposition
+    owner: str
+    why: str
+
+
+#: Every variant the SDK's `SessionNotification.update` union defines, and its fate.
+#:
+#: **The point is that nothing is silently missing.** A variant we do not send is either
+#: waiting on a feature (`DEFERRED`, with the bead that brings it) or will never have a
+#: source (`DECLINED`, with the structural reason). `tests/test_turns.py` walks the SDK's
+#: union and fails on any member this table does not name, so an SDK that grows a variant
+#: forces a decision instead of inheriting silence.
+SESSION_UPDATE_DISPOSITIONS: tuple[UpdateVariant, ...] = (
+    UpdateVariant(
+        "UserMessageChunk",
+        Disposition.EMITTED,
+        "pyacp-hnk.4",
+        "The prompt is echoed back at the start of a turn, so `session/load` replays a "
+        "transcript with both halves of the conversation rather than only the agent's.",
+    ),
+    UpdateVariant(
+        "AgentMessageChunk",
+        Disposition.EMITTED,
+        "pyacp-hnk.2",
+        "Carries a refusal's explanation. It is the only prose this agent produces.",
+    ),
+    UpdateVariant(
+        "AgentThoughtChunk",
+        Disposition.DECLINED,
+        "never",
+        "A thought is a model's reasoning trace. Decision D1 puts no LLM in this runtime, "
+        "so there is nothing to narrate and inventing one would be a fiction.",
+    ),
+    UpdateVariant(
+        "ToolCallStart",
+        Disposition.EMITTED,
+        "pyacp-hnk.2",
+        "One per invocation, at `pending`, before the call is made.",
+    ),
+    UpdateVariant(
+        "ToolCallProgress",
+        Disposition.EMITTED,
+        "pyacp-hnk.2",
+        "`in_progress` when the call starts, then `completed` or `failed` with the tool's "
+        "own output.",
+    ),
+    UpdateVariant(
+        "AgentPlanUpdate",
+        Disposition.EMITTED,
+        "pyacp-hnk.4",
+        "The router validates every invocation before running any, so the whole plan is "
+        "known up front — an honest plan rather than a guess. Re-emitted after each call "
+        "with statuses advanced, which is the protocol's own mechanism: the variant "
+        "carries the full entry list. Gated on `clientCapabilities.plan`.",
+    ),
+    UpdateVariant(
+        "AgentPlanContentUpdate",
+        Disposition.DECLINED,
+        "never",
+        "Streams content into a plan entry as it is produced. This plan is complete "
+        "before the first tool runs, so there is never partial entry content to stream.",
+    ),
+    UpdateVariant(
+        "AgentPlanRemovedUpdate",
+        Disposition.DECLINED,
+        "never",
+        "Withdraws a plan entry. Entries here are the invocations the client named; a "
+        "turn that cannot run one refuses the whole prompt rather than dropping a step.",
+    ),
+    UpdateVariant(
+        "AvailableCommandsUpdate",
+        Disposition.EMITTED,
+        "pyacp-hnk.4",
+        "The session's MCP tools, listed at the start of every turn. It is what makes a "
+        "refusal actionable — the client is told what it could have called.",
+    ),
+    UpdateVariant(
+        "CurrentModeUpdate",
+        Disposition.DEFERRED,
+        "pyacp-fln.2",
+        "`session/set_mode` must emit it, and nothing offers modes yet: `NewSessionResponse."
+        "modes` is None until Phase 5.",
+    ),
+    UpdateVariant(
+        "ConfigOptionUpdate",
+        Disposition.DEFERRED,
+        "pyacp-fln.3",
+        "`session/set_config_option` must emit it, and nothing offers config options yet.",
+    ),
+    UpdateVariant(
+        "SessionInfoUpdate",
+        Disposition.DECLINED,
+        "never",
+        "Announces a change to a session's title, cwd, or timestamps. Nothing mutates "
+        "those after creation *by design* — `session/resume` deliberately ignores the cwd "
+        "it is handed — so there is no change to announce.",
+    ),
+    UpdateVariant(
+        "UsageUpdate",
+        Disposition.DECLINED,
+        "never",
+        "Token usage. Same root as AgentThoughtChunk: no LLM, no tokens. `TurnResult.usage` "
+        "stays None for the same reason, and flipping either would mean inventing numbers.",
+    ),
+)
+
+
 class Gate(str, Enum):
     """A client capability, named after what it unlocks rather than where it lives.
 

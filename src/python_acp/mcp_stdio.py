@@ -483,25 +483,33 @@ class MCPStdioClient:
             elif self.on_server_request is not None:
                 result = await self.on_server_request(method, params)
             else:
-                await self._respond_error(request_id, -32601, f"Unsupported method: {method}")
+                await self._respond_error(
+                    request_id, -32601, f"Unsupported method: {method}", method
+                )
                 return
         except Exception as exc:
             logger.debug("MCP server request handler failed for %s", method, exc_info=True)
-            await self._respond_error(request_id, -32603, str(exc))
+            await self._respond_error(request_id, -32603, str(exc), method)
             return
 
         await self._respond(
             {"jsonrpc": "2.0", "id": request_id, "result": result}, method=method
         )
 
-    async def _respond_error(self, request_id: Any, code: int, message: str) -> None:
+    async def _respond_error(self, request_id: Any, code: int, message: str, method: str) -> None:
+        """Reply to a server request with a JSON-RPC error.
+
+        `method` is the method being answered, not the failure text. It exists
+        only for `_respond`'s log line: when the reply itself cannot be written,
+        the useful fact is which request went unanswered.
+        """
         await self._respond(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {"code": code, "message": message},
             },
-            method=message,
+            method=method,
         )
 
     async def _respond(self, payload: dict[str, Any], method: str) -> None:

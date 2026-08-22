@@ -456,6 +456,21 @@ async def test_failing_server_request_handler_still_replies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_undeliverable_error_reply_logs_the_method_not_the_failure_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one thing worth knowing there is which request went unanswered."""
+    client = MCPStdioClient([sys.executable, str(FIXTURE_SERVER)])
+
+    # No start(), so the write fails and _respond takes its except branch.
+    with caplog.at_level(logging.DEBUG, logger="python_acp.mcp_stdio"):
+        await client._respond_error(7, -32603, "handler exploded", "sampling/createMessage")
+
+    logged = [m for m in caplog.messages if "Could not reply" in m]
+    assert logged == ["Could not reply to MCP server request sampling/createMessage"]
+
+
+@pytest.mark.asyncio
 async def test_server_notifications_reach_the_handler() -> None:
     received: list[tuple[str, dict]] = []
 

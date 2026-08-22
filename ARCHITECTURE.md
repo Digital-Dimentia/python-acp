@@ -26,10 +26,17 @@ flowchart LR
 
 ## Target Subsystems (ACP v1)
 
-The runtime is being rebuilt on the `agent-client-protocol` SDK. The boundaries below are
-decided but **not yet built** — see [docs/module-boundaries.md](docs/module-boundaries.md)
-for what each module owns, why `ws_bridge.py` splits, and which parts still await
-verification against the pinned SDK.
+The runtime is being rebuilt on the `agent-client-protocol` SDK. See
+[docs/module-boundaries.md](docs/module-boundaries.md) for what each module owns, why
+`ws_bridge.py` splits, and which parts still await verification against the pinned SDK,
+and [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md) for the per-method
+dispositions.
+
+**`agent.py` now exists** (`PythonAcpAgent`, all 15 `acp.interfaces.Agent` members), but
+**nothing binds it to a wire yet** — the transport modules are `pyacp-tzd.2` and
+`pyacp-tzd.3`. Until they land, the live request path is still the one under
+[Request Lifecycle](#request-lifecycle) below. Everything else in this section is
+decided and not yet built.
 
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire. Nothing else.
 - Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation; translates and delegates.
@@ -122,6 +129,7 @@ which beads redraw it.
 
 ## Module Documentation
 
+- [ACP agent module](src/python_acp/agent.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [WebSocket bridge module](src/python_acp/ws_bridge.md)

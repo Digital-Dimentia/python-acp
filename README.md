@@ -26,6 +26,7 @@
   - [agent.py](src/python_acp/agent.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
+  - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [ws_bridge.py](src/python_acp/ws_bridge.md)
 - Design docs (target state, not yet built):
   - [ACP v1 plan](docs/full-apc-plan.md)
@@ -64,6 +65,23 @@ verification. Prefer `PIP_CERT=/path/to/proxy-ca.pem` when you have the proxy's 
 ```bash
 python-acp --mcp-command python /path/to/your_mcp_server.py --host 127.0.0.1 --port 8765
 ```
+
+### As an ACP agent over stdio
+
+`--transport stdio` speaks ACP on the process's own stdin and stdout, which is how an
+editor spawns an agent. It is not run by hand — the client launches it:
+
+```bash
+python-acp --transport stdio --mcp-command python /path/to/your_mcp_server.py
+```
+
+`--host` and `--port` are ignored in this mode, **stdout carries the JSON-RPC wire and
+nothing else**, and all diagnostics go to stderr. The agent currently answers
+`initialize` and refuses `authenticate`; session and prompt methods return `-32601`
+until Phases 2 and 3 land. See [agent.py](src/python_acp/agent.md) for the per-method
+state and [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
+
+`ws` remains the default transport while it still carries the legacy action surface.
 
 ## WebSocket actions
 

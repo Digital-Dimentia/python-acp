@@ -32,11 +32,33 @@ The runtime is being rebuilt on the `agent-client-protocol` SDK. See
 and [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md) for the per-method
 dispositions.
 
-**`agent.py` now exists** (`PythonAcpAgent`, all 15 `acp.interfaces.Agent` members), but
-**nothing binds it to a wire yet** — the transport modules are `pyacp-tzd.2` and
-`pyacp-tzd.3`. Until they land, the live request path is still the one under
-[Request Lifecycle](#request-lifecycle) below. Everything else in this section is
-decided and not yet built.
+**Two pieces are built.** `agent.py` (`PythonAcpAgent`, all 15 `acp.interfaces.Agent`
+members) and `transport_stdio.py`, which binds it to stdin/stdout under
+`--transport stdio`. An ACP client can spawn the process and complete `initialize`
+today; session and prompt methods answer `-32601` until Phases 2 and 3 fill them in, and
+the agent cannot reach the MCP backend yet — that is the Phase 2 registry.
+
+The WebSocket path is **not** rebound yet (`pyacp-tzd.3`), so under the default
+`--transport ws` the live request path is still the one under
+[Request Lifecycle](#request-lifecycle) below. Everything else in this section is decided
+and not yet built.
+
+```mermaid
+sequenceDiagram
+    participant E as ACP client (editor)
+    participant T as transport_stdio.py
+    participant SDK as acp.run_agent + router
+    participant A as agent.py
+
+    E->>T: spawns the process; JSON-RPC over stdin
+    T->>SDK: run_agent(agent, use_unstable_protocol=True)
+    SDK->>A: initialize(protocol_version, client_capabilities)
+    A-->>SDK: InitializeResponse
+    SDK-->>E: result on stdout
+    SDK->>A: session/new
+    A-->>SDK: RequestError(-32601) until Phase 2
+    SDK-->>E: error on stdout
+```
 
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire. Nothing else.
 - Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation; translates and delegates.
@@ -132,6 +154,7 @@ which beads redraw it.
 - [ACP agent module](src/python_acp/agent.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
+- [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [WebSocket bridge module](src/python_acp/ws_bridge.md)
 
 ## Design Documents

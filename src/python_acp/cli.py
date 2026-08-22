@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import sys
 
+from python_acp.agent import PythonAcpAgent
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.transport_stdio import run_stdio
 from python_acp.ws_bridge import ACPWebSocketBridge
 
-
-import logging
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Expose MCP tools over WebSockets without an LLM.",
+        description="Expose MCP tools over ACP without an LLM.",
     )
     parser.add_argument(
         "--mcp-command",
@@ -20,8 +23,22 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Command used to start the MCP server (stdio transport).",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="WebSocket host to bind.")
-    parser.add_argument("--port", type=int, default=8765, help="WebSocket port to bind.")
+    parser.add_argument(
+        "--transport",
+        choices=("ws", "stdio"),
+        default="ws",
+        help=(
+            "Client-facing transport. 'stdio' speaks ACP on this process's stdin/stdout, "
+            "which is how editors spawn an agent. 'ws' is the existing local-automation "
+            "surface and remains the default while it still carries the legacy actions."
+        ),
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="WebSocket host to bind (--transport ws only)."
+    )
+    parser.add_argument(
+        "--port", type=int, default=8765, help="WebSocket port to bind (--transport ws only)."
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -30,13 +47,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_logging(debug: bool) -> None:
+    """Send every diagnostic to stderr, in every transport mode.
+
+    `basicConfig` already defaults to stderr, but the default is not the point: under
+    `--transport stdio` stdout is the protocol wire, so the stream is named explicitly
+    here rather than relied upon.
+    """
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(message)s",
+        stream=sys.stderr,
+    )
+
+
 async def _run(args: argparse.Namespace) -> None:
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(message)s")
+    configure_logging(args.debug)
+
     async with MCPStdioClient(args.mcp_command) as mcp_client:
         await mcp_client.initialize()
+
+        if args.transport == "stdio":
+            # The backend is started and handshaked in both modes so --mcp-command
+            # means the same thing either way and a bad one fails at startup rather
+            # than mid-session. The agent cannot reach it yet — that wiring is the
+            # per-session backend registry in Phase 2 (pyacp-3rw.3, pyacp-db3).
+            await run_stdio(PythonAcpAgent())
+            return
+
         bridge = ACPWebSocketBridge(mcp_client, args.host, args.port, debug=args.debug)
         await bridge.start()
-        print(f"python-acp listening on ws://{args.host}:{args.port}")
+        # Never print(): under --transport stdio that corrupts the wire, and one
+        # logging path in every mode is what keeps it from creeping back.
+        logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
         await bridge.serve_forever()
 
 

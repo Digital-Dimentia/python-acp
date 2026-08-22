@@ -286,3 +286,113 @@ async def test_stop_is_idempotent_with_stderr_drain() -> None:
     await client.stop()
 
     assert client._stderr_task is None
+
+
+@pytest.mark.asyncio
+async def test_server_request_is_answered_even_without_a_handler() -> None:
+    """An unanswered server request strands the server; reply -32601 instead."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "roots/list"}), timeout=10
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert reply["id"] == "srv-1"
+    assert reply["error"]["code"] == -32601
+    assert "roots/list" in reply["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_server_ping_is_answered_without_a_handler() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "ping"}), timeout=10
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert reply["id"] == "srv-1"
+    assert reply["result"] == {}
+
+
+@pytest.mark.asyncio
+async def test_on_server_request_handler_supplies_the_result() -> None:
+    seen: list[str] = []
+
+    async def handler(method: str, params: dict) -> dict:
+        seen.append(method)
+        return {"roots": [{"uri": "file:///tmp", "name": "tmp"}]}
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_server_request=handler) as client:
+        await client.initialize()
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "roots/list"}), timeout=10
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert seen == ["roots/list"]
+    assert reply["result"]["roots"][0]["name"] == "tmp"
+
+
+@pytest.mark.asyncio
+async def test_failing_server_request_handler_still_replies() -> None:
+    async def handler(method: str, params: dict) -> dict:
+        raise RuntimeError("handler exploded")
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_server_request=handler) as client:
+        await client.initialize()
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "roots/list"}), timeout=10
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert reply["error"]["code"] == -32603
+    assert "handler exploded" in reply["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_server_notifications_reach_the_handler() -> None:
+    received: list[tuple[str, dict]] = []
+
+    async def on_notification(method: str, params: dict) -> None:
+        received.append((method, params))
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_notification=on_notification) as client:
+        await client.initialize()
+        await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "ping"}), timeout=10
+        )
+
+    assert ("notifications/message", {"level": "info", "data": "provoked"}) in received
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_are_all_answered() -> None:
+    """The write lock no longer spans the read, so requests pipeline."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        results = await asyncio.wait_for(
+            asyncio.gather(*(client.call_tool("echo", {"text": str(n)}) for n in range(10))),
+            timeout=10,
+        )
+
+    assert [r["content"][0]["text"] for r in results] == [str(n) for n in range(10)]
+
+
+@pytest.mark.asyncio
+async def test_pending_requests_fail_when_the_process_stops() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await client.initialize()
+    await client.stop()
+
+    with pytest.raises(MCPProtocolError):
+        await client.request("tools/list", {})

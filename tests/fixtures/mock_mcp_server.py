@@ -18,7 +18,11 @@ def write(payload):
     sys.stdout.flush()
 
 
-for line in sys.stdin:
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+
     try:
         req = json.loads(line)
     except json.JSONDecodeError:
@@ -58,6 +62,31 @@ for line in sys.stdin:
                             },
                         }
                     ]
+                },
+            }
+        )
+    elif method == "tools/call" and req.get("params", {}).get("name") == "provoke":
+        args = req.get("params", {}).get("arguments", {}) or {}
+        server_method = args.get("server_method", "roots/list")
+        # A notification the client should route to its notification handler.
+        write(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {"level": "info", "data": "provoked"},
+            }
+        )
+        # A server-initiated request. The client must answer it; we echo whatever
+        # it sends back so the test can assert on the reply it actually produced.
+        write({"jsonrpc": "2.0", "id": "srv-1", "method": server_method, "params": {}})
+        reply = sys.stdin.readline()
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": reply.strip()}],
+                    "isError": False,
                 },
             }
         )

@@ -171,6 +171,12 @@ streams, in this order:
 is no reasoning trace and no token count to report. The full disposition of every
 `session/update` variant is in [turns.py](src/python_acp/turns.md).
 
+**Only text blocks are read.** An `image`, `audio`, `resource`, or `resource_link` block
+is declined by name, because each is context for a model to reason over and there is no
+model here. `initialize` says so: `promptCapabilities` reports `image`, `audio`, and
+`embeddedContext` all `false`, and those literals are *derived* from what the turn
+executor declares it reads, so the advertisement cannot drift from the behaviour.
+
 A prompt that is not an invocation — prose, malformed JSON, an empty prompt — is answered
 with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convention. It is
 not an error, and **nothing runs**: the whole prompt is parsed before the first tool, so a

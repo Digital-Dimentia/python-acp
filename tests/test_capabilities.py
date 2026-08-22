@@ -103,7 +103,7 @@ def test_every_capability_names_an_owner_and_a_reason(capability: Capability) ->
 
 @pytest.mark.parametrize("capability", AGENT_CAPABILITY_MANIFEST, ids=_by_name)
 def test_the_advertised_block_is_exactly_the_manifest(capability: Capability) -> None:
-    assert _read(build_agent_capabilities(), capability.path) == capability.advertised
+    assert _read(build_agent_capabilities(), capability.path) == capability.value_for()
 
 
 def test_the_unstable_lifecycle_is_withheld_on_a_stable_connection() -> None:
@@ -173,3 +173,64 @@ def test_a_supported_version_is_echoed_back() -> None:
 def test_an_unsupported_version_answers_with_our_newest(requested: int) -> None:
     """Negotiation is not a rejection point; the client decides whether we are usable."""
     assert negotiate_protocol_version(requested) == max(SUPPORTED_PROTOCOL_VERSIONS)
+
+
+# ---------------------------------------------------------------------------
+# The prompt capabilities are derived, not written (pyacp-hnk.3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_prompt_literals_track_the_executor_that_would_read_the_blocks() -> None:
+    """What a content block *means* depends on the executor, which D3 makes swappable.
+
+    A literal fixed in the manifest would be a promise about a component the manifest
+    cannot see, so these three are derived from `TurnExecutor.supported_prompt_blocks`.
+    """
+    none = build_agent_capabilities().prompt_capabilities
+    assert (none.image, none.audio, none.embedded_context) == (False, False, False)
+
+    all_blocks = build_agent_capabilities(
+        prompt_blocks=frozenset({"image", "audio", "resource"})
+    ).prompt_capabilities
+    assert (all_blocks.image, all_blocks.audio, all_blocks.embedded_context) == (True, True, True)
+
+
+@pytest.mark.parametrize(
+    ("block", "field"),
+    [("image", "image"), ("audio", "audio"), ("resource", "embedded_context")],
+)
+def test_each_prompt_literal_answers_to_exactly_one_block_type(block: str, field: str) -> None:
+    """Declaring one block type must not flip a literal that governs another."""
+    capabilities = build_agent_capabilities(prompt_blocks=frozenset({block})).prompt_capabilities
+
+    flipped = {name for name in ("image", "audio", "embedded_context") if getattr(capabilities, name)}
+    assert flipped == {field}
+
+
+def test_the_shipped_executor_advertises_exactly_what_it_reads() -> None:
+    """The binding that keeps the advertisement honest, in both directions."""
+    from python_acp.turn_mcp_router import DECLINED_BLOCKS, McpToolRouterExecutor
+
+    supported = McpToolRouterExecutor.supported_prompt_blocks
+    assert supported == frozenset({"text"})
+    # Everything the schema allows in a prompt is either read or explicitly declined.
+    assert supported | set(DECLINED_BLOCKS) == {
+        "text", "image", "audio", "resource", "resource_link",
+    }
+
+    prompt = build_agent_capabilities(prompt_blocks=supported).prompt_capabilities
+    assert (prompt.image, prompt.audio, prompt.embedded_context) == (False, False, False)
+
+
+def test_a_resource_link_is_governed_by_no_capability_at_all() -> None:
+    """`PromptCapabilities` has three fields and there are four non-text block types.
+
+    A client may send a `resource_link` however this agent answers `initialize`, so
+    declining it needs its own stated reason rather than an advertisement — which is why
+    it is in `DECLINED_BLOCKS` and not in the manifest.
+    """
+    from python_acp.turn_mcp_router import DECLINED_BLOCKS
+
+    governed = {c.prompt_block for c in AGENT_CAPABILITY_MANIFEST if c.prompt_block}
+    assert "resource_link" in DECLINED_BLOCKS
+    assert "resource_link" not in governed

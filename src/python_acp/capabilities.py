@@ -87,16 +87,42 @@ class Capability:
     #: such a connection would be a promise the SDK itself refuses to keep. Both
     #: transports pass the flag; this exists so the one that does not stays honest.
     requires_unstable: bool = False
+    #: The `ContentBlock` `type` discriminator this capability promises the agent reads.
+    #: Set for the three `promptCapabilities` rows, whose value is **derived** from the
+    #: executor's `supported_prompt_blocks` rather than written here — an executor that
+    #: starts reading images flips the literal by saying so, and one that says so without
+    #: reading them fails a test. `advertised` is the value when the block *is* supported.
+    prompt_block: str | None = None
+
+    def value_for(
+        self, *, unstable: bool = True, prompt_blocks: frozenset[str] = frozenset()
+    ) -> Any:
+        """What this row puts on the wire for a given connection and executor.
+
+        `advertised` is the value when the row is *fully* enabled; two conditions can
+        take it away again, and both are properties of the connection rather than of the
+        table — which is why they are arguments and not more rows.
+        """
+        if self.requires_unstable and not unstable:
+            return None
+        if self.prompt_block is not None:
+            return self.advertised if self.prompt_block in prompt_blocks else False
+        return self.advertised
 
     @property
     def is_advertised(self) -> bool:
-        """Whether this promises a client something.
+        """Whether a **default** build of the block promises a client something.
 
         `False` and `None` both mean "not offered" — the schema uses a boolean for flags
         and presence for sub-capabilities — and everything else is a promise that owes
         the test suite a proof.
+
+        Default, not maximal: the three `prompt_block` rows read `False` here because no
+        executor is in scope, and the proof they owe is the test binding them to
+        `TurnExecutor.supported_prompt_blocks`, not a feature test of their own.
         """
-        return self.advertised is not None and self.advertised is not False
+        value = self.value_for()
+        return value is not None and value is not False
 
     @property
     def name(self) -> str:
@@ -123,21 +149,24 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
     ),
     Capability(
         path=("prompt_capabilities", "image"),
-        advertised=False,
+        advertised=True,
         owner="pyacp-hnk.3",
-        why="ImageContentBlock is not handled in a prompt turn.",
+        prompt_block="image",
+        why="True only when the turn executor declares it reads `image` blocks.",
     ),
     Capability(
         path=("prompt_capabilities", "audio"),
-        advertised=False,
+        advertised=True,
         owner="pyacp-hnk.3",
-        why="AudioContentBlock is not handled in a prompt turn.",
+        prompt_block="audio",
+        why="True only when the turn executor declares it reads `audio` blocks.",
     ),
     Capability(
         path=("prompt_capabilities", "embedded_context"),
-        advertised=False,
+        advertised=True,
         owner="pyacp-hnk.3",
-        why="EmbeddedResourceContentBlock is not handled in a prompt turn.",
+        prompt_block="resource",
+        why="True only when the turn executor declares it reads `resource` blocks.",
     ),
     Capability(
         path=("mcp_capabilities", "http"),
@@ -245,13 +274,21 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
 )
 
 
-def build_agent_capabilities(*, unstable: bool = True) -> AgentCapabilities:
+def build_agent_capabilities(
+    *, unstable: bool = True, prompt_blocks: frozenset[str] = frozenset()
+) -> AgentCapabilities:
     """Assemble the `initialize` capability block from the manifest.
 
     Every sub-model is constructed explicitly rather than left to the SDK's field
     defaults: what we promise a client must not be able to change because a dependency
     changed a default. A fresh object each call, so a caller that mutates the response
     cannot reach into the next connection's.
+
+    `prompt_blocks` is the turn executor's `supported_prompt_blocks`. The three
+    `promptCapabilities` rows are **derived** from it rather than written down: what a
+    content block *means* depends on the executor, which decision D3 makes swappable, so
+    a literal fixed in this table would be a promise about a component the table cannot
+    see. An executor that starts reading images flips the literal by declaring it.
 
     `unstable` is the connection's `use_unstable_protocol`. With it off, the rows marked
     `requires_unstable` are withheld — the SDK's router answers `method_not_found` for
@@ -266,9 +303,7 @@ def build_agent_capabilities(*, unstable: bool = True) -> AgentCapabilities:
         auth=AgentAuthCapabilities(),
     )
     for capability in AGENT_CAPABILITY_MANIFEST:
-        advertised = capability.advertised
-        if capability.requires_unstable and not unstable:
-            advertised = None
+        advertised = capability.value_for(unstable=unstable, prompt_blocks=prompt_blocks)
         target: Any = capabilities
         for part in capability.path[:-1]:
             target = getattr(target, part)

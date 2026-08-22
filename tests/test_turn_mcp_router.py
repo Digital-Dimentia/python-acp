@@ -18,17 +18,22 @@ from typing import Any
 
 import pytest
 from acp.schema import (
+    AudioContentBlock,
     ClientCapabilities,
+    EmbeddedResourceContentBlock,
     EnvVariable,
+    ImageContentBlock,
     McpServerStdio,
     PlanCapabilities,
+    ResourceContentBlock,
     TextContentBlock,
+    TextResourceContents,
 )
 
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
-from python_acp.turn_mcp_router import McpToolRouterExecutor
+from python_acp.turn_mcp_router import DECLINED_BLOCKS, McpToolRouterExecutor
 from python_acp.turns import TurnContext
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
@@ -419,3 +424,79 @@ async def test_the_declined_variants_are_never_emitted() -> None:
         & {"agent_thought_chunk", "usage_update", "session_info_update",
            "plan_content", "plan_removed", "current_mode_update", "config_option_update"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Content block types (pyacp-hnk.3)
+# ---------------------------------------------------------------------------
+
+
+def image() -> ImageContentBlock:
+    return ImageContentBlock(type="image", data="aGk=", mimeType="image/png")
+
+
+def audio() -> AudioContentBlock:
+    return AudioContentBlock(type="audio", data="aGk=", mimeType="audio/wav")
+
+
+def embedded() -> EmbeddedResourceContentBlock:
+    return EmbeddedResourceContentBlock(
+        type="resource",
+        resource=TextResourceContents(uri="file:///notes.txt", text="context"),
+    )
+
+
+def link() -> ResourceContentBlock:
+    return ResourceContentBlock(type="resource_link", name="notes", uri="file:///notes.txt")
+
+
+@pytest.mark.parametrize(
+    ("block", "because"),
+    [
+        (image(), "needs a model to look at it"),
+        (audio(), "needs a model to listen to it"),
+        (embedded(), "context for a model to read"),
+        (link(), "fetch and reason about"),
+    ],
+    ids=["image", "audio", "resource", "resource_link"],
+)
+async def test_every_non_text_block_is_declined_by_name(block: Any, because: str) -> None:
+    """Not a crash and not a silent drop: each type says what it is and why it is refused.
+
+    All four share one reason — they are context for a model to reason over, and D1 puts
+    no model here — but a client debugging a rejected prompt needs to see *which* block.
+    """
+    async with Harness("tools") as harness:
+        result = await harness.run(block)
+
+    assert result.stop_reason == "refusal"
+    assert because in harness.refusal()
+    assert harness.of("tool_call") == []
+
+
+async def test_a_declined_block_takes_the_whole_prompt_with_it() -> None:
+    """Validate-then-run again: a valid invocation beside an image runs nothing."""
+    async with Harness("tools") as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}), image())
+
+    assert result.stop_reason == "refusal"
+    assert harness.of("tool_call") == []
+
+
+async def test_a_declined_block_is_still_echoed_and_still_gets_the_command_list() -> None:
+    """The refusal path stays as informative for a picture as for prose."""
+    async with Harness("tools") as harness:
+        await harness.run(image())
+
+    # Nothing to echo — the echo is text-only — but the client still learns what exists.
+    assert harness.of("user_message_chunk") == []
+    assert [c.name for c in harness.of("available_commands_update")[0].available_commands] == [
+        "tools/echo"
+    ]
+
+
+def test_the_declined_reasons_cover_every_non_text_block_the_schema_allows() -> None:
+    """A schema that grows a sixth block type must not fall through to a vague message."""
+    allowed = {"text", "image", "audio", "resource", "resource_link"}
+
+    assert McpToolRouterExecutor.supported_prompt_blocks | set(DECLINED_BLOCKS) == allowed

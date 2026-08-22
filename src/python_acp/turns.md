@@ -11,6 +11,7 @@ for, satisfied once.
 
 ```python
 class TurnExecutor(Protocol):
+    supported_prompt_blocks: frozenset[str]
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 ```
 
@@ -22,6 +23,14 @@ client round trip, emit again, and repeat as many times as it likes.
 `tests/test_turns.py::test_a_turn_may_be_multi_step_and_interactive` is a *design*
 assertion rather than a behaviour one — it exists so that a later simplification into a
 single-shot call has something to break.
+
+`supported_prompt_blocks` is the one thing besides `execute`, and it is declarative
+because `initialize` has to promise it **before any prompt arrives**:
+`promptCapabilities.image`, `.audio`, and `.embeddedContext` are derived from this set by
+[capabilities.py](capabilities.md). What a content block *means* depends on the executor,
+which D3 makes swappable, so the promise has to come from the executor rather than from a
+table that cannot see it — and the capability block is per-agent, which is what makes a
+per-executor promise expressible at all.
 
 ## What a turn is handed
 
@@ -100,7 +109,7 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 
 | Symbol | Purpose |
 |---|---|
-| `TurnExecutor` | The Protocol one turn runs behind |
+| `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks` |
 | `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
 | `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |

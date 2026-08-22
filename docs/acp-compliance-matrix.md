@@ -101,7 +101,7 @@ never ahead of it.
 | Field | Value at Phase 1 | Flips to | When |
 |---|---|---|---|
 | `loadSession` | `false` | `true` | `pyacp-3rw.3` (row 5) ✔ |
-| `promptCapabilities.image` | `false` | per `pyacp-hnk.3` | Only when `ImageContentBlock` is genuinely handled |
+| `promptCapabilities.image` | `false` | per `pyacp-hnk.3` | Only when `ImageContentBlock` is genuinely handled. **Now derived** from the turn executor's `supported_prompt_blocks` rather than written down — what a block means depends on the executor, which D3 makes swappable. `pyacp-hnk.3` declined all three for the shipped router: an image is context for a model to reason over and there is no model here. |
 | `promptCapabilities.audio` | `false` | per `pyacp-hnk.3` | Only when `AudioContentBlock` is genuinely handled |
 | `promptCapabilities.embeddedContext` | `false` | per `pyacp-hnk.3` | Only when `EmbeddedResourceContentBlock` is genuinely handled |
 | `mcpCapabilities.http` | `false` | — | These three gate the *transport* of a client-supplied MCP server, not the ability to accept one. `McpServerStdio` needs no capability, and stdio is the only MCP transport we drive (`mcp_stdio.py`, D6). `pyacp-db3` accepts `mcpServers` on `session/new` and must **reject `HttpMcpServer` entries** while these read `false`. |

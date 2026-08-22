@@ -12,11 +12,11 @@ runtime, and the subsystem shape it is being migrated to.
 
 ```mermaid
 flowchart LR
-    UserClient[WebSocket Client]
-    CLI[cli.py\nRuntime Bootstrap]
-    Bridge[ws_bridge.py\nACPWebSocketBridge]
-    MCPClient[mcp_stdio.py\nMCPStdioClient]
-    MCPProc[(MCP Server Subprocess)]
+    UserClient["WebSocket client"]
+    CLI["cli.py<br/>runtime bootstrap"]
+    Bridge["ws_bridge.py<br/>ACPWebSocketBridge"]
+    MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
+    MCPProc[("MCP server subprocess")]
 
     CLI --> Bridge
     Bridge <--> UserClient

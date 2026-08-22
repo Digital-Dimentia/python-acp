@@ -145,7 +145,8 @@ async def test_unimplemented_acp_methods_answer_method_not_found() -> None:
     """Proof the SDK router is doing the dispatching, not a hand-rolled branch."""
     async with bound_socket() as websocket:
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "session/list", "params": {}}
+            {"jsonrpc": "2.0", "id": 2, "method": "session/set_mode",
+             "params": {"sessionId": "s1", "modeId": "ask"}}
         )
 
     assert reply["error"]["code"] == -32601
@@ -209,18 +210,28 @@ async def test_sessions_outlive_the_connection_that_created_them() -> None:
 
 
 async def test_unstable_methods_are_reachable_over_websocket() -> None:
-    """Both transports must pass use_unstable_protocol, or the same client sees two agents.
+    """Both transports must pass use_unstable_protocol, or one client sees two agents.
 
-    Without the flag the router answers -32601 *without calling the agent*; with it, the
-    agent's own not-implemented -32601 comes back carrying `data.method`.
+    Without the flag the router answers -32601 *without calling the agent*, so a
+    `session/close` that actually closes is the proof the flag reached it.
     """
     async with bound_socket() as websocket:
-        reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 3, "method": "session/close", "params": {"sessionId": "s1"}}
+        created = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "session/new",
+             "params": {"cwd": "/tmp", "mcpServers": []}}
+        )
+        session_id = created["result"]["sessionId"]
+        closed = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/close",
+             "params": {"sessionId": session_id}}
+        )
+        gone = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": []}}
         )
 
-    assert reply["error"]["code"] == -32601
-    assert reply["error"]["data"] == {"method": "session/close"}
+    assert "error" not in closed
+    assert gone["error"]["code"] == -32602
 
 
 async def test_each_connection_gets_its_own_agent() -> None:

@@ -63,6 +63,8 @@ have to be rediscovered.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator
@@ -83,6 +85,11 @@ logger = logging.getLogger(__name__)
 
 #: The two shapes `session/set_config_option` discriminates on `type`.
 ConfigOption = SessionConfigOptionSelect | SessionConfigOptionBoolean
+
+#: Sessions per `session/list` page. A single page is a conforming answer, so this is a
+#: courtesy rather than a requirement — but a long-lived process can accumulate a lot of
+#: sessions, and a client that asked for a list should not get all of them at once.
+PAGE_SIZE = 100
 
 Clock = Callable[[], datetime]
 IdFactory = Callable[[], str]
@@ -138,12 +145,32 @@ class Session:
     title: str | None = None
     created_at: datetime = field(default_factory=_utc_now)
     updated_at: datetime = field(default_factory=_utc_now)
+    #: Every `session/update` this session has emitted, in order. `session/load` replays
+    #: it. An append-only list rather than `acp.contrib.SessionAccumulator`: that helper
+    #: *merges* updates into a snapshot, which is what a UI wants and the opposite of
+    #: what a replay needs — order across categories, and duplicate chunks, are exactly
+    #: the information it discards. See `sessions.md`.
+    history: list[Any] = field(default_factory=list)
     _clock: Clock = field(default=_utc_now, repr=False, compare=False)
     _turn: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
 
     # ------------------------------------------------------------------
     # Mutation — every one of these moves `updated_at`
     # ------------------------------------------------------------------
+
+    def record(self, update: Any) -> None:
+        """Remember one emitted `session/update` so `session/load` can replay it.
+
+        Called by `turns.TurnContext.emit` on the way out, so the record is of what was
+        *sent* rather than of what an executor intended to send.
+
+        The list is unbounded, and that is a deliberate trade rather than an oversight:
+        a cap would silently truncate the middle of a transcript a client asked to
+        reload, which is worse than the memory. A session's history dies with the
+        session.
+        """
+        self.history.append(update)
+        self.touch()
 
     def touch(self) -> None:
         """Record activity. `SessionInfo.updatedAt` is what a client sorts a list by."""
@@ -281,6 +308,10 @@ class Session:
                 option.model_copy(deep=True) for option in self.config_options
             ),
             title=self.title,
+            # The transcript up to the fork point. A shallow copy is enough — updates
+            # are never mutated after `record`, only appended — but it must be a *copy*,
+            # or the child's next turn would append to the parent's transcript.
+            history=list(self.history),
             created_at=self._clock(),
             updated_at=self._clock(),
             _clock=self._clock,
@@ -390,16 +421,38 @@ class SessionRegistry:
         return session
 
     def list(self, cwd: str | None = None) -> tuple[Session, ...]:
-        """Sessions, most recently active first, optionally filtered by `cwd`.
+        """Every session, most recently active first, optionally filtered by `cwd`.
 
-        Cursor pagination is `pyacp-3rw.3`'s and layers on top of this ordering. Sorting
-        here rather than there means every caller sees the same order, which is what
-        makes a cursor mean anything.
+        The ordering lives here rather than in the caller so that every caller sees the
+        same one — which is what makes `page`'s cursor mean anything.
         """
         sessions = tuple(self._sessions.values())
         if cwd is not None:
             sessions = tuple(session for session in sessions if session.cwd == cwd)
-        return tuple(sorted(sessions, key=lambda s: (s.updated_at, s.session_id), reverse=True))
+        return tuple(sorted(sessions, key=_sort_key, reverse=True))
+
+    def page(
+        self, cwd: str | None = None, cursor: str | None = None, limit: int = PAGE_SIZE
+    ) -> tuple[tuple[Session, ...], str | None]:
+        """One page of `list()`, plus the cursor for the next one (`None` when done).
+
+        A **keyset** cursor, not an offset: it names the last session on the page as
+        `(updated_at, session_id)`, and the next page is everything strictly after it in
+        the same ordering. An offset would skip or repeat entries whenever a session was
+        created or touched between two calls, which for a live registry is most of the
+        time.
+
+        It is still not immune to `updated_at` moving — a session that becomes active
+        mid-walk sorts earlier and can be seen twice. `session_id` is in the key so a
+        client can dedupe, and a repeat is a far better failure than a silent omission.
+        """
+        sessions = self.list(cwd)
+        if cursor is not None:
+            after = _decode_cursor(cursor)
+            sessions = tuple(session for session in sessions if _sort_key(session) < after)
+        page = sessions[:limit]
+        remaining = len(sessions) > limit
+        return page, (_encode_cursor(page[-1]) if remaining and page else None)
 
     async def close(self, session_id: str) -> None:
         """Remove a session and release whatever was bound to it.
@@ -420,6 +473,29 @@ class SessionRegistry:
         """Tear every session down. For process shutdown, not for a disconnect."""
         for session_id in tuple(self._sessions):
             await self.close(session_id)
+
+
+def _sort_key(session: Session) -> tuple[str, str]:
+    """The `list()` ordering, as something a cursor can carry across a JSON round trip."""
+    return (session.updated_at.isoformat(), session.session_id)
+
+
+def _encode_cursor(session: Session) -> str:
+    return base64.urlsafe_b64encode(json.dumps(_sort_key(session)).encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str]:
+    """Read a cursor back, or refuse it.
+
+    A `ValueError`, so `errors.to_request_error` answers `-32602`: a cursor the agent did
+    not issue is a bad parameter. Silently restarting from the first page would be worse
+    — the client would loop forever without ever being told why.
+    """
+    try:
+        updated_at, session_id = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        return str(updated_at), str(session_id)
+    except Exception:
+        raise ValueError(f"Malformed session/list cursor: {cursor!r}") from None
 
 
 def _select_values(option: SessionConfigOptionSelect) -> Iterator[str]:

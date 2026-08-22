@@ -6,10 +6,8 @@ no MCP subprocesses, no prompt execution. [agent.py](agent.md) translates reques
 calls on `SessionRegistry`; `mcp_registry.py` (Phase 2.3) owns the backends a session's
 turns use.
 
-> **Partly wired.** `session/new`, `session/prompt`, and `session/cancel` run against this
-> registry (`pyacp-3rw.2`). `session/load`, `/list`, `/fork`, `/resume`, and `/close` still
-> answer `-32601` until `pyacp-3rw.3`, even though `fork`, `resume`, `list`, and `close`
-> are implemented here.
+> **Wired.** Every `session/*` method except `set_mode` and `set_config_option`
+> (`pyacp-fln.2`, `pyacp-fln.3`) runs against this registry.
 
 ## Why not `acp.contrib.session_state`
 
@@ -76,6 +74,41 @@ byte-identical to the parent's. **Correctness wins:** a shared backend would mak
 `session/close` on the fork tear down the parent's tools. A refcounted share is a valid
 later optimisation *provided* closing one session cannot disturb another. `pyacp-3rw.3`
 and `pyacp-db3` implement this; the semantics are fixed here so they are not rediscovered.
+
+## History
+
+`Session.history` is an append-only list of every `session/update` the session emitted, in
+order, written by `turns.TurnContext.emit` on the way out. `session/load` replays it.
+
+**Not `acp.contrib.SessionAccumulator`**, which `pyacp-3rw.1` flagged as the candidate.
+That helper *merges* updates into a snapshot — tool calls keyed by id, one plan, message
+chunks bucketed by kind — which is what a UI wants and the opposite of what a replay
+needs. Order across categories, and duplicate chunks, are exactly the information it
+discards. A list is also simpler and not marked experimental.
+
+The list is **unbounded**, deliberately. A cap would silently truncate the middle of a
+transcript a client asked to reload, which is worse than the memory; a session's history
+dies with the session.
+
+A fork copies the transcript up to the fork point. A shallow copy is enough — updates are
+never mutated after `record`, only appended — but it must be a *copy*, or the child's
+next turn would append to the parent's transcript.
+
+## Pagination
+
+`page(cwd, cursor, limit)` returns one page plus the cursor for the next, `None` when
+done. The cursor is a **keyset**, not an offset: it names the last session on the page as
+`(updated_at, session_id)`, and the next page is everything strictly after it in the same
+ordering.
+
+An offset would skip or repeat entries whenever a session was created or touched between
+two calls — which, for a live registry, is most of the time. The keyset is not immune
+either: a session that becomes active mid-walk sorts earlier and can be seen twice.
+`session_id` is in the key so a client can dedupe, and a repeat is a far better failure
+than a silent omission.
+
+A cursor the registry did not issue raises `ValueError` → `-32602`. Silently restarting
+from page one would loop a client forever without ever telling it why.
 
 ## Errors
 

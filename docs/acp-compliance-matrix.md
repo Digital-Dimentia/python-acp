@@ -86,9 +86,20 @@ flag and one (`authenticate`) implements a refusal rather than a capability.
 below is owned by the row that justifies it, and flips **in the same commit** as that row —
 never ahead of it.
 
+> **Flipped by `pyacp-3rw.3`.** `loadSession`, `sessionCapabilities.list`, `.fork`,
+> `.resume`, and `.close` are now advertised. The "Value at Phase 1" column is kept as
+> written — it is the record of what was ratified, not a description of the live block.
+> `src/python_acp/capabilities.py` is the live block, and its current state is tabulated
+> in [capabilities.md](../src/python_acp/capabilities.md).
+>
+> One correction to the `.fork` / `.resume` / `.close` rows: they are advertised **per
+> connection**, withheld when `use_unstable_protocol` is off, because the SDK's router
+> refuses those three without calling the agent. A single process-wide literal could not
+> express that.
+
 | Field | Value at Phase 1 | Flips to | When |
 |---|---|---|---|
-| `loadSession` | `false` | `true` | `pyacp-3rw.3` (row 5) |
+| `loadSession` | `false` | `true` | `pyacp-3rw.3` (row 5) ✔ |
 | `promptCapabilities.image` | `false` | per `pyacp-hnk.3` | Only when `ImageContentBlock` is genuinely handled |
 | `promptCapabilities.audio` | `false` | per `pyacp-hnk.3` | Only when `AudioContentBlock` is genuinely handled |
 | `promptCapabilities.embeddedContext` | `false` | per `pyacp-hnk.3` | Only when `EmbeddedResourceContentBlock` is genuinely handled |

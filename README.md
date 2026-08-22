@@ -87,10 +87,14 @@ python-acp --transport stdio --mcp-command python /path/to/your_mcp_server.py
 ```
 
 `--host` and `--port` are ignored in this mode, **stdout carries the JSON-RPC wire and
-nothing else**, and all diagnostics go to stderr. The agent currently answers
-`initialize` and refuses `authenticate`; session and prompt methods return `-32601`
-until Phases 2 and 3 land. See [agent.py](src/python_acp/agent.md) for the per-method
-state and [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
+nothing else**, and all diagnostics go to stderr.
+
+The agent serves `initialize`, the full session lifecycle (`new`, `prompt`, `cancel`,
+`load`, `list`, `fork`, `resume`, `close`), and refuses `authenticate`.
+`session/set_mode` and `session/set_config_option` return `-32601` until Phase 5, and a
+prompt turn completes without running anything until Phase 3 ships the MCP tool-router.
+See [agent.py](src/python_acp/agent.md) for the per-method state and
+[transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
 
 ### As an ACP agent over WebSocket
 

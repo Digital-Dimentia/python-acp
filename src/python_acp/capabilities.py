@@ -42,6 +42,10 @@ from acp.schema import (
     McpCapabilities,
     PromptCapabilities,
     SessionCapabilities,
+    SessionCloseCapabilities,
+    SessionForkCapabilities,
+    SessionListCapabilities,
+    SessionResumeCapabilities,
     TerminalAuthMethod,
 )
 
@@ -75,6 +79,13 @@ class Capability:
     advertised: Any
     owner: str
     why: str
+    #: Whether this capability is only real on a connection built with
+    #: `use_unstable_protocol=True`. Three lifecycle methods are registered
+    #: `unstable=True` in the SDK's agent router, and with the flag off the router
+    #: answers `method_not_found` **without calling the agent** — so advertising them on
+    #: such a connection would be a promise the SDK itself refuses to keep. Both
+    #: transports pass the flag; this exists so the one that does not stays honest.
+    requires_unstable: bool = False
 
     @property
     def is_advertised(self) -> bool:
@@ -101,11 +112,12 @@ class Capability:
 AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
     Capability(
         path=("load_session",),
-        advertised=False,
+        advertised=True,
         owner="pyacp-3rw.3",
         why=(
-            "session/load must replay history as session/update notifications before it "
-            "returns. Nothing persists a session yet, so there is no history to replay."
+            "session/load replays the session's recorded session/update notifications "
+            "before returning. In-process only: a session does not survive a restart, "
+            "and load on an id we no longer hold is -32602."
         ),
     ),
     Capability(
@@ -151,9 +163,9 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
     ),
     Capability(
         path=("session_capabilities", "list"),
-        advertised=None,
+        advertised=SessionListCapabilities(),
         owner="pyacp-3rw.3",
-        why="session/list is a read over the Phase 2 session registry, which does not exist yet.",
+        why="session/list reads the session registry, with keyset cursor pagination.",
     ),
     Capability(
         path=("session_capabilities", "delete"),
@@ -175,25 +187,28 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
     ),
     Capability(
         path=("session_capabilities", "fork"),
-        advertised=None,
+        advertised=SessionForkCapabilities(),
         owner="pyacp-3rw.3",
+        requires_unstable=True,
         why=(
-            "session/fork is registered unstable=True in the SDK's agent router, so it "
-            "also requires the connection to carry use_unstable_protocol. Not in the "
-            "matrix's original table — read off acp.schema.SessionCapabilities in 0.12.1."
+            "session/fork deep-copies the session and opens the fork its own MCP "
+            "subprocesses. Registered unstable=True in the SDK's agent router, so it is "
+            "advertised only on a connection carrying use_unstable_protocol."
         ),
     ),
     Capability(
         path=("session_capabilities", "resume"),
-        advertised=None,
+        advertised=SessionResumeCapabilities(),
         owner="pyacp-3rw.3",
-        why="Same as sessionCapabilities.fork, for session/resume.",
+        requires_unstable=True,
+        why="Same unstable gate as sessionCapabilities.fork, for session/resume.",
     ),
     Capability(
         path=("session_capabilities", "close"),
-        advertised=None,
+        advertised=SessionCloseCapabilities(),
         owner="pyacp-3rw.3",
-        why="Same as sessionCapabilities.fork, for session/close.",
+        requires_unstable=True,
+        why="Same unstable gate as sessionCapabilities.fork, for session/close.",
     ),
     Capability(
         path=("auth", "logout"),
@@ -228,13 +243,19 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
 )
 
 
-def build_agent_capabilities() -> AgentCapabilities:
+def build_agent_capabilities(*, unstable: bool = True) -> AgentCapabilities:
     """Assemble the `initialize` capability block from the manifest.
 
     Every sub-model is constructed explicitly rather than left to the SDK's field
     defaults: what we promise a client must not be able to change because a dependency
     changed a default. A fresh object each call, so a caller that mutates the response
     cannot reach into the next connection's.
+
+    `unstable` is the connection's `use_unstable_protocol`. With it off, the rows marked
+    `requires_unstable` are withheld — the SDK's router answers `method_not_found` for
+    those three *without calling the agent*, so advertising them would be a promise the
+    SDK itself refuses to keep. It is per-connection rather than per-process because the
+    flag is.
     """
     capabilities = AgentCapabilities(
         promptCapabilities=PromptCapabilities(),
@@ -243,10 +264,18 @@ def build_agent_capabilities() -> AgentCapabilities:
         auth=AgentAuthCapabilities(),
     )
     for capability in AGENT_CAPABILITY_MANIFEST:
+        advertised = capability.advertised
+        if capability.requires_unstable and not unstable:
+            advertised = None
         target: Any = capabilities
         for part in capability.path[:-1]:
             target = getattr(target, part)
-        setattr(target, capability.path[-1], capability.advertised)
+        # A fresh instance per call for the marker models too: the manifest holds one
+        # object per row, and handing the same one to two connections would let a client
+        # that mutated its response reach into the next.
+        if hasattr(advertised, "model_copy"):
+            advertised = advertised.model_copy(deep=True)
+        setattr(target, capability.path[-1], advertised)
     return capabilities
 
 

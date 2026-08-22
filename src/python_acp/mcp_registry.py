@@ -94,6 +94,10 @@ class McpBackendRegistry:
 
     def __init__(self, *, connect: Connector = connect_stdio) -> None:
         self._backends: dict[str, dict[str, MCPStdioClient]] = {}
+        # The specs each session opened, kept so `fork` can respawn them. A fork gets its
+        # own subprocesses (see the module docstring), which means it needs the recipe,
+        # not the running clients.
+        self._specs: dict[str, tuple[McpServerStdio, ...]] = {}
         self._connect = connect
 
     def __contains__(self, session_id: object) -> bool:
@@ -111,7 +115,7 @@ class McpBackendRegistry:
         server name, and two servers answering to one name would make which of them ran
         a matter of dict ordering.
         """
-        if session_id in self._backends:
+        if session_id in self._backends or session_id in self._specs:
             raise RuntimeError(f"Session {session_id!r} already has MCP backends open")
 
         names = [server.name for server in servers]
@@ -131,7 +135,28 @@ class McpBackendRegistry:
             raise
 
         self._backends[session_id] = opened
+        self._specs[session_id] = tuple(servers)
         return dict(opened)
+
+    async def fork(
+        self,
+        parent_id: str,
+        child_id: str,
+        servers: Sequence[McpServerStdio] | None = None,
+    ) -> Mapping[str, MCPStdioClient]:
+        """Open a fork's servers: its own subprocesses, from the parent's specs.
+
+        `servers` overrides them, because `session/fork` lets the client supply its own
+        `mcpServers` — a fork of a session into a different working tree may well want
+        different tools. `None` means "the same recipe as the parent", which is the case
+        the parent's specs are kept for.
+
+        Sharing the parent's *clients* instead would be cheaper and wrong: `session/close`
+        on the fork would tear down the parent's tools. `sessions.py` records the same
+        decision for the session state itself, and the two have to agree.
+        """
+        specs = self._specs.get(parent_id, ()) if servers is None else tuple(servers)
+        return await self.open(child_id, specs)
 
     def backends(self, session_id: str) -> Mapping[str, MCPStdioClient]:
         """Every server this session opened. Empty for a session that opened none.
@@ -158,6 +183,7 @@ class McpBackendRegistry:
         Unknown session ids are a no-op: `close_session` on a session that opened no
         servers is ordinary, and the hook fires for every session either way.
         """
+        self._specs.pop(session_id, None)
         opened = self._backends.pop(session_id, None)
         if not opened:
             return

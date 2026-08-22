@@ -86,8 +86,9 @@ flag and one (`authenticate`) implements a refusal rather than a capability.
 below is owned by the row that justifies it, and flips **in the same commit** as that row —
 never ahead of it.
 
-> **Flipped by `pyacp-3rw.3`.** `loadSession`, `sessionCapabilities.list`, `.fork`,
-> `.resume`, and `.close` are now advertised. The "Value at Phase 1" column is kept as
+> **Flipped by `pyacp-3rw.3` and `pyacp-3rw.4`.** `loadSession`,
+> `sessionCapabilities.list`, `.fork`, `.resume`, `.close`, and `.additionalDirectories`
+> are now advertised. The "Value at Phase 1" column is kept as
 > written — it is the record of what was ratified, not a description of the live block.
 > `src/python_acp/capabilities.py` is the live block, and its current state is tabulated
 > in [capabilities.md](../src/python_acp/capabilities.md).

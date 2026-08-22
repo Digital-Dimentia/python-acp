@@ -28,6 +28,7 @@
   - [capabilities.py](src/python_acp/capabilities.md)
   - [errors.py](src/python_acp/errors.md)
   - [legacy_ws.py](src/python_acp/legacy_ws.md)
+  - [paths.py](src/python_acp/paths.md)
   - [sessions.py](src/python_acp/sessions.md)
   - [turns.py](src/python_acp/turns.md)
   - [cli.py](src/python_acp/cli.md)

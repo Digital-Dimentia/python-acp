@@ -41,6 +41,7 @@ from acp.schema import (
     EnvVarAuthMethod,
     McpCapabilities,
     PromptCapabilities,
+    SessionAdditionalDirectoriesCapabilities,
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionForkCapabilities,
@@ -178,11 +179,12 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
     ),
     Capability(
         path=("session_capabilities", "additional_directories"),
-        advertised=None,
+        advertised=SessionAdditionalDirectoriesCapabilities(),
         owner="pyacp-3rw.4",
         why=(
-            "Advertising this promises the absolute-path constraint on "
-            "additionalDirectories is enforced. Nothing enforces it yet."
+            "additionalDirectories is accepted on session/new and session/fork, refused "
+            "with -32602 when any entry is relative, and stored lexically normalised. "
+            "The containment rule those roots define lives in paths.py."
         ),
     ),
     Capability(

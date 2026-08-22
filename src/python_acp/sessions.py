@@ -271,6 +271,16 @@ class Session:
     # Views and copies
     # ------------------------------------------------------------------
 
+    @property
+    def roots(self) -> tuple[str, ...]:
+        """Everywhere this session is allowed to look: `cwd` first, then the extras.
+
+        The containment rule itself is `paths.py`'s — this is only the declaration.
+        Phase 4.2's `fs/*` calls are the first consumer:
+        `paths.require_contained(path, session.roots)`.
+        """
+        return (self.cwd, *self.additional_directories)
+
     def to_info(self) -> SessionInfo:
         """The `session/list` view. `updatedAt` is a string in the schema, so ISO 8601."""
         return SessionInfo(

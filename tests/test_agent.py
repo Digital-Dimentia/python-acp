@@ -149,7 +149,7 @@ async def test_initialize_promises_exactly_what_is_built() -> None:
 
     capabilities = (await router("initialize", PARAMS["initialize"], False)).agent_capabilities
 
-    # Built: the session lifecycle (pyacp-3rw.2, pyacp-3rw.3).
+    # Built: the session lifecycle (pyacp-3rw.2, pyacp-3rw.3, pyacp-3rw.4).
     assert capabilities.load_session is True
     assert capabilities.session_capabilities.list is not None
     assert capabilities.session_capabilities.fork is not None
@@ -168,8 +168,7 @@ async def test_initialize_promises_exactly_what_is_built() -> None:
     assert capabilities.providers is None
     assert capabilities.nes is None
     assert capabilities.position_encoding is None
-    # Not built yet: pyacp-3rw.4 is what enforces the absolute-path constraint.
-    assert capabilities.session_capabilities.additional_directories is None
+    assert capabilities.session_capabilities.additional_directories is not None
 
 
 async def test_the_capability_block_is_not_shared_between_connections() -> None:
@@ -950,3 +949,91 @@ def _stdio_spec(name: str):
     return McpServerStdio(
         name=name, command=sys.executable, args=[str(FIXTURE_SERVER)], env=[]
     )
+
+
+# ---------------------------------------------------------------------------
+# Path constraints at the edge (pyacp-3rw.4)
+# ---------------------------------------------------------------------------
+
+
+async def test_new_session_refuses_a_relative_cwd() -> None:
+    router = make_router()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/new", {"cwd": "relative/path", "mcpServers": []}, False)
+
+    assert excinfo.value.code == -32602
+    assert "absolute" in excinfo.value.data["reason"]
+
+
+async def test_new_session_stores_additional_directories_validated_and_tidied() -> None:
+    """Evidence for `sessionCapabilities.additionalDirectories`."""
+    sessions = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=sessions))
+
+    result = await router(
+        "session/new",
+        {"cwd": "/work/./sub", "additionalDirectories": ["/a/b/..", "/a"], "mcpServers": []},
+        False,
+    )
+
+    session = sessions.get(result.session_id)
+    assert session.cwd == "/work/sub"
+    # `/a/b/..` is `/a`, and the duplicate collapses.
+    assert session.additional_directories == ("/a",)
+    assert session.roots == ("/work/sub", "/a")
+
+
+async def test_new_session_refuses_a_relative_additional_directory() -> None:
+    """A relative extra root is as broken as a relative cwd, and names its index."""
+    router = make_router()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router(
+            "session/new",
+            {"cwd": "/work", "additionalDirectories": ["/fine", "nope"], "mcpServers": []},
+            False,
+        )
+
+    assert excinfo.value.code == -32602
+    assert "additionalDirectories[1]" in excinfo.value.data["reason"]
+
+
+async def test_a_relative_cwd_leaves_no_session_behind() -> None:
+    """Validation runs before `create`, so a refused request creates nothing."""
+    sessions = SessionRegistry()
+    router = make_router(agent=make_agent(sessions=sessions))
+
+    with pytest.raises(RequestError):
+        await router("session/new", {"cwd": "nope", "mcpServers": []}, False)
+
+    assert len(sessions) == 0
+
+
+async def test_fork_validates_its_own_cwd() -> None:
+    _agent, router, _client, session_id = await _lifecycle_agent()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/fork", {"sessionId": session_id, "cwd": "relative"}, False)
+
+    assert excinfo.value.code == -32602
+
+
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("session/resume", {"cwd": "relative"}),
+        ("session/load", {"cwd": "relative", "mcpServers": []}),
+    ],
+)
+async def test_resume_and_load_validate_a_cwd_they_do_not_apply(
+    method: str, params: dict
+) -> None:
+    """Accepting a relative path and silently ignoring it would tell a client its path
+    was fine when it was both invalid and unused."""
+    _agent, router, _client, session_id = await _lifecycle_agent()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router(method, {"sessionId": session_id, **params}, False)
+
+    assert excinfo.value.code == -32602

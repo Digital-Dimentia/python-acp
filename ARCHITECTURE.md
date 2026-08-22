@@ -14,6 +14,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
+- Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind, and the `session/update` emission channel. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
@@ -32,6 +33,7 @@ flowchart LR
     Caps["capabilities.py"]
     Errors["errors.py"]
     Sessions["sessions.py<br/>SessionRegistry"]
+    Paths["paths.py<br/>containment rule"]
     Turns["turns.py<br/>TurnExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
@@ -52,6 +54,7 @@ flowchart LR
     Agent --> Caps
     Agent --> Errors
     Agent --> Sessions
+    Agent --> Paths
     Agent --> Turns
     Agent --> Backends
     Sessions -. "on_close" .-> Backends
@@ -117,6 +120,7 @@ sequenceDiagram
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire. Nothing else.
 - Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation; translates and delegates.
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake. One table, derived from the compliance matrix; nothing else builds a capability block.
+- Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
 - Session registry (`sessions.py`): cwd, additional directories, modes, config options, lifetimes.
 - Turn executor (`turns.py` + `turn_mcp_router.py`): serves one prompt turn and streams `session/update`.
 - MCP backend (`mcp_registry.py` + `mcp_stdio.py`): per-session MCP servers behind a registry.
@@ -152,6 +156,7 @@ flowchart LR
     Agent --> Caps
     Agent --> Errors
     Agent --> Sessions
+    Agent --> Paths
     Agent --> Turns
     Turns -.implemented by.-> Router
     Legacy --> Registry
@@ -225,6 +230,7 @@ there is no legacy surface on stdio, and never was.
 - [Capability manifest module](src/python_acp/capabilities.md)
 - [Error mapping module](src/python_acp/errors.md)
 - [Deprecated WebSocket surface module](src/python_acp/legacy_ws.md)
+- [Path constraints module](src/python_acp/paths.md)
 - [Session registry module](src/python_acp/sessions.md)
 - [Turn executor seam module](src/python_acp/turns.md)
 - [CLI module](src/python_acp/cli.md)

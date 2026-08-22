@@ -636,3 +636,240 @@ async def test_initialize_rejects_an_omitted_protocol_version(
             await asyncio.wait_for(client.initialize(), timeout=10)
 
         assert client.protocol_version is None
+# ---------------------------------------------------------------------------
+# Failure fidelity: an MCP error code and a tool's isError are different kinds
+# of failure, and neither may be flattened into the other. (pyacp-k5w)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_error_response_carries_code_and_data() -> None:
+    """The server's code survives onto the exception instead of being stringified."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        with pytest.raises(MCPProtocolError) as excinfo:
+            await client.call_tool(
+                "rpc-error",
+                {"code": -32602, "message": "bad arguments", "data": {"field": "text"}},
+            )
+
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data == {"field": "text"}
+    assert "bad arguments" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_client_raised_errors_carry_no_code() -> None:
+    """Failures we invent ourselves must not fake a server-assigned code."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await client.initialize()
+    await client.stop()
+
+    with pytest.raises(MCPProtocolError) as excinfo:
+        await client.request("tools/list", {})
+
+    assert excinfo.value.code is None
+    assert excinfo.value.data is None
+
+
+@pytest.mark.asyncio
+async def test_distinct_mcp_error_codes_stay_distinguishable_to_the_client() -> None:
+    """-32601 and -32602 from the backend must not both arrive as -32603."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+
+        not_found = await bridge._dispatch(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "rpc-error",
+                        "arguments": {"code": -32601, "message": "no such tool"},
+                    },
+                }
+            )
+        )
+        bad_params = await bridge._dispatch(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "rpc-error",
+                        "arguments": {"code": -32602, "message": "bad args"},
+                    },
+                }
+            )
+        )
+
+    assert not_found["error"]["code"] == -32601
+    assert bad_params["error"]["code"] == -32602
+    assert not_found["error"]["code"] != bad_params["error"]["code"]
+    # The code now comes from two namespaces, so its origin is labelled.
+    assert not_found["error"]["data"] == {"source": "mcp", "mcpCode": -32601}
+    assert "no such tool" in not_found["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_error_data_is_forwarded_to_the_client() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+        response = await bridge._dispatch(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "rpc-error",
+                        "arguments": {"code": -32000, "data": {"retryAfter": 5}},
+                    },
+                }
+            )
+        )
+
+    assert response["error"]["code"] == -32000
+    assert response["error"]["data"]["mcpData"] == {"retryAfter": 5}
+
+
+@pytest.mark.asyncio
+async def test_codeless_backend_failure_still_maps_to_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure with no server code keeps the generic -32603."""
+    monkeypatch.setenv("MOCK_MCP_LIST_STUCK", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+        response = await asyncio.wait_for(
+            bridge._dispatch(
+                json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+            ),
+            timeout=10,
+        )
+
+    assert response["error"]["code"] == -32603
+    assert "data" not in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_tool_is_error_is_not_flattened_into_a_transport_error() -> None:
+    """A failed tool is a SUCCESSFUL JSON-RPC result carrying isError: true."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+        response = await bridge._dispatch(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "boom", "arguments": {"detail": "disk on fire"}},
+                }
+            )
+        )
+
+    assert "error" not in response
+    assert response["result"]["isError"] is True
+    # The content explaining the failure survives; that is the point of isError.
+    assert response["result"]["content"][0]["text"] == "disk on fire"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_does_not_raise_for_a_failed_tool() -> None:
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        result = await client.call_tool("boom", {})
+
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == "tool exploded"
+
+
+@pytest.mark.asyncio
+async def test_absent_is_error_is_normalized_to_false() -> None:
+    """isError is optional on the wire; callers should not re-derive the default."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        result = await client.call_tool("no-flag", {})
+
+    assert result["isError"] is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_call_tool_reports_a_failed_tool_as_not_ok() -> None:
+    """The legacy envelope claimed ok: true for a tool that failed."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+        failed = await bridge._dispatch(
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "name": "boom",
+                    "arguments": {"detail": "disk on fire"},
+                }
+            )
+        )
+        succeeded = await bridge._dispatch(
+            json.dumps({"action": "call_tool", "name": "echo", "arguments": {"text": "hi"}})
+        )
+
+    assert failed["ok"] is False
+    assert failed["error"] == "disk on fire"
+    # Not flattened away: the full result rides along with the failure.
+    assert failed["result"]["content"][0]["text"] == "disk on fire"
+    assert succeeded["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_backend_error_keeps_the_code_in_its_message() -> None:
+    """The legacy envelope has no code field, so the code lands in the string."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        bridge = ACPWebSocketBridge(client)
+        response = await bridge._dispatch(
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "name": "rpc-error",
+                    "arguments": {"code": -32601, "message": "no such tool"},
+                }
+            )
+        )
+
+    assert response["ok"] is False
+    assert "-32601" in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_result_is_a_protocol_error() -> None:
+    """A non-boolean isError is a broken server, not a tool failure."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        original = client.request
+
+        async def bad(method: str, params: dict | None = None) -> dict:
+            if method == "tools/call":
+                return {"content": [], "isError": "yes"}
+            return await original(method, params)
+
+        client.request = bad  # type: ignore[method-assign]
+        with pytest.raises(MCPProtocolError, match="isError"):
+            await client.call_tool("echo", {"text": "hi"})

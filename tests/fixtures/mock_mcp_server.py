@@ -184,6 +184,44 @@ while True:
                 },
             }
         )
+    # A tool that FAILS: a successful JSON-RPC result carrying isError: true.
+    # This is the MCP-sanctioned way to report tool-level failure, and it must
+    # not reach the client as a transport error.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "boom":
+        args = req.get("params", {}).get("arguments", {}) or {}
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": args.get("detail", "tool exploded")}
+                    ],
+                    "isError": True,
+                },
+            }
+        )
+    # A tool result that omits isError entirely. The spec defaults it to false;
+    # the client is expected to fill it in rather than leave the field missing.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "no-flag":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": [{"type": "text", "text": "no flag here"}]},
+            }
+        )
+    # A JSON-RPC ERROR response with a caller-chosen code, so a test can prove
+    # that two different server codes stay distinguishable to the client.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "rpc-error":
+        args = req.get("params", {}).get("arguments", {}) or {}
+        error = {
+            "code": args.get("code", -32603),
+            "message": args.get("message", "server said no"),
+        }
+        if "data" in args:
+            error["data"] = args["data"]
+        write({"jsonrpc": "2.0", "id": req_id, "error": error})
     elif method == "tools/call":
         params = req.get("params", {})
         if params.get("name") == "echo":

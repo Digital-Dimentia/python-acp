@@ -19,10 +19,19 @@ rather than only while one of our requests is in flight.
 - Answer server-initiated requests, including with an error.
 - Expose convenience methods for tools, prompts, and resources.
 - Walk cursor-paginated list results to exhaustion instead of returning page one.
+- Preserve the server's JSON-RPC error code on the raised exception, and keep a
+  failed tool call distinct from a failed request.
 
 ## Main Symbols
 
 - `MCPProtocolError`: protocol/runtime error type for MCP communication failures.
+  Carries `code` and `data` from the server's JSON-RPC error response, or `None`
+  for both when this client raised the failure itself.
+- `MCPProtocolError.from_error_response()`: builds one from a JSON-RPC `error` member.
+- `MCPStdioClient.call_tool()`: invokes a tool; validates the result shape and
+  normalizes the optional `isError` flag.
+- `tool_result_text()`: flattens a tool result's text blocks into one string, for
+  callers whose envelope has no room for structured content.
 - `MCPStdioClient.start()` / `stop()`: subprocess and background task lifecycle.
 - `MCPStdioClient._shutdown_process()`: the close-stdin / SIGTERM / SIGKILL escalation.
 - `MCPStdioClient.initialize()`: sends MCP `initialize`, checks the version the
@@ -169,6 +178,52 @@ demand, so these paths are tested against a real subprocess:
 | `MOCK_MCP_LIST_STUCK=1` | hand back the same `nextCursor` forever |
 | `MOCK_MCP_LIST_EMPTY_MIDDLE=1` | page 0 has no items but does carry a `nextCursor` |
 
+## Two Kinds of Tool Failure
+
+MCP distinguishes a request that failed from a tool that failed, and the two must
+not collapse into one another.
+
+| | Wire shape | Raised as | Meaning |
+|---|---|---|---|
+| **Request failed** | JSON-RPC `error` response | `MCPProtocolError` with `code` set | The call never ran: unknown tool, invalid arguments, server fault |
+| **Tool failed** | JSON-RPC `result` with `isError: true` | nothing — returned normally | The call ran and reported failure; `content` explains why |
+
+`call_tool()` therefore raises for the first and returns for the second. Treating
+`isError` as an exception would discard the content explaining the failure and
+would make a misbehaving tool indistinguishable from an unreachable backend.
+
+`isError` is optional on the wire and defaults to false. `call_tool()` fills it in
+so callers can read `result["isError"]` unconditionally, and rejects a non-boolean
+`isError` or a non-list `content` as `MCPProtocolError` — a broken server, not a
+tool failure.
+
+## Error Codes Are Preserved
+
+A JSON-RPC error response is parsed rather than stringified:
+
+```python
+raise MCPProtocolError.from_error_response(error)
+# -> MCPProtocolError("MCP error -32601: Unknown tool", code=-32601, data=None)
+```
+
+`code` and `data` are `None` whenever the failure originated here rather than at
+the server — a timeout, a dead read loop, a stopped process, a malformed result, a
+runaway pagination walk. Callers use that as the signal for whether a code is
+theirs to forward; `ws_bridge.py` forwards a real code and falls back to `-32603`
+when there is none. A server that sends a non-integer `code` is treated as having
+sent none, so junk never reaches the client-facing wire.
+
+The mock server exposes both failure kinds through dedicated tool names:
+
+| `tools/call` name | Behavior |
+|---|---|
+| `boom` | successful result with `isError: true`; `arguments.detail` sets the text |
+| `no-flag` | successful result that omits `isError` entirely |
+| `rpc-error` | JSON-RPC error response; `arguments.code` / `message` / `data` set the members |
+
+These are argument-driven rather than env-driven so one client can exercise a tool
+failure and a request failure in the same test, the way `provoke` already works.
+
 ## Concurrency Model
 
 - A write lock covers request-id allocation and the write only. Waiting for a
@@ -245,6 +300,10 @@ in the stdout loop would raise on it.
 - JSON-RPC `error` responses are surfaced as `MCPProtocolError`.
 - An `initialize` answer naming an unsupported (or missing) protocol version
   raises `MCPProtocolError` and stops the subprocess instead of continuing.
+- JSON-RPC `error` responses are surfaced as `MCPProtocolError` with the server's
+  `code` and `data` intact.
+- A `tools/call` result whose `content` is not an array, or whose `isError` is not
+  a boolean, raises `MCPProtocolError`.
 - A list walk that repeats a cursor or exceeds `_MAX_LIST_PAGES` raises
   `MCPProtocolError` instead of looping forever.
 - A reply that cannot be written (process already gone, or stdin closed by

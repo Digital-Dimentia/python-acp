@@ -40,9 +40,14 @@ pre-empt that matrix; it only places boundaries.
 | `acp.contrib.tool_calls.ToolCallTracker` and `acp.contrib.permissions.PermissionBroker` are agent-side usable | `src/acp/contrib/` |
 | `AGENT_METHODS` contains `session/cancel`; no `$/cancel_request` route exists anywhere in `meta.py`, `connection.py`, or `router.py` | `src/acp/meta.py` |
 
+### Settled since this document was written
+
+- `agent-client-protocol` is pinned at exactly `0.12.1` in `pyproject.toml`
+  (`pyacp-4ns.1`), and its `requires-python = ">=3.10,<3.15"` is now mirrored as our
+  own `requires-python = ">=3.11,<3.15"`.
+
 ### Pending verification (do not treat as fact)
 
-- The exact pinned version and whether `0.12.1` is what `pyacp-4ns.1` selects.
 - Which of the 15 `Agent` members we implement, stub, or decline — **owned by `pyacp-4ns.2`.**
 - Whether `Transport` remains structurally sufficient for a non-ASGI WebSocket binding in
   the pinned version. It is a private module (`acp._transport`, absent from `acp.__all__`),
@@ -50,7 +55,10 @@ pre-empt that matrix; it only places boundaries.
   [Decision B4](#b4-the-websocket-binding-does-not-use-acpwsserver).
 - `$/cancel_request` (`pyacp-tzd.5`). Nothing in the SDK at 0.12.1 routes it. Either it is
   ours to add on `ext_method`, or the requirement is wrong. Flagged, not decided here.
-- The `pydantic` dependency's weight on wheel and container size (`pyacp-4ns.1`).
+- The container *image* size delta from `pydantic` (`pyacp-8ub`). The wheel, sdist, and
+  installed-footprint numbers were measured by `pyacp-4ns.1` and are recorded under
+  **Dependencies** in `CLAUDE.md`/`AGENTS.md`; the image figure needs a machine with a
+  container engine.
 
 ## Layout principles
 

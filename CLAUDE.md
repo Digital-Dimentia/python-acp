@@ -120,14 +120,64 @@ Packaging targets:
 
 CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make test && make build`
 across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version
-`requires-python = ">=3.11"` claims — with `fail-fast: false` so one version's failure
-does not mask the others. Build artifacts are uploaded from the 3.11 leg only. Keep the
-matrix and the `classifiers` list in `pyproject.toml` in lockstep. Release publishing
+`requires-python = ">=3.11,<3.15"` claims — with `fail-fast: false` so one version's
+failure does not mask the others. Build artifacts are uploaded from the 3.11 leg only.
+Keep the matrix and the `classifiers` list in `pyproject.toml` in lockstep, and keep
+both inside the `requires-python` window.
+
+**That window now has a ceiling this project does not own.**
+`agent-client-protocol` declares `requires-python = ">=3.10,<3.15"`, so 3.14 is the
+newest interpreter we may claim or test against until the SDK itself moves. Adding a
+3.15 leg to the matrix, a 3.15 classifier, or raising `requires-python` past `<3.15`
+before the SDK does produces a release that cannot install. The three-way lockstep is
+therefore: **matrix ↔ classifiers ↔ `requires-python`, all bounded above by the SDK.**
+`tests/test_sdk_dependency.py` asserts the running interpreter is inside the SDK's
+declared window, so a matrix leg that drifts out of it fails loudly rather than
+silently shipping. Release publishing
 (`.github/workflows/publish-artifacts.yml`) fires on a published GitHub release and
 deliberately stays on 3.11, the floor, so the published wheel is installable across the
 whole supported range. Each leg starts from a bare runner with no venv, so it takes the
 create-and-install path; the stamp then keeps `lint`, `test`, and `build` from
 reinstalling three more times.
+
+### Dependencies
+
+Runtime dependencies are **exact-pinned** (`==`). They are protocol surface, not
+conveniences, so an upgrade is a deliberate, reviewed commit of its own rather than
+whatever a resolver picks on the day.
+
+- `websockets==12.0` — the WebSocket server transport.
+- `agent-client-protocol==0.12.1` — Zed's Agent Client Protocol SDK
+  ([agentclientprotocol/python-sdk](https://github.com/agentclientprotocol/python-sdk)).
+  It is pre-1.0, where a *minor* bump is allowed to break, which is why the pin is exact
+  rather than `~=`. It is **not** PyPI `acp-sdk` — that is IBM's Agent *Communication*
+  Protocol, a different protocol with the same abbreviation. Never substitute one for
+  the other. Its WebSocket/HTTP transport sits behind the SDK's `http` extra
+  (`httpx[http2]>=0.27` + `websockets>=12.0`); we do not take that extra, because this
+  bridge already pins `websockets` and drives its own transport.
+
+The SDK brings `pydantic>=2.7` transitively (with `pydantic-core`, `typing-extensions`,
+`typing-inspection`, `annotated-types`) — the first non-pure-Python dependency this
+project has had. Cost measured on CPython 3.14 / macOS arm64 under bead `pyacp-4ns.1`:
+
+| Measure | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| `dist/*.whl` | 15,086 B | 15,112 B | **+26 B** |
+| `dist/*.tar.gz` (sdist) | 18,817 B | 20,539 B | +1,722 B |
+| Runtime-only `site-packages` | 1,088 KiB | 11,872 KiB | **+10,784 KiB (~10.5 MiB)** |
+| Linux `cp311` wheel downloads | 130,872 B | 2,852,496 B | +2,721,624 B (~2.60 MiB) |
+
+Read that top row before panicking about the bottom two: **our own wheel is unaffected**
+— a dependency only adds `Requires-Dist` lines to `METADATA`. The sdist delta is almost
+entirely the new test file, not the dependency. The real cost is what gets *installed*:
+`pydantic-core` (4.4 MiB) and `pydantic` (4.3 MiB) together are ~85% of it; the `acp`
+package itself is ~1.0 MiB. The last row is the honest proxy for the container layer,
+since `Containerfile` builds on `python:3.11-slim` and pulls manylinux wheels;
+`pydantic-core` alone is 2.0 MiB of it because it ships a compiled Rust extension.
+
+The container *image* delta was **not measured** — neither podman nor docker is
+installed on the development machine, and `make container-image` exits 0 without
+building in that case. Tracked in bead `pyacp-8ub`.
 
 ## Architecture Overview
 

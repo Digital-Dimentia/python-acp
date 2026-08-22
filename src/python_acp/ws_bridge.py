@@ -7,7 +7,7 @@ from typing import Any
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from python_acp.mcp_stdio import MCPProtocolError, MCPStdioClient
+from python_acp.mcp_stdio import MCPProtocolError, MCPStdioClient, tool_result_text
 
 logger = logging.getLogger("python_acp.ws_bridge")
 
@@ -82,20 +82,43 @@ class ACPWebSocketBridge:
                     logger.debug("JSON-RPC params error for request %s: %s", raw_message, exc)
                     return self._jsonrpc_error(request.get("id"), -32602, str(exc))
                 except MCPProtocolError as exc:
-                    logger.debug("JSON-RPC internal error for request %s: %s", raw_message, exc)
-                    return self._jsonrpc_error(request.get("id"), -32603, str(exc))
+                    logger.debug("JSON-RPC backend error for request %s: %s", raw_message, exc)
+                    return self._mcp_error(request.get("id"), exc)
             return self._jsonrpc_error(request.get("id"), -32600, "Invalid request")
         except json.JSONDecodeError:
             logger.debug("JSON parse error for request %s", raw_message)
             return self._jsonrpc_error(None, -32700, "Parse error")
 
     @staticmethod
-    def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": code, "message": message},
-        }
+    def _jsonrpc_error(
+        request_id: Any, code: int, message: str, data: Any = None
+    ) -> dict[str, Any]:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+    @classmethod
+    def _mcp_error(cls, request_id: Any, exc: MCPProtocolError) -> dict[str, Any]:
+        """Translate a backend failure into a JSON-RPC error, code intact.
+
+        The MCP server's own code is forwarded rather than collapsed, so a
+        backend `-32601` (no such tool) stays distinguishable from a backend
+        `-32602` (bad arguments). Because that code is now shared between two
+        namespaces — the bridge's own errors and the backend's — `data.source`
+        marks which one produced it; without that marker a client could not
+        tell "this bridge has no such method" from "the MCP server behind it
+        has no such method".
+
+        Failures with no server-assigned code (timeout, transport death, a
+        malformed result) keep the generic `-32603`.
+        """
+        if exc.code is None:
+            return cls._jsonrpc_error(request_id, -32603, str(exc))
+        data: dict[str, Any] = {"source": "mcp", "mcpCode": exc.code}
+        if exc.data is not None:
+            data["mcpData"] = exc.data
+        return cls._jsonrpc_error(request_id, exc.code, str(exc), data)
 
     async def _dispatch_legacy_action(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
@@ -118,7 +141,12 @@ class ACPWebSocketBridge:
             logger.debug("Calling MCP tool '%s' with arguments %s", name, arguments)
             result = await self._mcp_client.call_tool(name, arguments)
             logger.debug("MCP tool '%s' result: %s", name, result)
-            response = {"ok": True, "result": result}
+            # A tool that failed is not a transport failure, so this does not
+            # raise — but `ok` must not claim success either. The full result
+            # rides along in both cases; the failure text is what the tool said.
+            response: dict[str, Any] = {"ok": not result["isError"], "result": result}
+            if result["isError"]:
+                response["error"] = tool_result_text(result) or f"Tool '{name}' failed"
             logger.debug("WebSocket response: %s", response)
             return response
 
@@ -233,6 +261,11 @@ class ACPWebSocketBridge:
             if not isinstance(arguments, dict):
                 raise ValueError("'arguments' must be an object")
             result = await self._mcp_client.call_tool(name, arguments)
+            # `isError: true` stays inside `result` and is deliberately NOT
+            # turned into a JSON-RPC error. The call succeeded; the tool did
+            # not. Collapsing it here would hide the content explaining why,
+            # and would make a tool failure indistinguishable from the backend
+            # being unreachable.
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
         if method == "prompts/list":

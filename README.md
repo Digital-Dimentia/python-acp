@@ -109,6 +109,42 @@ Connect to `ws://127.0.0.1:8765` and send JSON messages.
 {"action": "ping"}
 ```
 
+## Failure responses
+
+Two different things can go wrong, and they are reported differently.
+
+**The request failed** — unknown tool, bad arguments, backend unreachable. The
+MCP server's own JSON-RPC error code is forwarded rather than flattened, so
+`-32601` (no such tool) stays distinguishable from `-32602` (bad arguments).
+`data.source` marks that the code came from the MCP backend and not from the
+bridge itself:
+
+```json
+{"jsonrpc": "2.0", "id": 1, "error": {
+  "code": -32601,
+  "message": "MCP error -32601: Unknown tool",
+  "data": {"source": "mcp", "mcpCode": -32601}
+}}
+```
+
+Failures with no server-assigned code — a timeout, a dead backend — keep
+`-32603` and carry no `data`.
+
+**The tool failed** — the call ran and the tool reported an error. MCP reports
+this as a *successful* result carrying `isError: true`, and the bridge passes it
+through that way so the content explaining the failure is not lost:
+
+```json
+{"jsonrpc": "2.0", "id": 2, "result": {
+  "content": [{"type": "text", "text": "file not found"}],
+  "isError": true
+}}
+```
+
+On the legacy `action` surface the same tool failure comes back as
+`{"ok": false, "error": "file not found", "result": {...}}` — the `result` is
+still included.
+
 ## Make targets
 
 ```bash

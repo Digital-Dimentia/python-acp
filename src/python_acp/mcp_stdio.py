@@ -13,7 +13,54 @@ NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class MCPProtocolError(RuntimeError):
-    """Raised when the MCP service responds with an error."""
+    """Raised when the MCP service responds with an error.
+
+    Carries the originating JSON-RPC error `code` and `data` when the failure
+    came from the server as an error *response*. Both are `None` for failures
+    this client raises itself — timeouts, transport death, malformed results —
+    because those have no server-assigned code. Callers use that difference to
+    decide whether a code can be forwarded or must fall back to a generic one.
+
+    A failed tool call is **not** one of these. `tools/call` reports tool-level
+    failure through `isError` on a successful result; see `call_tool`.
+    """
+
+    def __init__(self, message: str, *, code: int | None = None, data: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+    @classmethod
+    def from_error_response(cls, error: Any) -> "MCPProtocolError":
+        """Build from the `error` member of a JSON-RPC error response.
+
+        A conforming server sends `{"code": int, "message": str}` with optional
+        `data`. Anything else is kept as an unstructured message with no code,
+        so a malformed server degrades to the generic path instead of putting
+        junk on the client-facing wire.
+        """
+        if not isinstance(error, dict):
+            return cls(f"MCP error: {error}")
+        code = error.get("code")
+        message = error.get("message")
+        if not isinstance(code, int):
+            return cls(f"MCP error: {error}")
+        text = message if isinstance(message, str) and message else "Unknown MCP error"
+        return cls(f"MCP error {code}: {text}", code=code, data=error.get("data"))
+
+
+def tool_result_text(result: dict[str, Any]) -> str:
+    """Flatten the text blocks of a `tools/call` result into one string.
+
+    Used to give the legacy `{"ok": false}` envelope, which has no room for
+    structured content, something human-readable to report. The JSON-RPC
+    surface forwards the full content array instead and does not need this.
+    """
+    parts: list[str] = []
+    for block in result.get("content", []):
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
 
 
 @dataclass
@@ -103,7 +150,31 @@ class MCPStdioClient:
         return await self._list_all("tools/list", "tools")
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
+        """Invoke an MCP tool.
+
+        **A tool that fails is not a protocol error.** MCP reports tool-level
+        failure as a *successful* JSON-RPC result carrying `isError: true` and
+        content explaining the failure — deliberately, so the caller can read
+        what went wrong. Only a JSON-RPC error response (the tool is unknown,
+        the arguments are invalid) raises `MCPProtocolError`.
+
+        `isError` is optional on the wire and defaults to false. It is filled in
+        here so callers can read the flag unconditionally rather than each
+        re-deriving the default.
+        """
+        result = await self.request("tools/call", {"name": name, "arguments": arguments or {}})
+
+        content = result.get("content", [])
+        if not isinstance(content, list):
+            raise MCPProtocolError("Invalid tools/call response: 'content' must be an array")
+
+        is_error = result.get("isError", False)
+        if not isinstance(is_error, bool):
+            raise MCPProtocolError("Invalid tools/call response: 'isError' must be a boolean")
+
+        result["content"] = content
+        result["isError"] = is_error
+        return result
 
     async def list_prompts(self) -> list[dict[str, Any]]:
         return await self._list_all("prompts/list", "prompts")
@@ -198,7 +269,7 @@ class MCPStdioClient:
 
         error = response.get("error")
         if error:
-            raise MCPProtocolError(str(error))
+            raise MCPProtocolError.from_error_response(error)
         result = response.get("result")
         if not isinstance(result, dict):
             raise MCPProtocolError(f"Invalid response for method {method}")

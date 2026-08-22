@@ -99,10 +99,22 @@ sequenceDiagram
         B->>M: tools/*, prompts/*, resources/*
     end
     M->>S: JSON-RPC request over stdio
-    S-->>M: JSON-RPC response
-    M-->>B: decoded result or MCPProtocolError
-    B-->>C: JSON response
+    alt server returns an error response
+        S-->>M: JSON-RPC error
+        M-->>B: MCPProtocolError (code preserved)
+        B-->>C: error payload, MCP code forwarded
+    else server returns a result
+        S-->>M: JSON-RPC result
+        M-->>B: decoded result
+        B-->>C: success payload
+    end
 ```
+
+The upper branch is why the response edge is drawn twice: a backend error and a
+backend result take different paths out of the bridge. A **third** outcome hides
+inside the lower branch — a `tools/call` result carrying `isError: true`. That is
+a tool failure, not a request failure; it travels the success path with its
+content intact and never becomes an error payload.
 
 The sequence above describes the runtime as it exists today. It changes shape during
 the ACP v1 migration; [docs/module-boundaries.md](docs/module-boundaries.md) records
@@ -125,3 +137,6 @@ which beads redraw it.
   - Legacy action messages (`action` field)
   - JSON-RPC-like messages (`method` field)
 - Unsupported JSON-RPC methods return a `-32601` method-not-found error payload.
+- Error codes from the MCP backend are forwarded rather than collapsed into
+  `-32603`, tagged with `data.source = "mcp"` to mark whose namespace they are
+  from. See [the bridge module docs](src/python_acp/ws_bridge.md#error-mapping).

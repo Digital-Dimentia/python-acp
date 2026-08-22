@@ -63,17 +63,20 @@ before the WebSocket listener binds. Before the `initialize` result arrives the 
 SHOULD send nothing but `ping`; before `notifications/initialized` arrives a
 well-behaved server sends nothing but `ping` and log messages.
 
-**Version negotiation is real, and we don't do it.** We send `"2024-11-05"`. If the
-server does not support it, it MUST answer with a version it does support — and we
-throw that away (`initialize` returns the result dict; nothing reads
-`result["protocolVersion"]`). Against a server that has dropped `2024-11-05`, the
-symptom is a successful handshake followed by confusing failures later. If you touch
-`initialize`, compare the returned version against what we sent and fail loudly on a
-mismatch.
+**Version negotiation is real, and `initialize` performs it.** We propose
+`_MCP_PROTOCOL_VERSION` (`"2024-11-05"`); the server replies with the revision it will
+actually use, which need not be the one we asked for. `_agreed_protocol_version` checks
+that reply against `_SUPPORTED_MCP_PROTOCOL_VERSIONS` and raises `MCPProtocolError` when
+it is missing or unusable; `initialize` then stops the subprocess and never sends
+`notifications/initialized`. Do not soften that into a warning — half a handshake is
+worse than none, because the mismatch resurfaces later as unrelated-looking failures.
+Accepting a newer revision means adding it to `_SUPPORTED_MCP_PROTOCOL_VERSIONS`, not
+skipping the check.
 
 **Shutdown has a prescribed order** — close stdin, wait, `SIGTERM`, wait, `SIGKILL`.
-`stop()` currently starts at `terminate()` and skips the stdin close, so servers that
-exit cleanly on EOF get signalled instead.
+`_shutdown_process` implements exactly that, escalating only when the server fails to
+exit within 2s at each step. Do not reorder it: a conforming server exits on EOF, and
+starting at `terminate()` denies it the teardown it was written to run.
 
 ## Capabilities are a promise you must keep
 
@@ -97,7 +100,8 @@ same change.** The mapping:
 
 Server capabilities move the other way. Treat the `initialize` result as the source of
 truth for what to call; a server that omits `prompts` will answer `prompts/list` with
-`-32601`, and today that surfaces to the WebSocket client as a generic `-32603`.
+`-32601`, and that code now reaches the WebSocket client intact instead of collapsing
+into a generic `-32603`.
 
 | Server capability | Unlocks |
 |---|---|
@@ -114,12 +118,19 @@ Outbound — what `MCPStdioClient` wraps today, and the shape each returns:
 | Method | Wrapper | Result shape |
 |---|---|---|
 | `initialize` | `initialize()` | `{protocolVersion, capabilities, serverInfo}` |
-| `tools/list` | `list_tools()` | `{tools: [{name, description, inputSchema}], nextCursor?}` |
+| `tools/list` | `list_tools()` | `[{name, description, inputSchema}]` — every page |
 | `tools/call` | `call_tool(name, arguments)` | `{content: [...], isError: bool}` |
-| `prompts/list` | `list_prompts()` | `{prompts: [{name, description, arguments}], nextCursor?}` |
+| `prompts/list` | `list_prompts()` | `[{name, description, arguments}]` — every page |
 | `prompts/get` | `get_prompt(name, arguments)` | `{description, messages: [{role, content}]}` |
-| `resources/list` | `list_resources()` | `{resources: [{uri, name, mimeType}], nextCursor?}` |
-| `resources/read` | `read_resource(uri, arguments)` | `{contents: [{uri, mimeType, text\|blob}]}` |
+| `resources/list` | `list_resources()` | `[{uri, name, mimeType}]` — every page |
+| `resources/read` | `read_resource(resource_id, arguments)` | `{contents: [{uri, mimeType, text\|blob}]}` |
+
+The three `*_list` wrappers all go through `_list_all`, which walks `nextCursor` to
+exhaustion and hands back one flat list — not the raw page envelope. An absent
+`nextCursor` is the only terminator; an empty page is not one. Because the walk is
+driven entirely by the server it is bounded twice — a repeated cursor and
+`_MAX_LIST_PAGES` (100) both raise `MCPProtocolError` rather than looping forever. A new
+list method belongs on `_list_all` too, not on a bare `request()`.
 
 Everything else goes through the generic `request()` / `notify()`. Not yet wrapped, in
 rough order of usefulness here: `ping`, `resources/templates/list`,
@@ -143,15 +154,23 @@ one is set and are dropped with a debug log when it is not.
 This trips people up because two of them look like success:
 
 1. **JSON-RPC error response** — `{"error": {"code", "message"}}`. `request()` raises
-   `MCPProtocolError(str(error))`. Note the code is stringified into the message and
-   lost; `ws_bridge` then maps every one of these to ACP `-32603`. A server's `-32601`
-   and its `-32602` are indistinguishable to a WebSocket client today.
+   `MCPProtocolError.from_error_response(error)`, which keeps the server's `code` and
+   `data` on the exception. `ws_bridge` forwards that code to the WebSocket client and
+   tags it `data.source = "mcp"`, so a backend `-32601` stays distinguishable from a
+   backend `-32602` — and from the bridge's own `-32601`. Only failures with no
+   server-assigned code (timeout, transport death, a malformed `error` member) fall
+   back to `-32603`.
 2. **Tool execution failure** — a *successful* JSON-RPC result carrying
    `{"isError": true, "content": [...]}`. This is deliberate in MCP: the model is meant
-   to see the failure. Nothing in this repo inspects `isError` (`ws_bridge.py:119`,
-   `ws_bridge.py:235`), so a failed tool call reaches the client as `{"ok": true}`. If
-   a task says "surface tool errors," this is the line to change — and changing it is a
-   wire-contract change, so read the `acp-protocol` skill first.
+   to see the failure. `call_tool` normalizes the optional field into a real boolean and
+   rejects a non-boolean one, so both dispatchers can rely on it being present. The two
+   surfaces then answer differently *on purpose*: the legacy action returns
+   `{"ok": false, "error": <the tool's own text>, "result": ...}`, while `tools/call` on
+   the JSON-RPC surface returns the result unchanged with `isError` still inside it.
+   Do not "fix" the JSON-RPC side into a JSON-RPC error — the call succeeded and only
+   the tool failed, and collapsing it would hide the content explaining why and make a
+   failed tool indistinguishable from an unreachable backend. Either surface's behavior
+   here is wire contract, so read the `acp-protocol` skill before changing it.
 3. **Transport death** — closed stdout, a dead read loop, or `stop()`. `_fail_pending`
    fails every outstanding future with `MCPProtocolError`, so callers get an error
    rather than hanging.
@@ -185,14 +204,11 @@ Anything that adds or renames a module also triggers the `repo-docs-sync` skill.
 
 Real gaps, in rough priority order. Check beads before filing a duplicate.
 
-- `initialize` ignores the server's returned `protocolVersion` — no negotiation.
 - `"capabilities": {}` is sent, so no server will ever exercise `on_server_request`.
-- `stop()` skips the stdin close before `SIGTERM`.
-- No pagination: `nextCursor` is ignored by all three `*_list` wrappers, so a paginated
-  server silently returns only its first page.
+- `_SUPPORTED_MCP_PROTOCOL_VERSIONS` holds exactly one revision, so a server that has
+  moved past `2024-11-05` is refused rather than met halfway. Negotiation happens; the
+  accepted set is what is narrow.
 - Timeouts do not send `notifications/cancelled`.
-- Server error codes collapse into an `MCPProtocolError` message string.
-- `isError` on tool results is never inspected.
 - `read_resource` forwards an `arguments` param that is not in the MCP spec —
   `resources/read` takes `uri` only. The mock server honors it; a real server will
   ignore it. Templated resources are meant to be expanded client-side into a concrete
@@ -200,7 +216,10 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
 
 ## Protocol version
 
-`"2024-11-05"` is hardcoded in `MCPStdioClient.initialize`. It is unrelated to
+`"2024-11-05"` is the module-level `_MCP_PROTOCOL_VERSION` in `mcp_stdio.py`, and
+`_SUPPORTED_MCP_PROTOCOL_VERSIONS` is the set `initialize` will accept back. Change both
+together — proposing a revision we would then refuse is a handshake that always fails.
+The MCP version is unrelated to
 `_SUPPORTED_PROTOCOL_VERSION = 1` in `ws_bridge.py`, which is the ACP version. Two
 protocols, two version fields — do not "unify" them.
 

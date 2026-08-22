@@ -60,7 +60,8 @@ from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
 from python_acp.sessions import SessionRegistry, TurnAlreadyRunningError, UnknownSessionError
-from python_acp.turns import IdleTurnExecutor, TurnContext, TurnExecutor
+from python_acp.turn_mcp_router import McpToolRouterExecutor
+from python_acp.turns import TurnContext, TurnExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +90,18 @@ class PythonAcpAgent:
         # socket, and a per-agent registry would mean a client could not resume a session
         # it created on a connection that has since dropped. A default would hide that.
         self._sessions = sessions
-        self._executor = executor or IdleTurnExecutor()
+        # The backend registry has to exist before the default executor can be built
+        # over it, which is why this line reads out of order with the parameters.
+        backend_registry = backends if backends is not None else McpBackendRegistry()
+        # Decision D3's default (`pyacp-hnk.2`): a deterministic MCP tool-router, no LLM.
+        # `turns.IdleTurnExecutor` remains for callers that want a turn to do nothing.
+        self._executor = executor or McpToolRouterExecutor(backend_registry)
         # Same sharing rule as the session registry, and for the same reason: a
         # session's MCP servers outlive the connection that created it. Teardown is the
         # session registry's `on_close` hook, not ours — `cli.py` wires the two together
         # (`SessionRegistry(on_close=backends.close)`), which is the only place that can,
         # because it is the only place that constructs both.
-        self._backends = backends if backends is not None else McpBackendRegistry()
+        self._backends = backend_registry
         # Mirrors the connection's `use_unstable_protocol`. It changes what `initialize`
         # may advertise, because the SDK's router refuses `session/close`, `/fork`, and
         # `/resume` outright when the flag is off — see `capabilities.py`.

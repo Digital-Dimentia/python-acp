@@ -107,8 +107,9 @@ async def test_a_real_client_runs_the_create_prompt_cycle_over_stdio() -> None:
         )
 
     assert created.session_id
-    # The default executor completes without doing anything until `pyacp-hnk.2` ships.
-    assert result.stop_reason == "end_turn"
+    # The default executor is the MCP tool-router; prose is not an invocation, so it
+    # refuses rather than pretending to have understood.
+    assert result.stop_reason == "refusal"
 
 
 async def test_cancelling_over_the_wire_reaches_the_session() -> None:
@@ -124,7 +125,8 @@ async def test_cancelling_over_the_wire_reaches_the_session() -> None:
             conn.prompt(session_id=created.session_id, prompt=[]), timeout=30
         )
 
-    assert result.stop_reason == "end_turn"
+    # An empty prompt names no tool. What matters here is that the session still works.
+    assert result.stop_reason == "refusal"
 
 
 async def test_a_stale_session_id_is_invalid_params_over_the_wire() -> None:
@@ -248,7 +250,7 @@ async def test_the_agent_serves_a_session_with_no_process_wide_backend() -> None
             conn.prompt(session_id=created.session_id, prompt=[]), timeout=30
         )
 
-    assert result.stop_reason == "end_turn"
+    assert result.stop_reason == "refusal"
 
 
 async def test_a_session_can_bring_its_own_mcp_server() -> None:

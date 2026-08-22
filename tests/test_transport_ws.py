@@ -87,8 +87,18 @@ class FakeWebSocket:
         return await asyncio.wait_for(self._replies.get(), timeout=TIMEOUT)
 
     async def ask(self, message: dict[str, Any] | str) -> dict[str, Any]:
+        """Send one message and return the **response** to it.
+
+        Notifications the agent sends on the way — `session/update` from a running turn —
+        arrive on the same socket and are skipped here rather than mistaken for the
+        reply. They stay in `sent` for a test that wants them.
+        """
         self.feed(message)
-        return await self.next_reply()
+        wanted = message.get("id") if isinstance(message, dict) else None
+        while True:
+            reply = await self.next_reply()
+            if wanted is None or reply.get("id") == wanted:
+                return reply
 
 
 @contextlib.asynccontextmanager
@@ -169,7 +179,8 @@ async def test_a_websocket_client_can_run_the_session_lifecycle() -> None:
         )
 
     assert created["result"]["sessionId"]
-    assert prompted["result"]["stopReason"] == "end_turn"
+    # An empty prompt names no tool for the default MCP tool-router to run.
+    assert prompted["result"]["stopReason"] == "refusal"
 
 
 async def test_sessions_outlive_the_connection_that_created_them() -> None:
@@ -206,7 +217,7 @@ async def test_sessions_outlive_the_connection_that_created_them() -> None:
             second.hang_up()
             await asyncio.wait_for(second_connection, timeout=TIMEOUT)
 
-    assert prompted["result"]["stopReason"] == "end_turn"
+    assert prompted["result"]["stopReason"] == "refusal"
 
 
 async def test_unstable_methods_are_reachable_over_websocket() -> None:

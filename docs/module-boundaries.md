@@ -95,7 +95,7 @@ pre-empt that matrix; it only places boundaries.
 | `agent.py` | The `acp.interfaces.Agent` implementation. Method-shaped translation only: validate, delegate, serialize. Holds the `Client` handle received via `on_connect`. Owns the `initialize` capability block. | Session state, turn logic, MCP calls, transport lifecycle | `PythonAcpAgent` | `pyacp-tzd.1`, `pyacp-tzd.4` |
 | `sessions.py` | `Session` records — id, cwd, `additionalDirectories`, mode id, config options, title, timestamps, the in-flight turn — and the registry that creates, looks up, forks, resumes, lists, and closes them | JSON-RPC shapes; MCP subprocesses; prompt execution; **path validation**, which is `pyacp-3rw.4`'s | `Session`, `SessionRegistry`, `UnknownSessionError`, `TurnAlreadyRunningError` | `pyacp-3rw.1` ✔, `pyacp-3rw.3` ✔, `pyacp-3rw.4` ✔ |
 | `turns.py` | The `TurnExecutor` Protocol (D3), the turn context handed to it (session handle, client handle, `session/update` channel), and `stopReason` semantics | Any concrete execution strategy | `TurnExecutor`, `TurnContext`, `TurnResult`, `Gate`, `ClientGates`, `IdleTurnExecutor` | seeded by `pyacp-3rw.2` ✔, completed by `pyacp-hnk.1` ✔; `stopReason` breadth remains `pyacp-hnk.5`'s |
-| `turn_mcp_router.py` | The shipped default executor: map prompt content blocks to MCP tool calls, emit `session/update` through the client handle, return a `stopReason` | Being the only possible executor; being imported by `agent.py` directly (it is selected, not hardcoded) | `McpToolRouterExecutor` | `pyacp-hnk.2`, `pyacp-hnk.4`, `pyacp-eg1.1` |
+| `turn_mcp_router.py` | The shipped default executor: parse each text prompt block as a JSON tool invocation, run it against the session's MCP backends, emit real `tool_call` status transitions through the context, return a `stopReason`. **Owns the invocation convention**, which the ACP spec does not define | Being the only possible executor; reasoning, planning, or retrying | `McpToolRouterExecutor`, `Invocation`, `PromptConventionError`, `CONVENTION` | `pyacp-hnk.2` ✔; result mapping widened by `pyacp-eg1.1`, variants by `pyacp-hnk.4` |
 | `mcp_registry.py` | Per-session MCP backends: spawn/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session then by name, with lifetime bound to the session | The stdio wire protocol itself; **reuse across sessions**, which is refused on purpose | `McpBackendRegistry`, `connect_stdio`, `Connector`, `UnknownBackendError` | `pyacp-db3` ✔ |
 | `mcp_stdio.py` | **Unchanged role.** One MCP server subprocess: stdio framing, `initialize` handshake, stderr drain, request correlation, `MCPProtocolError` | Knowing about ACP, sessions, or more than one server | `MCPStdioClient`, `MCPProtocolError` | already exists; hardened by `pyacp-eg1.1`, `pyacp-z3y`, `pyacp-pb7`, `pyacp-a92`, `pyacp-k5w`, `pyacp-ua1`, `pyacp-x8l` |
 | `transport_stdio.py` | Binding the agent to the process's own stdin/stdout via the SDK's stdio helpers, and the listen/shutdown loop | Argument parsing; anything agent-shaped | `run_stdio(agent, ...)` | `pyacp-tzd.2` |
@@ -291,6 +291,20 @@ Also settled here, matching `sessions.py`'s fork semantics: **two sessions namin
 server do not share a subprocess.** Sharing would make `session/close` on one tear down
 another's tools, and the two modules must agree or a forked session's close becomes a
 landmine.
+
+### B6d. `agent.py` does import the default executor (`pyacp-hnk.2`)
+
+The table says `turn_mcp_router.py` must not be "imported by `agent.py` directly (it is
+selected, not hardcoded)". It is imported, and the distinction the rule was reaching for
+survives: `PythonAcpAgent(executor=...)` still takes any `TurnExecutor`, and the import
+only supplies a **default** when the caller passes none.
+
+The alternative — a factory, a registry, or leaving `agent.py` with no default at all —
+buys indirection and costs the property that matters more: an agent constructed with no
+arguments does the thing the project ships, rather than nothing. `IdleTurnExecutor` doing
+nothing was acceptable while there was no executor; keeping it as the default after
+`pyacp-hnk.2` would mean the shipped behaviour was reachable only by wiring it up
+correctly.
 
 ### B7. `errors.py` exists even though it is small
 

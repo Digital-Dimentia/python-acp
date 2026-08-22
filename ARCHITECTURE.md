@@ -16,7 +16,8 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
 - Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
-- Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
+- Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
+- MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
@@ -35,6 +36,7 @@ flowchart LR
     Sessions["sessions.py<br/>SessionRegistry"]
     Paths["paths.py<br/>containment rule"]
     Turns["turns.py<br/>TurnExecutor"]
+    Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess<br/>one per session server")]
@@ -56,6 +58,8 @@ flowchart LR
     Agent --> Sessions
     Agent --> Paths
     Agent --> Turns
+    Turns -.implemented by.-> Router
+    Router --> Backends
     Agent --> Backends
     Sessions -. "on_close" .-> Backends
     Turns -. "session/update via the Client handle" .-> SDK
@@ -141,6 +145,7 @@ flowchart LR
     Errors["errors.py"]
     Sessions["sessions.py"]
     Turns["turns.py<br/>TurnExecutor"]
+    Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Router["turn_mcp_router.py"]
     Registry["mcp_registry.py"]
     MCPClient["mcp_stdio.py"]
@@ -159,6 +164,8 @@ flowchart LR
     Agent --> Sessions
     Agent --> Paths
     Agent --> Turns
+    Turns -.implemented by.-> Router
+    Router --> Backends
     Turns -.implemented by.-> Router
     Legacy --> Registry
     Router --> Registry
@@ -234,6 +241,7 @@ there is no legacy surface on stdio, and never was.
 - [Path constraints module](src/python_acp/paths.md)
 - [Session registry module](src/python_acp/sessions.md)
 - [Turn executor seam module](src/python_acp/turns.md)
+- [MCP tool-router executor module](src/python_acp/turn_mcp_router.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)

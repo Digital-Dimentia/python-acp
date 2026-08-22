@@ -31,6 +31,7 @@
   - [paths.py](src/python_acp/paths.md)
   - [sessions.py](src/python_acp/sessions.md)
   - [turns.py](src/python_acp/turns.md)
+  - [turn_mcp_router.py](src/python_acp/turn_mcp_router.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_registry.py](src/python_acp/mcp_registry.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
@@ -92,8 +93,7 @@ nothing else**, and all diagnostics go to stderr.
 
 The agent serves `initialize`, the full session lifecycle (`new`, `prompt`, `cancel`,
 `load`, `list`, `fork`, `resume`, `close`), and refuses `authenticate`.
-`session/set_mode` and `session/set_config_option` return `-32601` until Phase 5, and a
-prompt turn completes without running anything until Phase 3 ships the MCP tool-router.
+`session/set_mode` and `session/set_config_option` return `-32601` until Phase 5.
 See [agent.py](src/python_acp/agent.md) for the per-method state and
 [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
 
@@ -134,6 +134,42 @@ Only **stdio** servers are accepted. `initialize` advertises
 refused with `-32602` rather than accepted and quietly ignored. If any server fails to
 start, the whole `session/new` fails — a session id whose tools do not exist would be
 worse than an error.
+
+### Running a tool
+
+`session/prompt` is served by a **deterministic MCP tool-router** — there is no LLM in
+this runtime, so a prompt does not get interpreted, it gets *routed*. Each text content
+block must be a JSON object naming an MCP tool:
+
+```json
+{"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {
+  "sessionId": "...",
+  "prompt": [
+    {"type": "text", "text": "{\"tool\": \"echo\", \"arguments\": {\"text\": \"hi\"}}"}
+  ]
+}}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `tool` | yes | The MCP tool name |
+| `arguments` | no, defaults to `{}` | Passed to `tools/call` unchanged |
+| `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
+
+Each text block is one call, run in order. The turn streams `tool_call` and
+`tool_call_update` notifications with real `pending` → `in_progress` →
+`completed`/`failed` transitions, and returns `stopReason: "end_turn"`.
+
+A prompt that is not an invocation — prose, malformed JSON, an empty prompt — is answered
+with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convention. It is
+not an error, and **nothing runs**: the whole prompt is parsed before the first tool, so a
+malformed third block does not leave two side effects behind.
+
+A tool that *fails* is not a failed turn. MCP reports tool failure as a successful result
+carrying `isError`, so the call's update says `status: "failed"` with the tool's own
+output, the remaining calls still run, and the turn ends normally.
+
+See [turn_mcp_router.py](src/python_acp/turn_mcp_router.md).
 
 ## WebSocket actions (deprecated)
 

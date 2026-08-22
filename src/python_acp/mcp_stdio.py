@@ -39,6 +39,10 @@ class MCPStdioClient:
     # Cursor pagination is driven entirely by the server, so a broken or hostile
     # one can keep handing out cursors forever. Bound the walk and fail loudly.
     _MAX_LIST_PAGES = 100
+    # Shutdown budget, per the MCP stdio shutdown sequence: how long a server
+    # gets to exit on EOF before SIGTERM, and after SIGTERM before SIGKILL.
+    _STOP_STDIN_TIMEOUT = 2.0
+    _STOP_TERMINATE_TIMEOUT = 2.0
 
     def __post_init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -62,19 +66,72 @@ class MCPStdioClient:
         self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))
 
     async def stop(self) -> None:
-        if self._proc is None:
+        proc = self._proc
+        if proc is None:
             return
-        if self._proc.returncode is None:
-            self._proc.terminate()
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                self._proc.kill()
-                await self._proc.wait()
-        await self._cancel_task("_stdout_task")
-        await self._cancel_task("_stderr_task")
-        self._fail_pending(MCPProtocolError("MCP process stopped"))
-        self._proc = None
+        try:
+            await self._shutdown_process(proc)
+        finally:
+            # The read loop is cancelled only after the process is gone, so the
+            # server's final stdout output is still consumed on the way out.
+            await self._cancel_task("_stdout_task")
+            await self._cancel_task("_stderr_task")
+            self._fail_pending(MCPProtocolError("MCP process stopped"))
+            self._proc = None
+
+    async def _shutdown_process(self, proc: asyncio.subprocess.Process) -> None:
+        """Shut the server down the way the MCP stdio transport prescribes.
+
+        Close the server's stdin, wait for it to exit on EOF, escalate to
+        SIGTERM, wait again, then SIGKILL. Starting at SIGTERM would signal
+        every server that shuts down cleanly on EOF -- which is most of them,
+        and is the documented contract they are written against.
+        """
+        if proc.returncode is not None:
+            return
+
+        await self._close_stdin(proc)
+        if await self._wait_for_exit(proc, self._STOP_STDIN_TIMEOUT):
+            return
+
+        if self._signal(proc, "terminate") and await self._wait_for_exit(
+            proc, self._STOP_TERMINATE_TIMEOUT
+        ):
+            return
+
+        self._signal(proc, "kill")
+        await proc.wait()
+
+    async def _close_stdin(self, proc: asyncio.subprocess.Process) -> None:
+        """Close the server's stdin and wait for the pipe to actually shut."""
+        stdin = proc.stdin
+        if stdin is None:
+            return
+        try:
+            if not stdin.is_closing():
+                stdin.close()
+            await asyncio.wait_for(stdin.wait_closed(), timeout=self._STOP_STDIN_TIMEOUT)
+        except Exception:
+            # Best-effort: a broken pipe here just means the server is already
+            # gone, and nothing about it should stop the rest of the shutdown.
+            logger.debug("Closing MCP stdin did not complete cleanly", exc_info=True)
+
+    @staticmethod
+    async def _wait_for_exit(proc: asyncio.subprocess.Process, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    @staticmethod
+    def _signal(proc: asyncio.subprocess.Process, action: str) -> bool:
+        """Send SIGTERM/SIGKILL, tolerating a process reaped in the meantime."""
+        try:
+            getattr(proc, action)()
+        except ProcessLookupError:
+            return False
+        return True
 
     async def __aenter__(self) -> "MCPStdioClient":
         await self.start()
@@ -205,10 +262,13 @@ class MCPStdioClient:
         return result
 
     async def _write(self, payload: dict[str, Any]) -> None:
-        if self._proc is None or self._proc.stdin is None:
+        stdin = self._proc.stdin if self._proc is not None else None
+        # is_closing() covers the window inside stop() where stdin has been
+        # closed but the process has not been reaped yet.
+        if stdin is None or stdin.is_closing():
             raise MCPProtocolError("MCP process not running")
-        self._proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-        await self._proc.stdin.drain()
+        stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+        await stdin.drain()
 
     # ------------------------------------------------------------------
     # Inbound

@@ -106,6 +106,20 @@ SDK itself refuses to keep, so `PythonAcpAgent(unstable=...)` mirrors the connec
 flag and `capabilities.build_agent_capabilities(unstable=...)` withholds those three rows
 when it is off. Both transports pass `True`.
 
+## Paths are validated here and nowhere else
+
+`cwd` and `additionalDirectories` must be absolute — `-32602` otherwise — and are stored
+lexically tidied. Every method that carries them validates them: `session/new`,
+`session/fork`, and also `session/resume` and `session/load`, which receive a `cwd` they
+deliberately do **not** apply. Accepting a relative path there and silently ignoring it
+would tell a client its path was fine when it was both invalid and unused.
+
+Validation runs *before* `SessionRegistry.create`, so a refused request leaves nothing
+behind.
+
+The containment rule those roots define — and why it resolves symlinks on both sides —
+is [paths.py](paths.md). Phase 4.2's `fs/*` calls are its first consumer.
+
 ## `session/new` refuses what `initialize` did not advertise
 
 `mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in

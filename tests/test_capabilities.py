@@ -44,6 +44,9 @@ CAPABILITY_EVIDENCE: dict[tuple[str, ...], str] = {
     ("session_capabilities", "fork"): "test_agent:test_fork_copies_the_session_under_a_new_id",
     ("session_capabilities", "resume"): "test_agent:test_resume_returns_the_same_session_without_replaying",
     ("session_capabilities", "close"): "test_agent:test_close_ends_the_session_and_releases_its_backends",
+    ("session_capabilities", "additional_directories"): (
+        "test_agent:test_new_session_stores_additional_directories_validated_and_tidied"
+    ),
 }
 
 

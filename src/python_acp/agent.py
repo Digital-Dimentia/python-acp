@@ -58,6 +58,7 @@ from python_acp.capabilities import (
 )
 from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
+from python_acp.paths import normalize_roots
 from python_acp.sessions import SessionRegistry, TurnAlreadyRunningError, UnknownSessionError
 from python_acp.turns import IdleTurnExecutor, TurnContext, TurnExecutor
 
@@ -227,17 +228,17 @@ class PythonAcpAgent:
     ) -> NewSessionResponse:
         """Create a session and hand back its id.
 
-        `cwd` and `additionalDirectories` are stored as given; `pyacp-3rw.4` enforces the
-        absolute-path constraint, at this edge, in one place.
+        `cwd` and `additionalDirectories` are validated here and nowhere else — `-32602`
+        for a relative one — and stored tidied. See `paths.py` for why they are
+        normalised but not resolved, and for the containment rule Phase 4.2 builds on.
 
         `modes` and `configOptions` are absent because nothing offers any yet
         (`pyacp-fln.2`, `pyacp-fln.3`). The registry carries both, so those beads change
         what is created rather than what is returned.
         """
         stdio_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
-        session = self._sessions.create(
-            cwd, additional_directories=additional_directories or ()
-        )
+        root, extra = normalize_roots(cwd, additional_directories)
+        session = self._sessions.create(root, additional_directories=extra)
         try:
             await self._backends.open(session.session_id, stdio_servers)
         except Exception:
@@ -272,6 +273,7 @@ class PythonAcpAgent:
         for: a client that received the result first would have no way to tell the
         replayed updates from live ones on a session that is already running.
         """
+        normalize_roots(cwd, additional_directories)
         session = self._sessions.get(session_id)
         logger.debug("Replaying %d update(s) for session %s", len(session.history), session_id)
         for update in session.history:
@@ -319,9 +321,8 @@ class PythonAcpAgent:
         stdio_servers = (
             None if mcp_servers is None else self._reject_unsupported_mcp_servers(mcp_servers)
         )
-        forked = self._sessions.fork(
-            session_id, cwd=cwd, additional_directories=additional_directories
-        )
+        root, extra = normalize_roots(cwd, additional_directories)
+        forked = self._sessions.fork(session_id, cwd=root, additional_directories=extra)
         try:
             await self._backends.fork(session_id, forked.session_id, stdio_servers)
         except Exception:
@@ -352,6 +353,10 @@ class PythonAcpAgent:
         mid-session would silently invalidate paths and tool names the transcript already
         refers to; a client that wants different ones wants a fork.
         """
+        # Validated even though it is not applied: accepting a relative `cwd` here and
+        # silently ignoring it would tell a client its path was fine when it was both
+        # invalid and unused.
+        normalize_roots(cwd, additional_directories)
         session = self._sessions.resume(session_id)
         return ResumeSessionResponse(
             modes=session.modes,

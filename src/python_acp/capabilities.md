@@ -42,7 +42,7 @@ offered", and anything else owes the suite a proof.
 | `sessionCapabilities.list` | **`{}`** | `pyacp-3rw.3` |
 | `sessionCapabilities.fork` / `.resume` / `.close` | **`{}`**, *only on an unstable connection* | `pyacp-3rw.3` |
 | `promptCapabilities.image` / `.audio` / `.embeddedContext` | `false` | `pyacp-hnk.3` |
-| `sessionCapabilities.additionalDirectories` | `null` | `pyacp-3rw.4` |
+| `sessionCapabilities.additionalDirectories` | **`{}`** | `pyacp-3rw.4` |
 | `mcpCapabilities.http` / `.sse` / `.acp` | `false` | never — transports we do not drive |
 | `sessionCapabilities.delete` | `null` | never — no route, no `Agent` member in 0.12.1 |
 | `auth.logout` | `null` | never — nothing to log out of, and `logout` is unrouted |

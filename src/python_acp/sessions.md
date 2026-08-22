@@ -127,9 +127,11 @@ decides whether to cancel and retry.
 
 ## What is *not* here
 
-- **Path validation.** `pyacp-3rw.4` enforces the absolute-path constraint on `cwd` and
-  `additionalDirectories`, at the edge where a bad value must become `-32602`. A registry
-  that also validated would put the rule in two places and let them disagree.
+- **Path validation.** [paths.py](paths.md) owns the rules and [agent.py](agent.md)
+  applies them, at the edge where a bad value must become `-32602`. A registry that also
+  validated would put the rule in two places and let them disagree — so
+  `SessionRegistry.create("relative/path")` is deliberately fine, and there is a test
+  saying so. `Session.roots` is the declaration `paths.require_contained` checks against.
 - **MCP backends.** A session's backends are keyed by session id in
   [mcp_registry.py](mcp_registry.md). The registry is the only thing that knows when a
   session ends, so it takes an `on_close` hook — that is the seam, and the only coupling.

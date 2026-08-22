@@ -13,9 +13,94 @@ if _stderr_bytes:
     sys.stderr.flush()
 
 
+# Cursor pagination knobs. Default is a single page with no nextCursor, which
+# is what every pre-existing test expects.
+#   MOCK_MCP_LIST_PAGES=N  -> serve N pages; nextCursor is absent on the last.
+#   MOCK_MCP_LIST_STUCK=1  -> always hand back the same nextCursor, forever.
+#   MOCK_MCP_LIST_EMPTY_MIDDLE=1 -> page 0 carries no items but does carry a
+#                            nextCursor, proving an empty page is not a terminator.
+_list_pages = int(os.environ.get("MOCK_MCP_LIST_PAGES", "1"))
+_list_stuck = os.environ.get("MOCK_MCP_LIST_STUCK") == "1"
+_list_empty_middle = os.environ.get("MOCK_MCP_LIST_EMPTY_MIDDLE") == "1"
+
+
 def write(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
+
+
+def page_index(req):
+    """Recover the requested page number from the opaque cursor we minted."""
+    cursor = (req.get("params") or {}).get("cursor")
+    if not isinstance(cursor, str) or not cursor.startswith("page-"):
+        return 0
+    try:
+        return int(cursor[len("page-") :])
+    except ValueError:
+        return 0
+
+
+def list_result(req, key, item_for_page):
+    """Build one page of a cursor-paginated list result."""
+    index = page_index(req)
+    if _list_empty_middle and index == 0:
+        items = []
+    else:
+        items = [item_for_page(index)]
+    result = {key: items}
+    if _list_stuck:
+        result["nextCursor"] = "stuck"
+    elif index + 1 < _list_pages:
+        result["nextCursor"] = "page-%d" % (index + 1)
+    return result
+
+
+def tool_for_page(index):
+    if index == 0:
+        return {
+            "name": "echo",
+            "description": "Echoes text",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        }
+    return {
+        "name": "echo-%d" % index,
+        "description": "Echoes text (page %d)" % index,
+        "inputSchema": {"type": "object", "properties": {}},
+    }
+
+
+def prompt_for_page(index):
+    if index == 0:
+        return {
+            "name": "greeting",
+            "description": "Build a greeting message",
+            "arguments": [{"name": "name", "required": True}],
+        }
+    return {
+        "name": "greeting-%d" % index,
+        "description": "Build a greeting message (page %d)" % index,
+        "arguments": [],
+    }
+
+
+def resource_for_page(index):
+    if index == 0:
+        return {
+            "uri": "greeting://{name}",
+            "name": "greeting-resource",
+            "description": "A greeting resource",
+            "mimeType": "text/plain",
+        }
+    return {
+        "uri": "greeting://page-%d" % index,
+        "name": "greeting-resource-%d" % index,
+        "description": "A greeting resource (page %d)" % index,
+        "mimeType": "text/plain",
+    }
 
 
 while True:
@@ -50,19 +135,7 @@ while True:
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "tools": [
-                        {
-                            "name": "echo",
-                            "description": "Echoes text",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {"text": {"type": "string"}},
-                                "required": ["text"],
-                            },
-                        }
-                    ]
-                },
+                "result": list_result(req, "tools", tool_for_page),
             }
         )
     elif method == "tools/call" and req.get("params", {}).get("name") == "provoke":
@@ -117,15 +190,7 @@ while True:
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "prompts": [
-                        {
-                            "name": "greeting",
-                            "description": "Build a greeting message",
-                            "arguments": [{"name": "name", "required": True}],
-                        }
-                    ]
-                },
+                "result": list_result(req, "prompts", prompt_for_page),
             }
         )
     elif method == "prompts/get":
@@ -160,16 +225,7 @@ while True:
             {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "resources": [
-                        {
-                            "uri": "greeting://{name}",
-                            "name": "greeting-resource",
-                            "description": "A greeting resource",
-                            "mimeType": "text/plain",
-                        }
-                    ]
-                },
+                "result": list_result(req, "resources", resource_for_page),
             }
         )
     elif method == "resources/read":

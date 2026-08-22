@@ -36,6 +36,9 @@ class MCPStdioClient:
     # asyncio caps stream readers at 64 KiB by default, which a large
     # resources/read response can exceed. Raise it so whole messages fit.
     _STREAM_LIMIT = 8 * 1024 * 1024
+    # Cursor pagination is driven entirely by the server, so a broken or hostile
+    # one can keep handing out cursors forever. Bound the walk and fail loudly.
+    _MAX_LIST_PAGES = 100
 
     def __post_init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -97,21 +100,13 @@ class MCPStdioClient:
         return result
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        response = await self.request("tools/list", {})
-        tools = response.get("tools", [])
-        if not isinstance(tools, list):
-            raise MCPProtocolError("Invalid tools/list response")
-        return tools
+        return await self._list_all("tools/list", "tools")
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
     async def list_prompts(self) -> list[dict[str, Any]]:
-        response = await self.request("prompts/list", {})
-        prompts = response.get("prompts", [])
-        if not isinstance(prompts, list):
-            raise MCPProtocolError("Invalid prompts/list response")
-        return prompts
+        return await self._list_all("prompts/list", "prompts")
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -119,11 +114,44 @@ class MCPStdioClient:
         return await self.request("prompts/get", {"name": name, "arguments": arguments or {}})
 
     async def list_resources(self) -> list[dict[str, Any]]:
-        response = await self.request("resources/list", {})
-        resources = response.get("resources", [])
-        if not isinstance(resources, list):
-            raise MCPProtocolError("Invalid resources/list response")
-        return resources
+        return await self._list_all("resources/list", "resources")
+
+    async def _list_all(self, method: str, key: str) -> list[dict[str, Any]]:
+        """Walk an MCP cursor-paginated list method to exhaustion.
+
+        MCP list results carry `nextCursor` when more pages exist; the client
+        re-issues the request with `cursor` set until the field is absent.
+        **An absent `nextCursor` is the only terminator** — an empty page in the
+        middle of a walk is legal and does not mean the end.
+
+        The loop is entirely server-driven, so it is bounded twice: a cursor the
+        server has already handed out, and a hard page ceiling. Either one raises
+        `MCPProtocolError` rather than hanging the bridge forever.
+        """
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+
+        for _ in range(self._MAX_LIST_PAGES):
+            params: dict[str, Any] = {} if cursor is None else {"cursor": cursor}
+            response = await self.request(method, params)
+
+            page = response.get(key, [])
+            if not isinstance(page, list):
+                raise MCPProtocolError(f"Invalid {method} response")
+            items.extend(page)
+
+            next_cursor = response.get("nextCursor")
+            if next_cursor is None:
+                return items
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise MCPProtocolError(f"Invalid nextCursor in {method} response")
+            if next_cursor in seen_cursors:
+                raise MCPProtocolError(f"{method} repeated cursor {next_cursor!r}")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        raise MCPProtocolError(f"{method} exceeded {self._MAX_LIST_PAGES} pages")
 
     async def read_resource(
         self, resource_id: str, arguments: dict[str, Any] | None = None

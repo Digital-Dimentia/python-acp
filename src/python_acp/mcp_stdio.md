@@ -16,6 +16,7 @@ rather than only while one of our requests is in flight.
 - Read every stdout message and route it by shape: response, server request, or notification.
 - Answer server-initiated requests, including with an error.
 - Expose convenience methods for tools, prompts, and resources.
+- Walk cursor-paginated list results to exhaustion instead of returning page one.
 
 ## Main Symbols
 
@@ -24,6 +25,10 @@ rather than only while one of our requests is in flight.
 - `MCPStdioClient.initialize()`: sends MCP `initialize` and `notifications/initialized`.
 - `MCPStdioClient.request()`: sends a request and awaits its correlated reply.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
+- `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
+  paginated list wrappers, each returning the accumulated items across all pages.
+- `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those three.
+- `MCPStdioClient._MAX_LIST_PAGES`: hard ceiling on pages walked in one list call.
 - `MCPStdioClient._read_loop()`: background task consuming all stdout messages.
 - `MCPStdioClient._handle_message()`: routes one inbound message by shape.
 - `MCPStdioClient._drain_stderr()`: background task consuming the subprocess's stderr.
@@ -79,6 +84,41 @@ waiting on us — the failure this design exists to prevent.
 `elicitation/create` maps onto ACP's `session/request_permission`, and
 `sampling/createMessage` has no answer here because this runtime has no LLM.
 
+## List Pagination
+
+MCP list results are cursor-paginated. A result carries `nextCursor` when more
+pages exist; the client re-issues the same method with `cursor` set to that
+value and keeps going. `_list_all()` implements the walk once, and all three
+list wrappers delegate to it.
+
+Two rules that are easy to get wrong:
+
+- **An absent `nextCursor` is the only terminator.** A page carrying zero items
+  is legal mid-walk and does not mean the list ended. `MOCK_MCP_LIST_EMPTY_MIDDLE=1`
+  in the mock server reproduces exactly that shape.
+- **The first request omits `cursor` entirely.** It does not send `null`.
+
+The walk is driven entirely by the server, so a broken or hostile one could keep
+issuing cursors forever. It is bounded twice, and both bounds raise
+`MCPProtocolError` rather than hanging the bridge:
+
+| Condition | Result |
+|---|---|
+| `nextCursor` absent | walk ends, accumulated items returned |
+| `nextCursor` repeats one already seen | `MCPProtocolError: <method> repeated cursor '<c>'` |
+| more than `_MAX_LIST_PAGES` (100) pages | `MCPProtocolError: <method> exceeded 100 pages` |
+| `nextCursor` present but not a non-empty string | `MCPProtocolError: Invalid nextCursor in <method> response` |
+| the page key holds a non-list | `MCPProtocolError: Invalid <method> response` |
+
+The mock server at `tests/fixtures/mock_mcp_server.py` serves paginated lists on
+demand, so these paths are tested against a real subprocess:
+
+| Env var | Effect |
+|---|---|
+| `MOCK_MCP_LIST_PAGES=N` | serve N pages; `nextCursor` is absent on the last (default 1) |
+| `MOCK_MCP_LIST_STUCK=1` | hand back the same `nextCursor` forever |
+| `MOCK_MCP_LIST_EMPTY_MIDDLE=1` | page 0 has no items but does carry a `nextCursor` |
+
 ## Concurrency Model
 
 - A write lock covers request-id allocation and the write only. Waiting for a
@@ -119,6 +159,8 @@ in the stdout loop would raise on it.
 - Non-dict or malformed stdout lines are skipped with a debug log.
 - A response whose id matches nothing pending is discarded with a debug log.
 - JSON-RPC `error` responses are surfaced as `MCPProtocolError`.
+- A list walk that repeats a cursor or exceeds `_MAX_LIST_PAGES` raises
+  `MCPProtocolError` instead of looping forever.
 - A reply that cannot be written (process already gone) is logged, not raised.
 
 ## Related

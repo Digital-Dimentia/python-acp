@@ -23,6 +23,7 @@
 
 - [System architecture](ARCHITECTURE.md)
 - Module docs:
+  - [agent.py](src/python_acp/agent.md)
   - [cli.py](src/python_acp/cli.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [ws_bridge.py](src/python_acp/ws_bridge.md)

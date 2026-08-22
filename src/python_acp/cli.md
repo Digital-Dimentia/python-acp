@@ -82,6 +82,14 @@ flowchart TD
 - Under `--transport stdio`, the client closing the pipe ends `run_stdio` and the
   process exits normally.
 
+## The session registry is created here
+
+One `SessionRegistry` per process, constructed in `_run` and handed to whichever transport
+is bound. It lives here rather than in a transport or an agent because a session must
+outlive the connection that created it — `session/resume` means nothing otherwise — and
+the WebSocket transport builds one agent per socket. See
+[sessions.py](sessions.md) and [transport_ws.py](transport_ws.md).
+
 ## Related
 
 - [Repository architecture](../../ARCHITECTURE.md)

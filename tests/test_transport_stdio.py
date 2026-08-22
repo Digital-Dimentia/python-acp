@@ -41,11 +41,14 @@ AGENT_ARGV = [
 class _NullClient:
     """The minimum an ACP client must be to hold up its end of a connection."""
 
+    def __init__(self) -> None:
+        self.updates: list[Any] = []
+
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
-        return None
+        self.updates.append((session_id, update))
 
     async def request_permission(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("The skeleton agent must not request permission yet")
+        raise AssertionError("The agent must not request permission yet")
 
 
 @contextlib.asynccontextmanager
@@ -72,9 +75,63 @@ async def test_unbuilt_methods_answer_method_not_found_over_the_wire() -> None:
         await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
 
         with pytest.raises(RequestError) as excinfo:
-            await asyncio.wait_for(conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30)
+            await asyncio.wait_for(conn.list_sessions(), timeout=30)
 
     assert excinfo.value.code == -32601
+
+
+async def test_a_real_client_runs_the_create_prompt_cycle_over_stdio() -> None:
+    """`pyacp-3rw.2`'s acceptance, end to end: a session, a turn, a stopReason.
+
+    Over a spawned process and the SDK's own client, so what is proven is what an editor
+    gets — not what the router does when called in-process.
+    """
+    async with agent_process() as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+
+        created = await asyncio.wait_for(
+            conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30
+        )
+        result = await asyncio.wait_for(
+            conn.prompt(
+                session_id=created.session_id,
+                prompt=[{"type": "text", "text": "hello"}],
+            ),
+            timeout=30,
+        )
+
+    assert created.session_id
+    # The default executor completes without doing anything until `pyacp-hnk.2` ships.
+    assert result.stop_reason == "end_turn"
+
+
+async def test_cancelling_over_the_wire_reaches_the_session() -> None:
+    """`session/cancel` is a notification, so the proof is that the next prompt still works."""
+    async with agent_process() as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+        created = await asyncio.wait_for(
+            conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30
+        )
+
+        await asyncio.wait_for(conn.cancel(session_id=created.session_id), timeout=30)
+        result = await asyncio.wait_for(
+            conn.prompt(session_id=created.session_id, prompt=[]), timeout=30
+        )
+
+    assert result.stop_reason == "end_turn"
+
+
+async def test_a_stale_session_id_is_invalid_params_over_the_wire() -> None:
+    async with agent_process() as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+
+        with pytest.raises(RequestError) as excinfo:
+            await asyncio.wait_for(
+                conn.prompt(session_id="never-existed", prompt=[]), timeout=30
+            )
+
+    assert excinfo.value.code == -32602
+    assert "never-existed" in excinfo.value.data["reason"]
 
 
 async def test_the_unstable_methods_are_reachable_over_stdio() -> None:

@@ -10,11 +10,12 @@ capability block, and one error mapping, whichever wire a client arrives on.
 
 - CLI runtime: parses startup arguments and bootstraps async services. Owns the one MCP subprocess.
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire, and nothing else.
-- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. `initialize` is live; session and prompt methods answer `-32601` until Phases 2 and 3.
+- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. `initialize`, `session/new`, `session/prompt`, and `session/cancel` are live; the extended lifecycle answers `-32601` until `pyacp-3rw.3`.
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
 - Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
-- Session registry (`sessions.py`): the `Session` record and the registry that creates, forks, resumes, lists, and closes them. **Built but not yet wired** — `session/*` still answers `-32601` until `pyacp-3rw.2`.
+- Session registry (`sessions.py`): the `Session` record and the registry that creates, forks, resumes, lists, and closes them. One per process, shared by every connection.
+- Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind, and the `session/update` emission channel. The default completes a turn without doing anything until `pyacp-hnk.2` ships the MCP tool-router.
 - MCP stdio client (`mcp_stdio.py`): drives an MCP server subprocess over newline-delimited JSON-RPC.
 
 ```mermaid
@@ -29,6 +30,8 @@ flowchart LR
     Agent["agent.py<br/>PythonAcpAgent"]
     Caps["capabilities.py"]
     Errors["errors.py"]
+    Sessions["sessions.py<br/>SessionRegistry"]
+    Turns["turns.py<br/>TurnExecutor"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess")]
 
@@ -36,6 +39,7 @@ flowchart LR
     WsClient <--> TWs
     CLI --> TStdio
     CLI --> TWs
+    CLI --> Sessions
     TStdio --> SDK
     TWs --> SDK
     TWs --> Legacy
@@ -43,6 +47,9 @@ flowchart LR
     SDK <--> Agent
     Agent --> Caps
     Agent --> Errors
+    Agent --> Sessions
+    Agent --> Turns
+    Turns -. "session/update via the Client handle" .-> SDK
     Legacy --> MCPClient
     CLI --> MCPClient
     MCPClient <--> MCPProc
@@ -209,6 +216,7 @@ there is no legacy surface on stdio, and never was.
 - [Error mapping module](src/python_acp/errors.md)
 - [Deprecated WebSocket surface module](src/python_acp/legacy_ws.md)
 - [Session registry module](src/python_acp/sessions.md)
+- [Turn executor seam module](src/python_acp/turns.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)

@@ -26,6 +26,7 @@ and for the capability block `initialize` is allowed to advertise.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -40,6 +41,7 @@ from acp.schema import (
     InitializeResponse,
     ListSessionsResponse,
     LoadSessionResponse,
+    McpServerStdio,
     NewSessionResponse,
     PromptResponse,
     ResumeSessionResponse,
@@ -55,6 +57,8 @@ from python_acp.capabilities import (
     negotiate_protocol_version,
 )
 from python_acp.errors import as_request_error
+from python_acp.sessions import SessionRegistry, TurnAlreadyRunningError, UnknownSessionError
+from python_acp.turns import IdleTurnExecutor, TurnContext, TurnExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +74,24 @@ class PythonAcpAgent:
     matrix — so no member is left off the class.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        sessions: SessionRegistry,
+        executor: TurnExecutor | None = None,
+    ) -> None:
+        # `sessions` is required rather than defaulted, and that is the point. One
+        # registry serves the whole process: the WebSocket transport builds an agent per
+        # socket, and a per-agent registry would mean a client could not resume a session
+        # it created on a connection that has since dropped. A default would hide that.
+        self._sessions = sessions
+        self._executor = executor or IdleTurnExecutor()
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
+
+    @property
+    def sessions(self) -> SessionRegistry:
+        """The process-wide session registry this agent serves."""
+        return self._sessions
 
     # ------------------------------------------------------------------
     # Connection
@@ -187,7 +206,24 @@ class PythonAcpAgent:
         mcp_servers: list[Any] | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
-        raise self._not_implemented("session/new")
+        """Create a session and hand back its id.
+
+        `cwd` and `additionalDirectories` are stored as given; `pyacp-3rw.4` enforces the
+        absolute-path constraint, at this edge, in one place.
+
+        `modes` and `configOptions` are absent because nothing offers any yet
+        (`pyacp-fln.2`, `pyacp-fln.3`). The registry carries both, so those beads change
+        what is created rather than what is returned.
+        """
+        self._reject_unsupported_mcp_servers(mcp_servers or [])
+        session = self._sessions.create(
+            cwd, additional_directories=additional_directories or ()
+        )
+        return NewSessionResponse(
+            sessionId=session.session_id,
+            modes=session.modes,
+            configOptions=list(session.config_options) or None,
+        )
 
     @as_request_error
     async def load_session(
@@ -252,18 +288,65 @@ class PythonAcpAgent:
     async def prompt(
         self, session_id: str, prompt: list[Any], **kwargs: Any
     ) -> PromptResponse:
-        raise self._not_implemented("session/prompt")
+        """Run one turn and answer with its `stopReason`.
+
+        The turn runs as its own task so `session/cancel` — a *notification*, arriving on
+        the same connection while this request is still open — has something to cancel.
+        Running it inline would leave the cancel with nothing to reach.
+
+        `asyncio.wait` rather than `await turn`, because the two cancellations must not be
+        confused. Awaiting a cancelled task raises `CancelledError` **here**, which is
+        indistinguishable from *this request* being cancelled; `wait` only raises when we
+        ourselves are cancelled, so `turn.cancelled()` afterwards is an unambiguous answer
+        to "did `session/cancel` reach it".
+
+        The `stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals,
+        interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s.
+        """
+        session = self._sessions.get(session_id)
+        context = TurnContext(session, self.client)
+        turn = asyncio.create_task(
+            self._executor.execute(context, prompt), name=f"acp-turn-{session_id}"
+        )
+        try:
+            session.attach_turn(turn)
+        except TurnAlreadyRunningError:
+            # Never leave an un-awaited task behind on the refusal path.
+            turn.cancel()
+            raise
+
+        try:
+            await asyncio.wait({turn})
+        except asyncio.CancelledError:
+            # This request died, not the turn. Do not leave it running for a response
+            # nobody will read.
+            turn.cancel()
+            raise
+        finally:
+            session.detach_turn()
+
+        if turn.cancelled():
+            return PromptResponse(stopReason="cancelled")
+        # Re-raises whatever the executor raised, for `as_request_error` to map.
+        return PromptResponse(stopReason=turn.result())
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         """Cancel the running turn for a session.
 
         A notification, so it must never raise: the router has no reply channel for
         one, and an exception here would surface as an unhandled error on a message
-        the client is not waiting for. Cancelling a session that does not exist — the
-        only case reachable until Phase 2 — is a no-op by design, because a client
-        that cancels a turn already finished is behaving correctly.
+        the client is not waiting for. **Both** no-op cases are deliberate — an unknown
+        session and a session with nothing running — because a client that cancels a turn
+        which has already finished is behaving correctly, and there is nowhere to tell it
+        otherwise.
         """
-        logger.debug("session/cancel for %s (no turn is running yet)", session_id)
+        try:
+            session = self._sessions.get(session_id)
+        except UnknownSessionError:
+            logger.debug("session/cancel for unknown session %s; ignoring", session_id)
+            return
+        if not session.cancel_turn():
+            logger.debug("session/cancel for %s: no turn is running", session_id)
 
     # ------------------------------------------------------------------
     # Extension methods — the legacy MCP passthrough lands here in Phase 7
@@ -290,6 +373,27 @@ class PythonAcpAgent:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reject_unsupported_mcp_servers(mcp_servers: list[Any]) -> None:
+        """Refuse the MCP transports `initialize` did not advertise.
+
+        `mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in
+        `capabilities.AGENT_CAPABILITY_MANIFEST`, and stdio needs no capability at all.
+        Accepting an `HttpMcpServer` anyway would make the advertisement a lie and hand
+        back a session whose tools silently do not exist.
+
+        Spawning the stdio ones is `pyacp-db3`'s; refusing the rest cannot wait for it,
+        because the wrong answer here is silent.
+        """
+        unsupported = [
+            server for server in mcp_servers if not isinstance(server, McpServerStdio)
+        ]
+        if unsupported:
+            raise ValueError(
+                "This agent advertises no HTTP, SSE, or ACP MCP transports; "
+                f"rejected: {[getattr(s, 'name', '?') for s in unsupported]}"
+            )
 
     @staticmethod
     def _not_implemented(method: str) -> RequestError:

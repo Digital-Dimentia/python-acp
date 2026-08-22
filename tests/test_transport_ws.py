@@ -31,6 +31,7 @@ from python_acp import __version__
 from python_acp.capabilities import build_agent_capabilities
 from python_acp.legacy_ws import LEGACY_METHODS, is_legacy
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.sessions import SessionRegistry
 from python_acp.transport_ws import (
     WebSocketAgentServer,
     WebSocketMessageTransport,
@@ -144,11 +145,67 @@ async def test_unimplemented_acp_methods_answer_method_not_found() -> None:
     """Proof the SDK router is doing the dispatching, not a hand-rolled branch."""
     async with bound_socket() as websocket:
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "session/new",
-             "params": {"cwd": "/tmp", "mcpServers": []}}
+            {"jsonrpc": "2.0", "id": 2, "method": "session/list", "params": {}}
         )
 
     assert reply["error"]["code"] == -32601
+
+
+async def test_a_websocket_client_can_run_the_session_lifecycle() -> None:
+    """The same agent means the same session methods, not just the same handshake."""
+    async with bound_socket() as websocket:
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+        created = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/new",
+             "params": {"cwd": "/tmp", "mcpServers": []}}
+        )
+        prompted = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+             "params": {"sessionId": created["result"]["sessionId"], "prompt": []}}
+        )
+
+    assert created["result"]["sessionId"]
+    assert prompted["result"]["stopReason"] == "end_turn"
+
+
+async def test_sessions_outlive_the_connection_that_created_them() -> None:
+    """One registry per process: a reconnecting client must find its session again.
+
+    A per-connection registry would make `session/resume` meaningless, and the failure
+    would look like a stale id rather than a design mistake.
+    """
+    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
+        await mcp_client.initialize()
+        sessions = SessionRegistry()
+
+        first = FakeWebSocket()
+        first_connection = asyncio.create_task(
+            serve_websocket(first, mcp_client, sessions=sessions)
+        )
+        created = await first.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "session/new",
+             "params": {"cwd": "/tmp", "mcpServers": []}}
+        )
+        first.hang_up()
+        await asyncio.wait_for(first_connection, timeout=TIMEOUT)
+
+        second = FakeWebSocket()
+        second_connection = asyncio.create_task(
+            serve_websocket(second, mcp_client, sessions=sessions)
+        )
+        try:
+            prompted = await second.ask(
+                {"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+                 "params": {"sessionId": created["result"]["sessionId"], "prompt": []}}
+            )
+        finally:
+            second.hang_up()
+            await asyncio.wait_for(second_connection, timeout=TIMEOUT)
+
+    assert prompted["result"]["stopReason"] == "end_turn"
 
 
 async def test_unstable_methods_are_reachable_over_websocket() -> None:

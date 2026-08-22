@@ -33,6 +33,62 @@ That last one is why `pyacp-tzd.2` and `pyacp-tzd.3` must pass
 `use_unstable_protocol=True` to `acp.run_agent`. It is a protocol-visible choice, not a
 detail of Phase 2.
 
+## One agent per connection, one registry per process
+
+`PythonAcpAgent` takes its `SessionRegistry` rather than making one, and the argument is
+**required** on purpose. The WebSocket transport builds an agent per socket; a
+per-agent registry would mean a client could not resume a session it created on a
+connection that has since dropped, and `session/resume` would be meaningless. A default
+would hide that. `cli.py` constructs the one registry and hands it to whichever transport
+is bound.
+
+The `Client` facade goes the other way — `on_connect` stores *the* connection's, so it
+must not be shared.
+
+## Running a turn
+
+`session/prompt` runs the executor as its **own task**. That is what makes
+`session/cancel` — a notification arriving on the same connection while the request is
+still open — have something to reach; running the turn inline would leave the cancel with
+nothing to cancel.
+
+The wait is `asyncio.wait({turn})`, not `await turn`, because the two cancellations must
+not be confused:
+
+| What happened | `await turn` | `asyncio.wait({turn})` |
+|---|---|---|
+| `session/cancel` cancelled the turn | raises `CancelledError` here | returns; `turn.cancelled()` is `True` |
+| *this request* was cancelled | raises `CancelledError` here | raises `CancelledError` |
+
+`await turn` makes the two indistinguishable, and answering `stopReason: "cancelled"` for
+a request that was itself cancelled would put a reply on a wire nobody is reading.
+`wait` only raises when we are cancelled, so `turn.cancelled()` afterwards is an
+unambiguous answer to "did `session/cancel` reach it".
+
+`detach_turn` runs in a `finally`, so a cancelled session accepts the next prompt.
+`TurnAlreadyRunningError` from `attach_turn` cancels the task it just created rather than
+leaving one un-awaited.
+
+The `stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals,
+interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s. The executor
+itself is [turns.py](turns.md).
+
+## `session/new` refuses what `initialize` did not advertise
+
+`mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in
+[capabilities.py](capabilities.md), and stdio needs no capability at all. Accepting an
+`HttpMcpServer` anyway would make the advertisement a lie and hand back a session whose
+tools silently do not exist, so a well-formed entry of an unadvertised transport is a
+`-32602`. Spawning the stdio ones is `pyacp-db3`'s; refusing the rest could not wait for
+it, because the wrong answer is silent.
+
+**One hazard is inherited and cannot be refused here.**
+`NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
+that fails validation — a stdio server missing the required `env`, say — is silently
+dropped from the list before the agent sees it. The client gets a session whose server is
+simply absent, with no error. Pinned by
+`test_a_malformed_mcp_server_is_dropped_before_we_see_it`.
+
 ## Method surface
 
 All 15 `acp.interfaces.Agent` members are present. Nothing is declined — see
@@ -43,12 +99,12 @@ member.
 |---|---|---|---|
 | `initialize` | `initialize` | **live** — negotiates the version, stores `clientCapabilities`, returns the capability block from [capabilities.py](capabilities.md) | — |
 | `authenticate` | `authenticate` | **live** — refuses with `-32000 auth_required` | `pyacp-fln.1` |
-| `cancel` | `session/cancel` | **live** — logs and returns; a notification must never raise | `pyacp-3rw.2`, `pyacp-hnk.5` |
+| `cancel` | `session/cancel` | **live** — cancels the session's running turn; silent for an unknown session and for an idle one | `pyacp-hnk.5` |
 | `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
 | `on_connect` | — | **live** — stores the `Client` facade | — |
 | `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
-| `new_session` | `session/new` | `-32601` | `pyacp-3rw.2`, `pyacp-db3` |
-| `prompt` | `session/prompt` | `-32601` | `pyacp-3rw.2`, `pyacp-hnk.2` |
+| `new_session` | `session/new` | **live** — registers a session; rejects the MCP transports `initialize` did not advertise | `pyacp-db3` |
+| `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | `-32601` | `pyacp-3rw.3` |
 | `list_sessions` | `session/list` | `-32601` | `pyacp-3rw.3` |
 | `close_session` | `session/close` | `-32601` *(unstable-gated)* | `pyacp-3rw.3` |

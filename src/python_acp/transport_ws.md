@@ -66,15 +66,22 @@ Legacy requests are served inline, so a slow backend call delays the next read *
 socket**. The previous implementation behaved the same way, and each socket has its own
 task, so one client cannot stall another.
 
-## One agent per socket
+## One agent per socket, one session registry per process
 
 Each connection constructs a fresh `PythonAcpAgent`. Not a style choice: `on_connect`
 stores *the* `Client` facade on the agent and `initialize` stores *the* client's
 capabilities, so a shared instance would let the second connection overwrite the first's
 handle and silently answer with the wrong client's gates.
 
+The [`SessionRegistry`](sessions.md) goes the other way and is shared by every connection.
+A session outlives the socket that created it — that is what `session/resume` means — so a
+per-connection registry would make a reconnecting client's sessions vanish, and the
+failure would look like a stale id rather than a design mistake. `cli.py` constructs the
+one registry and hands it here;
+`test_sessions_outlive_the_connection_that_created_them` is the guard.
+
 The MCP backend *is* shared — one subprocess bound at startup from `--mcp-command` — and
-stays so until the Phase 2 per-session registry.
+stays so until the Phase 2 per-session backend registry.
 
 `use_unstable_protocol` defaults to **True**, matching `transport_stdio.py`. With it off,
 `session/close`, `session/fork`, and `session/resume` answer `method_not_found` without

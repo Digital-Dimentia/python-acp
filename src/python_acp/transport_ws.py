@@ -26,13 +26,19 @@ change it with no deprecation warning. The mitigation is
 which drives a real `run_agent` over this class — so the break surfaces in CI on the day
 the pin moves, not in production.
 
-## One agent per socket
+## One agent per socket, one session registry per process
 
-Each connection gets a fresh `PythonAcpAgent`. That is not a style choice:
-`on_connect` stores *the* `Client` facade on the agent and `initialize` stores *the*
-client's capabilities, so a shared instance would have the second connection overwrite
-the first's handle and silently answer with the wrong client's gates. The MCP backend is
-shared — it is one subprocess bound at startup — and that stays true until the Phase 2
+Each connection gets a fresh `PythonAcpAgent`. That is not a style choice: `on_connect`
+stores *the* `Client` facade on the agent and `initialize` stores *the* client's
+capabilities, so a shared instance would have the second connection overwrite the first's
+handle and silently answer with the wrong client's gates.
+
+The `SessionRegistry` goes the other way and is shared by every connection. A session
+outlives the socket that created it — that is what `session/resume` means — so a
+per-connection registry would make a reconnecting client's sessions vanish. `cli.py`
+constructs the one registry and hands it here.
+
+The MCP backend is shared too — one subprocess bound at startup — until the Phase 2
 per-session registry.
 
 ## Framing is ours, dispatch is not
@@ -56,6 +62,8 @@ from python_acp.agent import PythonAcpAgent
 from python_acp.errors import to_error_object, to_request_error
 from python_acp.legacy_ws import LegacyActionHandler, is_legacy
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.sessions import SessionRegistry
+from python_acp.turns import TurnExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -169,11 +177,17 @@ class WebSocketAgentServer:
         port: int = 8765,
         debug: bool = False,
         *,
+        sessions: SessionRegistry | None = None,
+        executor: TurnExecutor | None = None,
         use_unstable_protocol: bool = True,
     ) -> None:
         self._mcp_client = mcp_client
         self._host = host
         self._port = port
+        # One registry for every connection this server accepts — a session outlives the
+        # socket that created it, which is the whole meaning of `session/resume`.
+        self._sessions = sessions if sessions is not None else SessionRegistry()
+        self._executor = executor
         self._use_unstable_protocol = use_unstable_protocol
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
         self._server: Server | None = None
@@ -208,6 +222,8 @@ class WebSocketAgentServer:
             await serve_websocket(
                 websocket,
                 self._mcp_client,
+                sessions=self._sessions,
+                executor=self._executor,
                 use_unstable_protocol=self._use_unstable_protocol,
             )
         finally:
@@ -218,6 +234,8 @@ async def serve_websocket(
     websocket: ServerConnection,
     mcp_client: MCPStdioClient,
     *,
+    sessions: SessionRegistry | None = None,
+    executor: TurnExecutor | None = None,
     use_unstable_protocol: bool = True,
 ) -> None:
     """Bind one already-accepted socket to a fresh agent and run until EOF.
@@ -233,7 +251,7 @@ async def serve_websocket(
     """
     transport = WebSocketMessageTransport(websocket, LegacyActionHandler(mcp_client))
     await run_agent(
-        PythonAcpAgent(),
+        PythonAcpAgent(sessions if sessions is not None else SessionRegistry(), executor),
         input_stream=transport,
         use_unstable_protocol=use_unstable_protocol,
     )

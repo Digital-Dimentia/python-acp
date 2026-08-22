@@ -6,8 +6,11 @@ PYTHON_BIN := $(VENV_DIR)/bin/python
 PIP_BIN := $(VENV_DIR)/bin/pip
 BUILD_DIR := dist
 ARTIFACTS_DIR := artifacts
+DEMO_MCP_COMMAND ?= python3 tests/fixtures/mock_mcp_server.py
+HOST ?= 127.0.0.1
+PORT ?= 8766
 
-.PHONY: venv install lint test build wheel sdist container-image package release-bundle clean
+.PHONY: venv install lint test build wheel sdist container-image package release-bundle run clean
 
 venv:
 	@if [ ! -d "$(VENV_DIR)" ]; then \
@@ -62,6 +65,12 @@ release-bundle: build
 	rm -rf "$$tmpdir"; \
 	printf 'Created %s\n' "$(ARTIFACTS_DIR)/python-acp-release-bundle.tar.gz"; \
 	ls -l $(ARTIFACTS_DIR)
+
+run: venv
+	@printf 'Starting python-acp with demo MCP server...\n'
+	@printf 'Connect to: ws://$(HOST):$(PORT)\n'
+	@printf 'Press Ctrl+C to stop.\n'
+	$(PYTHON_BIN) -m python_acp.cli --mcp-command $(DEMO_MCP_COMMAND) --host $(HOST) --port $(PORT)
 
 clean:
 	rm -rf build dist artifacts *.egg-info .pytest_cache .ruff_cache $(VENV_DIR)

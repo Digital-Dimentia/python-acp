@@ -7,6 +7,9 @@ from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.ws_bridge import ACPWebSocketBridge
 
 
+import logging
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Expose MCP tools over WebSockets without an LLM.",
@@ -19,13 +22,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default="127.0.0.1", help="WebSocket host to bind.")
     parser.add_argument("--port", type=int, default=8765, help="WebSocket port to bind.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging for websocket and MCP message flow.",
+    )
     return parser
 
 
 async def _run(args: argparse.Namespace) -> None:
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(message)s")
     async with MCPStdioClient(args.mcp_command) as mcp_client:
         await mcp_client.initialize()
-        bridge = ACPWebSocketBridge(mcp_client, args.host, args.port)
+        bridge = ACPWebSocketBridge(mcp_client, args.host, args.port, debug=args.debug)
         await bridge.start()
         print(f"python-acp listening on ws://{args.host}:{args.port}")
         await bridge.serve_forever()

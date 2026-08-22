@@ -19,6 +19,14 @@
 - Ships with a Makefile for local build, test, lint, packaging, and release-bundle generation.
 - Publishes release artifacts via GitHub Actions.
 
+## Architecture docs
+
+- [System architecture](ARCHITECTURE.md)
+- Module docs:
+  - [cli.py](src/python_acp/cli.md)
+  - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
+  - [ws_bridge.py](src/python_acp/ws_bridge.md)
+
 ## Local setup
 
 This project prefers a repo-local virtual environment.

@@ -22,9 +22,8 @@
 - `_dispatch(raw_message)`: common parse and routing path.
 - `_dispatch_legacy_action(request)`: action API handler (`list_tools`, `call_tool`, etc.).
 - `_dispatch_jsonrpc(request)`: JSON-RPC-style ACP handler (`initialize`, `tools/*`, `prompts/*`, `resources/*`).
-- `_jsonrpc_error(id, code, message, data)`: builds one JSON-RPC error envelope.
-- `_mcp_error(id, exc)`: maps an `MCPProtocolError` onto that envelope, preserving
-  the MCP server's code when it has one.
+- `_error(id, error)`: frames a `RequestError` from `errors.py` as a JSON-RPC
+  response. It picks no codes of its own.
 
 ## Dispatch Model
 
@@ -52,24 +51,35 @@ flowchart TD
 
 ## Error Mapping
 
-Error codes are derived from the exception type, never hand-built at the call
-site. Validation problems `raise ValueError`; backend problems raise
-`MCPProtocolError`; `_dispatch` does the mapping.
+**This module no longer decides error codes.** `pyacp-tzd.6` moved that to
+[errors.py](errors.md), which is also what `agent.py` and the SDK-dispatched path
+answer with, so the two client-facing surfaces cannot drift apart on what a `-32602`
+means. What stays here is framing: `_error` wraps a `RequestError` in a
+`{"jsonrpc": "2.0", "id": ..., "error": ...}` envelope, because this class predates the
+SDK connection and still writes its own messages.
 
-| Condition | Code |
-|---|---|
-| Malformed JSON on the wire | `-32700` |
-| Non-dict payload, missing/empty `method`, neither `action` nor `method` | `-32600` |
-| Known shape, unhandled method | `-32601` |
-| Bad or missing params (`ValueError`) | `-32602` |
-| Backend failure with no server-assigned code (`MCPProtocolError`) | `-32603` |
-| Backend failure carrying an MCP code (`MCPProtocolError`) | **the MCP code, forwarded** |
+Validation problems `raise ValueError`; backend problems raise `MCPProtocolError`;
+`_dispatch` hands both to `to_request_error`.
 
-The last row is the one with a subtlety. Collapsing every backend failure into
-`-32603` made an MCP server's `-32601` (no such tool) indistinguishable from its
-`-32602` (bad arguments). The code is now forwarded, which means the `code` field
-carries values from two namespaces — this bridge's own errors and the backend's.
-`data` disambiguates them:
+| Condition | Code | Message |
+|---|---|---|
+| Malformed JSON on the wire | `-32700` | `Parse error` |
+| Non-dict payload, missing/empty `method`, neither `action` nor `method` | `-32600` | `Invalid request` |
+| Known shape, unhandled method | `-32601` | `Method not found`, `data.method` |
+| Bad or missing params (`ValueError`) | `-32602` | `Invalid params`, `data.reason` |
+| Backend failure with no server-assigned code (`MCPProtocolError`) | `-32603` | `Internal error`, `data.reason` |
+| Backend failure carrying an MCP code (`MCPProtocolError`) | **the MCP code, forwarded** | **the server's own**, `data.source = "mcp"` |
+
+The messages changed with `pyacp-tzd.6`: the complaint moved out of `message` and into
+`data.reason`, because `acp.schema.Error` asks for `message` to be a concise sentence
+and the SDK's own constructors already work that way. A **forwarded** error is the
+exception — it keeps the server's message verbatim, since replacing it would destroy the
+only account of what failed.
+
+The last row is the one with a subtlety. Collapsing every backend failure into `-32603`
+made an MCP server's `-32601` (no such tool) indistinguishable from its `-32602` (bad
+arguments). The code is now forwarded, which means `code` carries values from two
+namespaces — this bridge's own errors and the backend's. `data.source` disambiguates:
 
 ```json
 {"jsonrpc": "2.0", "id": 1, "error": {
@@ -79,13 +89,10 @@ carries values from two namespaces — this bridge's own errors and the backend'
 }}
 ```
 
-`data` is present only when the code came from the backend, and gains `mcpData`
-when the server supplied a `data` member of its own. An error with no `data` is
-this bridge's own. The legacy envelope has no code field, so the code appears in
-its `error` string instead.
-
-This mapping is one function on purpose: `docs/module-boundaries.md` moves it to
-`errors.py` (`to_request_error`) when `ws_bridge.py` splits.
+`source` is present **only** when the code came from the backend, and `mcpData` only
+when the server supplied a `data` member of its own. An error carrying no `source` is
+this bridge's own, whatever else `data` holds. The legacy envelope has no code field, so
+the code appears in its `error` string instead.
 
 ## Tool Failures Are Not Errors
 

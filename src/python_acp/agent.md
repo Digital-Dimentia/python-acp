@@ -60,6 +60,19 @@ member.
 a later phase changes a body and nothing else; the wire behaviour before it does is
 already correct.
 
+**Every request member carries `@as_request_error`**, including the ones whose bodies
+are still `-32601`. That is not defensive: `acp.Connection._run_request` catches a
+non-`RequestError` and answers a bare `-32603`, so an `MCPProtocolError` escaping one of
+these methods would arrive at the client with the backend's code destroyed, and a
+`ValueError` would arrive as `-32603` instead of `-32602`. The mapping has to happen on
+our side of that boundary, and putting it there now is what keeps a later phase from
+having to remember. The decorator lives on the function, so it is replaced by an
+override — these bodies get filled in *in place*. See [errors.py](errors.md).
+
+`cancel` and `ext_notification` are **not** decorated. A notification has no reply
+channel, so there is nowhere to put a mapped error and raising at all is already the
+bug.
+
 **`authenticate` is a refusal, not a stub.** `initialize` advertises no auth methods, so
 every `methodId` is one we never offered. `-32000 auth_required` says "the method exists,
 the credentials do not"; `-32601` would say the opposite.

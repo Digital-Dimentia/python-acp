@@ -16,6 +16,8 @@ from acp.schema import ClientCapabilities, FileSystemCapabilities
 from python_acp import __version__
 from python_acp.agent import PythonAcpAgent
 from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
+from python_acp.errors import as_request_error
+from python_acp.mcp_stdio import MCPProtocolError
 
 # Every wire method the SDK routes to an agent, and whether it is gated behind
 # use_unstable_protocol. Derived from docs/acp-compliance-matrix.md.
@@ -318,3 +320,77 @@ def test_client_handle_is_stored_on_connect() -> None:
 
     agent.on_connect(sentinel)  # type: ignore[arg-type]
     assert agent.client is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Error mapping (pyacp-tzd.6)
+# ---------------------------------------------------------------------------
+
+# Every routed request maps to one of these members. `session/cancel` is absent
+# deliberately: it is a notification, and a notification that raises is already the bug.
+REQUEST_MEMBERS = [
+    "initialize",
+    "authenticate",
+    "new_session",
+    "load_session",
+    "list_sessions",
+    "fork_session",
+    "resume_session",
+    "close_session",
+    "set_session_mode",
+    "set_config_option",
+    "prompt",
+    "ext_method",
+]
+
+
+@pytest.mark.parametrize("member", REQUEST_MEMBERS)
+def test_every_request_method_maps_its_errors(member: str) -> None:
+    """An undecorated method leaks to `acp.Connection`, which flattens it to -32603."""
+    assert getattr(getattr(PythonAcpAgent, member), "maps_errors", False) is True
+
+
+@pytest.mark.parametrize("member", ["cancel", "ext_notification"])
+def test_notification_handlers_are_not_decorated(member: str) -> None:
+    """There is no reply channel to map an error onto; silence is the contract."""
+    assert getattr(getattr(PythonAcpAgent, member), "maps_errors", False) is False
+
+
+async def test_a_backend_failure_reaches_the_client_with_its_own_code() -> None:
+    """The whole point of the mapping: -32601 from the MCP server is not -32603 from us."""
+
+    # The override carries the decorator explicitly: it lives on the function, so a
+    # subclass that replaces a method replaces the guard with it. Production code fills
+    # these bodies in place rather than by overriding, which is what
+    # `test_every_request_method_maps_its_errors` checks.
+    class BackendFails(PythonAcpAgent):
+        @as_request_error
+        async def list_sessions(self, cursor=None, **kwargs):  # type: ignore[override]
+            raise MCPProtocolError.from_error_response(
+                {"code": -32601, "message": "Unknown tool"}
+            )
+
+    router = build_agent_router(BackendFails(), use_unstable_protocol=True)
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/list", {}, False)
+
+    assert excinfo.value.code == -32601
+    assert excinfo.value.data["source"] == "mcp"
+
+
+async def test_a_bad_parameter_from_below_becomes_invalid_params() -> None:
+    """A ValueError would otherwise reach the client as -32603, not -32602."""
+
+    class Picky(PythonAcpAgent):
+        @as_request_error
+        async def list_sessions(self, cursor=None, **kwargs):  # type: ignore[override]
+            raise ValueError("'cursor' must be a string")
+
+    router = build_agent_router(Picky(), use_unstable_protocol=True)
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/list", {}, False)
+
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data == {"reason": "'cursor' must be a string"}

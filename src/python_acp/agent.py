@@ -54,6 +54,7 @@ from python_acp.capabilities import (
     build_agent_capabilities,
     negotiate_protocol_version,
 )
+from python_acp.errors import as_request_error
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class PythonAcpAgent:
     # Initialization
     # ------------------------------------------------------------------
 
+    @as_request_error
     async def initialize(
         self,
         protocol_version: int,
@@ -161,6 +163,7 @@ class PythonAcpAgent:
             agentInfo=Implementation(name=_AGENT_NAME, version=__version__),
         )
 
+    @as_request_error
     async def authenticate(self, method_id: str, **kwargs: Any) -> AuthenticateResponse | None:
         """Refuse authentication, in the protocol's own vocabulary.
 
@@ -176,6 +179,7 @@ class PythonAcpAgent:
     # Session lifecycle — bodies arrive in Phase 2
     # ------------------------------------------------------------------
 
+    @as_request_error
     async def new_session(
         self,
         cwd: str,
@@ -185,6 +189,7 @@ class PythonAcpAgent:
     ) -> NewSessionResponse:
         raise self._not_implemented("session/new")
 
+    @as_request_error
     async def load_session(
         self,
         cwd: str,
@@ -195,11 +200,13 @@ class PythonAcpAgent:
     ) -> LoadSessionResponse | None:
         raise self._not_implemented("session/load")
 
+    @as_request_error
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
         raise self._not_implemented("session/list")
 
+    @as_request_error
     async def fork_session(
         self,
         session_id: str,
@@ -210,6 +217,7 @@ class PythonAcpAgent:
     ) -> ForkSessionResponse:
         raise self._not_implemented("session/fork")
 
+    @as_request_error
     async def resume_session(
         self,
         session_id: str,
@@ -220,14 +228,17 @@ class PythonAcpAgent:
     ) -> ResumeSessionResponse:
         raise self._not_implemented("session/resume")
 
+    @as_request_error
     async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse | None:
         raise self._not_implemented("session/close")
 
+    @as_request_error
     async def set_session_mode(
         self, session_id: str, mode_id: str, **kwargs: Any
     ) -> SetSessionModeResponse | None:
         raise self._not_implemented("session/set_mode")
 
+    @as_request_error
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse | None:
@@ -237,6 +248,7 @@ class PythonAcpAgent:
     # Prompt turn — body arrives in Phase 3
     # ------------------------------------------------------------------
 
+    @as_request_error
     async def prompt(
         self, session_id: str, prompt: list[Any], **kwargs: Any
     ) -> PromptResponse:
@@ -257,6 +269,7 @@ class PythonAcpAgent:
     # Extension methods — the legacy MCP passthrough lands here in Phase 7
     # ------------------------------------------------------------------
 
+    @as_request_error
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Serve a `_`-prefixed extension request.
 

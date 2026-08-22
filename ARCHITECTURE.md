@@ -7,6 +7,7 @@ runtime, and the subsystem shape it is being migrated to.
 
 - CLI runtime: parses startup arguments and bootstraps async services.
 - ACP WebSocket bridge: accepts WebSocket client traffic and dispatches requests.
+- Error mapping: one translation from our exception types to `acp.RequestError`, shared with the agent runtime so both client-facing surfaces answer the same codes.
 - MCP stdio client: communicates with an MCP server subprocess using JSON-RPC over newline-delimited stdio.
 - MCP server process: external tool/prompt/resource provider.
 
@@ -15,11 +16,13 @@ flowchart LR
     UserClient["WebSocket client"]
     CLI["cli.py<br/>runtime bootstrap"]
     Bridge["ws_bridge.py<br/>ACPWebSocketBridge"]
+    Errors["errors.py<br/>to_request_error"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess")]
 
     CLI --> Bridge
     Bridge <--> UserClient
+    Bridge --> Errors
     Bridge --> MCPClient
     MCPClient <--> MCPProc
 ```
@@ -32,10 +35,11 @@ The runtime is being rebuilt on the `agent-client-protocol` SDK. See
 and [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md) for the per-method
 dispositions.
 
-**Three pieces are built.** `agent.py` (`PythonAcpAgent`, all 15 `acp.interfaces.Agent`
+**Four pieces are built.** `agent.py` (`PythonAcpAgent`, all 15 `acp.interfaces.Agent`
 members), `capabilities.py` (the block `initialize` advertises, and version
-negotiation), and `transport_stdio.py`, which binds the agent to stdin/stdout under
-`--transport stdio`. An ACP client can spawn the process and complete `initialize`
+negotiation), `errors.py` (one exception-to-`RequestError` mapping, already shared with
+the legacy WebSocket path), and `transport_stdio.py`, which binds the agent to
+stdin/stdout under `--transport stdio`. An ACP client can spawn the process and complete `initialize`
 today; session and prompt methods answer `-32601` until Phases 2 and 3 fill them in, and
 the agent cannot reach the MCP backend yet — that is the Phase 2 registry.
 
@@ -165,6 +169,7 @@ which beads redraw it.
 
 - [ACP agent module](src/python_acp/agent.md)
 - [Capability manifest module](src/python_acp/capabilities.md)
+- [Error mapping module](src/python_acp/errors.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)

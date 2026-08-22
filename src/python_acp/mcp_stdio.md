@@ -131,7 +131,7 @@ that revision; read
 since `2026-07-28` replaces the handshake outright.
 
 `_MCP_PROTOCOL_VERSION` is an MCP revision date. It is unrelated to
-`_SUPPORTED_PROTOCOL_VERSION` in `ws_bridge.py`, which is the ACP version and an
+`SUPPORTED_PROTOCOL_VERSIONS` in `capabilities.py`, which is the ACP version and an
 integer. Two protocols, two version fields; do not unify them.
 
 The mock server negotiates for real — by default it echoes back whatever was
@@ -209,7 +209,7 @@ raise MCPProtocolError.from_error_response(error)
 `code` and `data` are `None` whenever the failure originated here rather than at
 the server — a timeout, a dead read loop, a stopped process, a malformed result, a
 runaway pagination walk. Callers use that as the signal for whether a code is
-theirs to forward; `ws_bridge.py` forwards a real code and falls back to `-32603`
+theirs to forward; `errors.py` forwards a real code and falls back to `-32603`
 when there is none. A server that sends a non-integer `code` is treated as having
 sent none, so junk never reaches the client-facing wire.
 
@@ -316,4 +316,5 @@ in the stdout loop would raise on it.
   lifecycle, capability rules, and the checklist for adding an MCP call
 - [Repository architecture](../../ARCHITECTURE.md)
 - [cli.py docs](cli.md)
-- [ws_bridge.py docs](ws_bridge.md)
+- [transport_ws.py docs](transport_ws.md)
+- [errors.py docs](errors.md)

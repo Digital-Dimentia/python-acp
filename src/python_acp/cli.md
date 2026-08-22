@@ -27,7 +27,7 @@ transport. It owns no protocol logic of its own.
 
 | Value | What it does | Notes |
 |---|---|---|
-| `ws` *(default)* | Binds `ACPWebSocketBridge` on `--host`/`--port` | The existing local-automation surface. Still carries the legacy `{"action": ...}` API (D4), which is why it stays the default for now. |
+| `ws` *(default)* | Binds `WebSocketAgentServer` on `--host`/`--port` | Serves the same agent as `stdio`, plus the deprecated surface in [legacy_ws.py](legacy_ws.md) (D4), which is why it stays the default for now. |
 | `stdio` | Serves ACP on this process's own stdin/stdout via [transport_stdio.py](transport_stdio.md) | How an editor spawns an agent (D2). `--host` and `--port` are ignored. |
 
 **The default flips to `stdio` when the action surface is removed** (`pyacp-sld.3`).
@@ -65,7 +65,7 @@ flowchart TD
     Version -- no --> Abort["MCPProtocolError; MCP process stopped"]
     Version -- yes --> Pick{"--transport"}
     Pick -- stdio --> Stdio["run_stdio(PythonAcpAgent())"]
-    Pick -- ws --> BridgeStart["start ACPWebSocketBridge"]
+    Pick -- ws --> BridgeStart["start WebSocketAgentServer"]
     BridgeStart --> Serve["serve_forever"]
     Stdio --> Stop["client disconnects, or KeyboardInterrupt"]
     Serve --> Stop
@@ -88,4 +88,5 @@ flowchart TD
 - [agent.py docs](agent.md)
 - [transport_stdio.py docs](transport_stdio.md)
 - [mcp_stdio.py docs](mcp_stdio.md)
-- [ws_bridge.py docs](ws_bridge.md)
+- [transport_ws.py docs](transport_ws.md)
+- [legacy_ws.py docs](legacy_ws.md)

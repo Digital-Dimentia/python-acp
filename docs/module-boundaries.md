@@ -99,8 +99,8 @@ pre-empt that matrix; it only places boundaries.
 | `mcp_registry.py` | Per-session MCP backends: spawn/reuse/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session, with lifetime bound to the session | The stdio wire protocol itself | `McpBackendRegistry` | `pyacp-3rw.3`, `pyacp-db3` |
 | `mcp_stdio.py` | **Unchanged role.** One MCP server subprocess: stdio framing, `initialize` handshake, stderr drain, request correlation, `MCPProtocolError` | Knowing about ACP, sessions, or more than one server | `MCPStdioClient`, `MCPProtocolError` | already exists; hardened by `pyacp-eg1.1`, `pyacp-z3y`, `pyacp-pb7`, `pyacp-a92`, `pyacp-k5w`, `pyacp-ua1`, `pyacp-x8l` |
 | `transport_stdio.py` | Binding the agent to the process's own stdin/stdout via the SDK's stdio helpers, and the listen/shutdown loop | Argument parsing; anything agent-shaped | `run_stdio(agent, ...)` | `pyacp-tzd.2` |
-| `transport_ws.py` | Binding the agent to a WebSocket. Server lifecycle plus a `Transport`-shaped message adapter over the `websockets` library. **One `AgentSideConnection` per socket.** | Dispatch, error codes, capability blocks — all of which move to `agent.py` and `errors.py` | `WebSocketMessageTransport`, `serve_websocket(...)` | `pyacp-tzd.3` |
-| `legacy_ws.py` | The deprecated `{"action": ...}` surface and its `{"ok": bool}` envelope, plus the deprecation warning, for exactly as long as D4 keeps it alive | Anything the JSON-RPC surface needs | `LegacyActionHandler` | `pyacp-sld.1`; **deleted by `pyacp-sld.3`** |
+| `transport_ws.py` | Binding the agent to a WebSocket. Server lifecycle, a `Transport`-shaped message adapter over the `websockets` library, and the framing errors the SDK cannot express. **One `AgentSideConnection` and one `PythonAcpAgent` per socket.** | Dispatch, error codes, capability blocks — all of which moved to the SDK router, `errors.py`, and `capabilities.py` | `WebSocketMessageTransport`, `WebSocketAgentServer`, `serve_websocket(...)` | `pyacp-tzd.3` ✔ |
+| `legacy_ws.py` | The deprecated `{"action": ...}` surface and its `{"ok": bool}` envelope, **and the MCP passthrough still carried on JSON-RPC** (`tools/*`, `prompts/*`, `resources/*`, `ping`, `notifications/initialized`), plus the deprecation warning, for exactly as long as D4 keeps it alive | Anything the ACP surface needs; `initialize`, which is ACP and belongs to the agent | `is_legacy(message)`, `LEGACY_METHODS`, `LegacyActionHandler` | `pyacp-tzd.3` ✔; warning by `pyacp-sld.1`; **deleted by `pyacp-sld.3`** |
 | `errors.py` | Translating our exception types (`MCPProtocolError`, `ValueError`, cancellation) into `acp.RequestError`, one mapping in one place | Defining new error codes the SDK already defines | `to_request_error(exc)` | `pyacp-tzd.6` |
 
 `__init__.py` stays exempt from the doc rule and stays minimal.
@@ -134,6 +134,33 @@ name `python_acp.ws_bridge`; both are updated by `pyacp-tzd.3`. The logger becom
 **Rejected:** keeping the name `ws_bridge.py` as the transport module. "Bridge" describes
 the thing we are ceasing to be — an MCP passthrough. Keeping it would leave the most
 misleading name in the tree attached to the most rewritten file.
+
+#### Landed, with one correction (`pyacp-tzd.3`)
+
+The split happened as written, except for where the **JSON-RPC MCP passthrough** went.
+This table said `ext_method` (D5, Phase 7.2, `pyacp-sld.2`). Doing that in the same commit
+as the rebind would have meant either renaming `tools/list` to `_tools/list` — a break —
+or deleting it outright, since `PythonAcpAgent` has no member for it and the SDK router
+would answer `-32601`. Either way a working surface disappears in the release that rebound
+the socket, which is not what D4 promises.
+
+**So `legacy_ws.py` carries the JSON-RPC passthrough too, under its current method names,
+until `pyacp-sld.2` moves it to `ext_method`.** That turns the eventual change from a
+disappearance into a rename a client can be told about. `LEGACY_METHODS` is a closed set
+that only ever shrinks.
+
+Two smaller deviations from the plan as written:
+
+- **`WebSocketAgentServer` exists alongside `serve_websocket`.** The lifecycle is stateful
+  (`start` / `stop` / `serve_forever`) and both `cli.py` and the tests want it; the free
+  function binds one already-accepted socket, which is what makes every WebSocket test
+  runnable without a listening port.
+- **One `PythonAcpAgent` per socket, not one shared instance.** `pyacp-tzd.3`'s acceptance
+  criterion says WebSocket clients are served by "the same `acp.Agent` instance as stdio
+  clients". Read literally that is not implementable: `on_connect` stores *the* `Client`
+  facade on the agent and `initialize` stores *the* client's capabilities, so a shared
+  instance would have each new connection overwrite the last one's. The criterion's intent
+  — one agent *implementation*, one dispatch path, one set of answers — is met.
 
 ### B2. `mcp_stdio.py` keeps its name
 
@@ -176,13 +203,26 @@ Two consequences to accept honestly:
 - We depend on a *shape* from a private module. If a future SDK release changes `Transport`,
   our binding breaks with no deprecation warning. Mitigation: one conformance test that
   constructs an `AgentSideConnection` over `WebSocketMessageTransport` and completes an
-  `initialize` round trip, so the break surfaces in CI on the day we bump the pin.
+  `initialize` round trip, so the break surfaces in CI on the day we bump the pin. That is
+  `tests/test_transport_ws.py::test_the_sdk_accepts_our_transport_and_completes_initialize`.
+
+  Softer than feared, as it turned out: `AgentSideConnection.__init__` branches *publicly*
+  on `isinstance(input_stream, Transport)` and raises a typed `TypeError` otherwise, so the
+  seam is a supported construction form even though the Protocol lives in a private module.
 - The ASGI option stays open. If we later want HTTP/SSE too, `acp.http.server` plus
   `acp.ws.server` become the better answer and `transport_ws.py` is the only module that
   changes.
 
 **`pyacp-tzd.3` needs its description corrected before it is worked.** Recorded here rather
-than silently substituted.
+than silently substituted. *(Done: `pyacp-tzd.3` was worked to this decision, not to its own
+title, and closed against it.)*
+
+The rebind also moved the `websockets` pin from `12.0` to `17.0.1`. 12.0 predates
+`websockets.asyncio.server` entirely — it offered only the legacy asyncio API that
+`pyacp-exl` planned to migrate off — so "keep the `websockets` library" and "stop importing
+`websockets.server`" could not both be true on the old pin. 17.0.1 declares
+`requires-python >=3.11`, exactly this project's floor, so the pin does not narrow the
+support window. `pyacp-exl` closes as superseded.
 
 ### B5. `acp.run_agent`, not `AgentSideConnection`
 

@@ -114,7 +114,7 @@ def to_error_object(error: RequestError) -> dict[str, Any]:
     the key rather than asserting `null`.
 
     The SDK-dispatched path does not use this; `acp.Connection` renders its own
-    envelopes. This is for `ws_bridge.py` and its successor.
+    envelopes. This is for `transport_ws.py`, which frames its own.
     """
     rendered: dict[str, Any] = {"code": error.code, "message": str(error)}
     if error.data is not None:

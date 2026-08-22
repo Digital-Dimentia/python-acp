@@ -13,7 +13,11 @@ import pytest
 import websockets
 
 from python_acp.cli import build_parser
-from python_acp.mcp_stdio import MCPProtocolError, MCPStdioClient
+from python_acp.mcp_stdio import (
+    _MCP_PROTOCOL_VERSION,
+    MCPProtocolError,
+    MCPStdioClient,
+)
 from python_acp.ws_bridge import ACPWebSocketBridge
 
 
@@ -574,3 +578,61 @@ async def test_single_page_list_sends_no_cursor(monkeypatch: pytest.MonkeyPatch)
 
     assert [t["name"] for t in tools] == ["echo"]
     assert sent == [{"method": "tools/list", "params": {}}]
+
+
+@pytest.mark.asyncio
+async def test_initialize_settles_on_the_version_the_server_returns() -> None:
+    """The handshake is a round trip: the server's answer is what we record."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        result = await asyncio.wait_for(client.initialize(), timeout=10)
+
+    # The fixture echoes back whatever was proposed, so this also proves the
+    # request carried the version we claim to speak.
+    assert result["protocolVersion"] == _MCP_PROTOCOL_VERSION
+    assert client.protocol_version == _MCP_PROTOCOL_VERSION
+
+
+@pytest.mark.asyncio
+async def test_initialize_rejects_a_version_it_cannot_speak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server counter-offer we cannot speak fails loudly, not silently."""
+    monkeypatch.setenv("MOCK_MCP_PROTOCOL_VERSION", "2026-07-28")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        with pytest.raises(MCPProtocolError, match="2026-07-28"):
+            await asyncio.wait_for(client.initialize(), timeout=10)
+
+        assert client.protocol_version is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_version_disconnects_instead_of_proceeding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spec says hang up; proceeding would fail later and confusingly."""
+    monkeypatch.setenv("MOCK_MCP_PROTOCOL_VERSION", "2026-07-28")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    with pytest.raises(MCPProtocolError):
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+    assert client._proc is None
+    with pytest.raises(MCPProtocolError):
+        await client.request("tools/list", {})
+
+
+@pytest.mark.asyncio
+async def test_initialize_rejects_an_omitted_protocol_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """protocolVersion is mandatory in the result; absence is not agreement."""
+    monkeypatch.setenv("MOCK_MCP_OMIT_PROTOCOL_VERSION", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        with pytest.raises(MCPProtocolError, match="omitted protocolVersion"):
+            await asyncio.wait_for(client.initialize(), timeout=10)
+
+        assert client.protocol_version is None

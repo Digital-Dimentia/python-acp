@@ -8,6 +8,16 @@ from typing import Any, Awaitable, Callable, Sequence
 
 logger = logging.getLogger("python_acp.mcp_stdio")
 
+# The MCP revision this client proposes at `initialize`. It has nothing to do
+# with ws_bridge.py's `_SUPPORTED_PROTOCOL_VERSION` — that one is the ACP
+# version, an int, on the other side of the bridge. Two protocols, two fields.
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+# The revisions we can actually speak. The server's answer is authoritative and
+# may name a revision we never proposed; anything outside this set means we hang
+# up rather than guess. Read .claude/skills/mcp-protocol/spec-versions.md before
+# widening it — a newer revision is a capability claim, not a string swap.
+_SUPPORTED_MCP_PROTOCOL_VERSIONS: frozenset[str] = frozenset({_MCP_PROTOCOL_VERSION})
+
 ServerRequestHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -46,6 +56,9 @@ class MCPStdioClient:
 
     def __post_init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
+        # The version both sides settled on, set by initialize() and None until
+        # then. A handshake that fails negotiation leaves it None.
+        self.protocol_version: str | None = None
         self._id = 0
         self._write_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -145,16 +158,61 @@ class MCPStdioClient:
     # ------------------------------------------------------------------
 
     async def initialize(self) -> dict[str, Any]:
+        """Run the MCP handshake and settle on a protocol version.
+
+        Negotiation is a real round trip, not a formality: we propose
+        `_MCP_PROTOCOL_VERSION`, and the server replies with the revision it
+        will actually use — which need not be the one we asked for. A server
+        that cannot speak our proposal MUST counter with one it supports, and a
+        client that cannot speak the counter MUST hang up instead of carrying
+        on. So a rejected version stops the subprocess before the error escapes,
+        and `notifications/initialized` is never sent on that path: half a
+        handshake is worse than none, because the mismatch would otherwise
+        resurface later as unrelated-looking failures.
+        """
         result = await self.request(
             "initialize",
             {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "python-acp", "version": "0.1.0"},
             },
         )
+        try:
+            self.protocol_version = self._agreed_protocol_version(result)
+        except MCPProtocolError:
+            await self.stop()
+            raise
         await self.notify("notifications/initialized")
         return result
+
+    @staticmethod
+    def _agreed_protocol_version(result: dict[str, Any]) -> str:
+        """Validate the server's `initialize` answer, or raise.
+
+        The result MUST carry `protocolVersion`; a server that omits it is not
+        speaking the lifecycle we asked for, so an absent field is as fatal as
+        an unusable one.
+        """
+        supported = ", ".join(sorted(_SUPPORTED_MCP_PROTOCOL_VERSIONS))
+        version = result.get("protocolVersion")
+        if not isinstance(version, str) or not version:
+            raise MCPProtocolError(
+                "MCP initialize result omitted protocolVersion; "
+                f"python-acp proposed {_MCP_PROTOCOL_VERSION} and supports {supported}"
+            )
+        if version not in _SUPPORTED_MCP_PROTOCOL_VERSIONS:
+            raise MCPProtocolError(
+                f"Unsupported MCP protocol version {version} from server; "
+                f"python-acp proposed {_MCP_PROTOCOL_VERSION} and supports {supported}"
+            )
+        if version != _MCP_PROTOCOL_VERSION:
+            logger.info(
+                "MCP server countered protocol version %s with %s",
+                _MCP_PROTOCOL_VERSION,
+                version,
+            )
+        return version
 
     async def list_tools(self) -> list[dict[str, Any]]:
         return await self._list_all("tools/list", "tools")

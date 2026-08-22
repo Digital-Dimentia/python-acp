@@ -11,6 +11,8 @@ rather than only while one of our requests is in flight.
 ## Key Responsibilities
 
 - Spawn the MCP subprocess and shut it down in the order the transport prescribes.
+- Negotiate the MCP protocol version at `initialize`, and disconnect rather
+  than proceed when the server answers with a revision this client cannot speak.
 - Continuously drain the subprocess's stderr.
 - Serialize request and notification messages to JSON lines.
 - Read every stdout message and route it by shape: response, server request, or notification.
@@ -23,7 +25,14 @@ rather than only while one of our requests is in flight.
 - `MCPProtocolError`: protocol/runtime error type for MCP communication failures.
 - `MCPStdioClient.start()` / `stop()`: subprocess and background task lifecycle.
 - `MCPStdioClient._shutdown_process()`: the close-stdin / SIGTERM / SIGKILL escalation.
-- `MCPStdioClient.initialize()`: sends MCP `initialize` and `notifications/initialized`.
+- `MCPStdioClient.initialize()`: sends MCP `initialize`, checks the version the
+  server answered with, and only then sends `notifications/initialized`.
+- `MCPStdioClient.protocol_version`: the revision both sides settled on, or
+  `None` before a successful handshake.
+- `MCPStdioClient._agreed_protocol_version()`: validates the server's answer
+  against `_SUPPORTED_MCP_PROTOCOL_VERSIONS` or raises `MCPProtocolError`.
+- `_MCP_PROTOCOL_VERSION` / `_SUPPORTED_MCP_PROTOCOL_VERSIONS`: the revision
+  proposed, and the set that may be accepted in reply.
 - `MCPStdioClient.request()`: sends a request and awaits its correlated reply.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
 - `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
@@ -84,6 +93,46 @@ waiting on us — the failure this design exists to prevent.
 `on_server_request` is where ACP integration will hook in: MCP's
 `elicitation/create` maps onto ACP's `session/request_permission`, and
 `sampling/createMessage` has no answer here because this runtime has no LLM.
+
+## Protocol Version Negotiation
+
+The handshake settles on a version; it does not assume one. The client proposes
+`_MCP_PROTOCOL_VERSION` (`2024-11-05`) and the server replies with the revision
+it will actually use — which need not be the one proposed. A server that cannot
+speak the proposal MUST counter with one it supports, and a client that cannot
+speak the counter MUST hang up rather than carry on.
+
+That is why `initialize()` calls `stop()` before re-raising: proceeding on a
+version mismatch produces failures later that look unrelated to the handshake,
+which is the bug this check exists to prevent. `notifications/initialized` is
+never sent on the rejection path — half a handshake strands the server.
+
+| Server answer | Result |
+|---|---|
+| a version in `_SUPPORTED_MCP_PROTOCOL_VERSIONS` | recorded in `protocol_version`, handshake completes |
+| any other version | `MCPProtocolError: Unsupported MCP protocol version <v> from server`, subprocess stopped |
+| `protocolVersion` absent, empty, or not a string | `MCPProtocolError: MCP initialize result omitted protocolVersion`, subprocess stopped |
+
+`_SUPPORTED_MCP_PROTOCOL_VERSIONS` currently holds exactly one revision, so in
+practice every accepted answer equals the proposal. The set — rather than an
+equality check against what was sent — is what lets a later revision be added
+without rewriting the rule. Widening it is a claim that this client can speak
+that revision; read
+[spec-versions.md](../../.claude/skills/mcp-protocol/spec-versions.md) first,
+since `2026-07-28` replaces the handshake outright.
+
+`_MCP_PROTOCOL_VERSION` is an MCP revision date. It is unrelated to
+`_SUPPORTED_PROTOCOL_VERSION` in `ws_bridge.py`, which is the ACP version and an
+integer. Two protocols, two version fields; do not unify them.
+
+The mock server negotiates for real — by default it echoes back whatever was
+proposed, which is what a supporting server does:
+
+| Env var | Effect |
+|---|---|
+| (none) | echo the proposed `protocolVersion` back |
+| `MOCK_MCP_PROTOCOL_VERSION=<v>` | answer with `<v>` regardless of the proposal (the counter-offer path) |
+| `MOCK_MCP_OMIT_PROTOCOL_VERSION=1` | omit `protocolVersion` from the result entirely |
 
 ## List Pagination
 
@@ -194,6 +243,8 @@ in the stdout loop would raise on it.
 - Non-dict or malformed stdout lines are skipped with a debug log.
 - A response whose id matches nothing pending is discarded with a debug log.
 - JSON-RPC `error` responses are surfaced as `MCPProtocolError`.
+- An `initialize` answer naming an unsupported (or missing) protocol version
+  raises `MCPProtocolError` and stops the subprocess instead of continuing.
 - A list walk that repeats a cursor or exceeds `_MAX_LIST_PAGES` raises
   `MCPProtocolError` instead of looping forever.
 - A reply that cannot be written (process already gone, or stdin closed by

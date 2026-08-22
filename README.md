@@ -37,6 +37,7 @@
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
+- [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.
 - Design docs (target state, not yet built):
   - [ACP v1 plan](docs/full-apc-plan.md)
   - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md)

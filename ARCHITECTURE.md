@@ -248,6 +248,25 @@ there is no legacy surface on stdio, and never was.
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 
+## Conformance
+
+`tests/test_conformance.py` is [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md)
+in executable form. Every `acp.interfaces.Agent` member has a row stating its disposition,
+and the suite asserts the wire behaviour that disposition implies — including the
+declines, which are asserted to return the *correct* error rather than merely to fail.
+
+Three structural tests make a gap detectable rather than invisible:
+
+- the table must cover every member of the `Agent` Protocol, in both directions;
+- it must cover every method the SDK's router actually registers;
+- the 16 names in `acp.meta.AGENT_METHODS` that the router does **not** register must stay
+  unregistered, so an SDK bump that starts routing one is noticed.
+
+A fourth binds advertisement to behaviour: every capability literal `initialize` sets is
+mapped to the method it promises, and the method is called. A `true` with a broken method
+behind it is the failure the capability manifest exists to prevent, and this is where the
+promise meets the behaviour.
+
 ## Design Documents
 
 - [ACP v1 plan](docs/full-apc-plan.md) — phases, decisions D1-D6, and delivery sequencing.

@@ -45,10 +45,18 @@ pre-empt that matrix; it only places boundaries.
 - `agent-client-protocol` is pinned at exactly `0.12.1` in `pyproject.toml`
   (`pyacp-4ns.1`), and its `requires-python = ">=3.10,<3.15"` is now mirrored as our
   own `requires-python = ">=3.11,<3.15"`.
+- The per-method dispositions are settled in
+  [docs/acp-compliance-matrix.md](acp-compliance-matrix.md) (`pyacp-4ns.2`), read off the
+  installed `0.12.1` rather than the published source. It confirms the 15 `Agent` members
+  and adds three mechanics this document did not have: declining is done by *omitting* the
+  method, `session/close`, `session/fork`, and `session/resume` are gated behind
+  `use_unstable_protocol`, and `logout` is in `AGENT_METHODS` but is routed by nothing.
 
 ### Pending verification (do not treat as fact)
 
-- Which of the 15 `Agent` members we implement, stub, or decline — **owned by `pyacp-4ns.2`.**
+- ~~Which of the 15 `Agent` members we implement, stub, or decline~~ — **settled** in
+  [docs/acp-compliance-matrix.md](acp-compliance-matrix.md). All 15 are implemented; three
+  are unstable-gated and `authenticate` implements a refusal.
 - Whether `Transport` remains structurally sufficient for a non-ASGI WebSocket binding in
   the pinned version. It is a private module (`acp._transport`, absent from `acp.__all__`),
   so we rely on *structural* conformance and never import it. See

@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pyacp",
+  "project_id": "6019acb8-106f-4211-b707-666f80f87a23"
+}

@@ -94,6 +94,19 @@ A fork copies the transcript up to the fork point. A shallow copy is enough — 
 never mutated after `record`, only appended — but it must be a *copy*, or the child's
 next turn would append to the parent's transcript.
 
+## Remembered permissions
+
+`Session.remembered_permissions` maps a qualified tool name to the answer the user asked
+to be remembered. `allow_always` and `reject_always` are the two ACP options that write
+here, and **session** is their scope — the SDK's own default option is literally named
+*"Approve for session"*.
+
+It lives on the session rather than in the executor so it dies with the session instead
+of outliving it in a process-wide map, and a fork **copies** it: a fork answering "always
+allow" must not decide for its parent, exactly as with mode and config state.
+
+This module does not interpret the values. [turn_mcp_router.py](turn_mcp_router.md) does.
+
 ## Pagination
 
 `page(cwd, cursor, limit)` returns one page plus the cursor for the next, `None` when

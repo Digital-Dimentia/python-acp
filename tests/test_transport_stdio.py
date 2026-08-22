@@ -43,12 +43,19 @@ class _NullClient:
 
     def __init__(self) -> None:
         self.updates: list[Any] = []
+        self.permission_requests: list[Any] = []
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self.updates.append((session_id, update))
 
-    async def request_permission(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("The agent must not request permission yet")
+    async def request_permission(self, session_id: str, tool_call: Any, options: Any, **kwargs: Any) -> Any:
+        """Approve everything. The agent asks before every tool call (`pyacp-8bv.1`)."""
+        from acp.schema import AllowedOutcome, RequestPermissionResponse
+
+        self.permission_requests.append(tool_call)
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(outcome="selected", optionId="approve")
+        )
 
 
 @contextlib.asynccontextmanager

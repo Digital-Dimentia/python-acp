@@ -462,13 +462,24 @@ class RecordingExecutor:
 
 
 class RecordingClient:
-    """Captures `session/update` calls the way the SDK's Client facade would receive them."""
+    """Captures `session/update` calls the way the SDK's Client facade would receive them.
+
+    Approves every permission request: these tests are about the agent's plumbing, and a
+    client that refused would turn each of them into a test about permissions instead.
+    """
 
     def __init__(self) -> None:
         self.updates: list[tuple[str, object]] = []
 
     async def session_update(self, session_id: str, update: object, **kwargs) -> None:
         self.updates.append((session_id, update))
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        from acp.schema import AllowedOutcome, RequestPermissionResponse
+
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(outcome="selected", optionId="approve")
+        )
 
 
 async def test_new_session_registers_a_session_and_returns_its_id() -> None:

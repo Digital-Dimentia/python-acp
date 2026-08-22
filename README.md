@@ -182,6 +182,13 @@ with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convent
 not an error, and **nothing runs**: the whole prompt is parsed before the first tool, so a
 malformed third block does not leave two side effects behind.
 
+**Every tool call asks the client for permission first**, via
+`session/request_permission`. MCP `2024-11-05` has no tool annotations, so there is no way
+to tell a read from a delete — treating every call as consequential is the only setting
+that cannot silently do damage, and the "for session" options keep it to once per tool.
+Choosing a reject option marks that call `failed` and lets the rest of the turn continue;
+cancelling the prompt ends the turn with `stopReason: "cancelled"`.
+
 A tool that *fails* is not a failed turn. MCP reports tool failure as a successful result
 carrying `isError`, so the call's update says `status: "failed"` with the tool's own
 output, the remaining calls still run, and the turn ends normally.

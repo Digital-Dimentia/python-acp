@@ -17,14 +17,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from acp.exceptions import RequestError
 from acp.schema import (
+    AllowedOutcome,
     AudioContentBlock,
     ClientCapabilities,
     EmbeddedResourceContentBlock,
     EnvVariable,
     ImageContentBlock,
     McpServerStdio,
+    DeniedOutcome,
     PlanCapabilities,
+    RequestPermissionResponse,
     ResourceContentBlock,
     TextContentBlock,
     TextResourceContents,
@@ -33,7 +37,11 @@ from acp.schema import (
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
-from python_acp.turn_mcp_router import DECLINED_BLOCKS, McpToolRouterExecutor
+from python_acp.turn_mcp_router import (
+    DECLINED_BLOCKS,
+    PERMISSION_OPTIONS,
+    McpToolRouterExecutor,
+)
 from python_acp.turns import TurnContext
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
@@ -46,11 +54,32 @@ def spec(name: str) -> McpServerStdio:
 
 
 class RecordingClient:
-    def __init__(self) -> None:
+    """A client that records updates and answers permission requests.
+
+    `answers` is a queue of `option_id`s; when it runs dry the client keeps giving the
+    last one. `approve` (the default) means every tool runs, which is what most of these
+    tests want to be about something else.
+    """
+
+    def __init__(self, *answers: str, refuses_permission: bool = False) -> None:
         self.updates: list[Any] = []
+        self.permission_requests: list[Any] = []
+        self.answers = list(answers) or ["approve"]
+        self.refuses_permission = refuses_permission
 
     async def session_update(self, session_id: str, update: Any, **kwargs) -> None:
         self.updates.append(update)
+
+    async def request_permission(self, session_id, tool_call, options, **kwargs):
+        self.permission_requests.append(tool_call)
+        if self.refuses_permission:
+            raise RequestError.method_not_found("session/request_permission")
+        chosen = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if chosen == "cancel":
+            return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        return RequestPermissionResponse(
+            outcome=AllowedOutcome(outcome="selected", optionId=chosen)
+        )
 
 
 def block(**payload: Any) -> TextContentBlock:
@@ -60,11 +89,11 @@ def block(**payload: Any) -> TextContentBlock:
 class Harness:
     """A session with `server_names` MCP servers open, and an executor over them."""
 
-    def __init__(self, *server_names: str, capabilities: Any = None) -> None:
+    def __init__(self, *server_names: str, capabilities: Any = None, client: Any = None) -> None:
         self.server_names = server_names
         self.capabilities = capabilities
         self.backends = McpBackendRegistry()
-        self.client = RecordingClient()
+        self.client = client or RecordingClient()
         self.session = SessionRegistry().create("/work")
 
     async def __aenter__(self) -> Harness:
@@ -500,3 +529,160 @@ def test_the_declined_reasons_cover_every_non_text_block_the_schema_allows() -> 
     allowed = {"text", "image", "audio", "resource", "resource_link"}
 
     assert McpToolRouterExecutor.supported_prompt_blocks | set(DECLINED_BLOCKS) == allowed
+
+
+# ---------------------------------------------------------------------------
+# Permission (pyacp-8bv.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_permission_is_asked_before_every_tool_call() -> None:
+    """The client that sent the prompt and the human at the client are not always the
+    same party, which is what the prompt is for."""
+    async with Harness("tools") as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}))
+
+    assert result.stop_reason == "end_turn"
+    assert len(harness.client.permission_requests) == 1
+    assert harness.client.permission_requests[0].title == "tools/echo"
+
+
+async def test_the_request_arrives_after_pending_and_before_in_progress() -> None:
+    """That ordering is what `pending` is for: the client has the call to attach its
+    prompt to, and nothing has run yet."""
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="echo"))
+
+    assert [u.status for u in harness.tool_calls()] == [
+        "pending", "in_progress", "completed",
+    ]
+
+
+async def test_denying_a_call_marks_it_failed_and_does_not_run_it() -> None:
+    async with Harness("tools", client=RecordingClient("reject")) as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "never"}))
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert "Denied" in last.content[0].content.text
+    # No `in_progress`: the call was never made.
+    assert [u.status for u in harness.tool_calls()] == ["pending", "failed"]
+
+
+async def test_a_denial_does_not_stop_the_calls_after_it() -> None:
+    async with Harness("tools", client=RecordingClient("reject", "approve")) as harness:
+        result = await harness.run(
+            block(tool="echo", arguments={"text": "denied"}),
+            block(tool="echo", arguments={"text": "allowed"}),
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert [u.status for u in harness.of("tool_call_update")] == [
+        "failed", "in_progress", "completed",
+    ]
+
+
+async def test_cancelling_the_prompt_ends_the_turn_as_cancelled_not_denied() -> None:
+    """The inversion this bead exists to prevent.
+
+    `RequestPermissionResponse.outcome` is `AllowedOutcome` (`"selected"`) or
+    `DeniedOutcome` — whose literal is **`"cancelled"`**, despite the class name. Denial
+    is a *selected* reject option; the only non-selected answer is a cancelled turn.
+    """
+    async with Harness("tools", client=RecordingClient("cancel")) as harness:
+        result = await harness.run(block(tool="echo"), block(tool="echo"))
+
+    assert result.stop_reason == "cancelled"
+    # It stopped at the first call rather than carrying on to the second.
+    assert len(harness.client.permission_requests) == 1
+    assert harness.of("tool_call_update") == []
+
+
+async def test_a_cancelled_prompt_leaves_its_plan_entry_unfinished() -> None:
+    async with Harness("tools", capabilities=accepts_plans(), client=RecordingClient("cancel")) as harness:
+        await harness.run(block(tool="echo"))
+
+    assert [e.status for e in harness.of("plan")[-1].entries] == ["pending"]
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"), [("approve_for_session", True), ("reject", False)]
+)
+async def test_only_the_always_options_are_remembered(answer: str, expected: bool) -> None:
+    """`allow_always` / `reject_always` are the two that write; the once-variants do not."""
+    async with Harness("tools", client=RecordingClient(answer)) as harness:
+        await harness.run(block(tool="echo"))
+
+        remembered = harness.session.remembered_permissions
+    assert remembered.get("tools/echo") is (expected if answer.endswith("session") else None)
+
+
+async def test_an_always_answer_is_not_asked_again_this_session() -> None:
+    """The scope is the session — the SDK's own option is named "Approve for session"."""
+    async with Harness("tools", client=RecordingClient("approve_for_session")) as harness:
+        await harness.run(block(tool="echo"))
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.client.permission_requests) == 1
+    assert harness.session.remembered_permissions == {"tools/echo": True}
+
+
+async def test_a_remembered_answer_is_per_tool_not_per_session() -> None:
+    async with Harness("tools", client=RecordingClient("approve_for_session")) as harness:
+        await harness.run(block(tool="echo"))
+        await harness.run(block(tool="boom"))
+
+    assert [c.title for c in harness.client.permission_requests] == ["tools/echo", "tools/boom"]
+
+
+async def test_a_client_that_refuses_the_request_gets_a_refusal_not_a_silent_run() -> None:
+    """`session/request_permission` is mandatory; a client refusing it is broken.
+
+    Neither "assume consent" nor "deny forever" is a safe reading, so the turn says so.
+    """
+    async with Harness("tools", client=RecordingClient(refuses_permission=True)) as harness:
+        result = await harness.run(block(tool="echo"))
+
+    assert result.stop_reason == "refusal"
+    assert "every ACP client must accept" in harness.refusal()
+    assert [u.status for u in harness.tool_calls()] == ["pending"]
+
+
+async def test_an_option_we_never_offered_is_not_treated_as_consent() -> None:
+    async with Harness("tools", client=RecordingClient("invented")) as harness:
+        result = await harness.run(block(tool="echo"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call_update")[-1].status == "failed"
+
+
+def test_all_four_permission_kinds_are_offered() -> None:
+    """The SDK's default set omits `reject_always`, so a user could say "always yes" but
+    not "always no" and would be asked again about a tool they had turned down. All four
+    kinds are in the protocol, so the fourth is added rather than worked around."""
+    assert {o.kind for o in PERMISSION_OPTIONS} == {
+        "allow_once", "allow_always", "reject_once", "reject_always",
+    }
+    assert len(PERMISSION_OPTIONS) == 4
+
+
+async def test_rejecting_for_the_session_is_remembered_too() -> None:
+    async with Harness("tools", client=RecordingClient("reject_for_session")) as harness:
+        await harness.run(block(tool="echo"))
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.client.permission_requests) == 1
+    assert harness.session.remembered_permissions == {"tools/echo": False}
+    assert all(u.status != "in_progress" for u in harness.of("tool_call_update"))
+
+
+async def test_a_fork_does_not_inherit_a_decision_it_can_change() -> None:
+    """A fork answering "always allow" must not decide for its parent, and vice versa."""
+    async with Harness("tools", client=RecordingClient("approve_for_session")) as harness:
+        await harness.run(block(tool="echo"))
+        forked = harness.session.fork("child")
+
+        forked.remembered_permissions["tools/echo"] = False
+
+    assert harness.session.remembered_permissions == {"tools/echo": True}

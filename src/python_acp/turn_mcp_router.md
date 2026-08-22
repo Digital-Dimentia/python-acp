@@ -42,6 +42,39 @@ The tool-call title is **always** qualified (`tools/echo`), even when the client
 `server`. The title outlives the turn — it is in the transcript `session/load` replays —
 and "which server ran this" is not recoverable later from a bare name.
 
+## Only text blocks, and the other four are declined by name
+
+A prompt may carry five block types. This executor reads **`text`** and declines the rest:
+
+| Block | Governed by | Declined because |
+|---|---|---|
+| `text` | — always allowed | *read* — it carries the invocation |
+| `image` | `promptCapabilities.image` | it needs a model to look at it |
+| `audio` | `promptCapabilities.audio` | it needs a model to listen to it |
+| `resource` | `promptCapabilities.embeddedContext` | it is context for a model to read |
+| `resource_link` | **nothing** | this agent would have to fetch and reason about it |
+
+All four share one reason, and it is worth saying out loud: **an image, a sound, or an
+embedded document is context for a model to reason over, and decision D1 puts no model in
+this runtime.** There is no defensible mapping from a picture to an MCP tool call, and
+inventing one would be worse than refusing. This is a decision, not a gap — the bead that
+made it says as much: "declining a block type is a legitimate outcome as long as
+advertisement matches."
+
+They are declined **by name**: a client debugging a rejected prompt is told which block
+and why, rather than getting a crash, a silent drop, or a message about JSON. A declined
+block takes the whole prompt with it, for the same validate-then-run reason below.
+
+`resource_link` is the odd one out. `PromptCapabilities` has fields for image, audio, and
+embeddedContext only, so **no capability governs a resource link** — a client may send one
+however this agent answers `initialize`, which is why its refusal carries its own reason
+rather than pointing at an advertisement.
+
+`supported_prompt_blocks` is `{"text"}`, and
+[capabilities.py](capabilities.md) derives the three `promptCapabilities` literals from
+it. The advertisement therefore cannot drift from what this class reads, in either
+direction.
+
 ## Validate everything, then run anything
 
 A prompt is parsed completely before the first tool runs.
@@ -136,15 +169,17 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title` |
 | `PromptConventionError` | A block that is not an invocation. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602` |
 | `CONVENTION` | The explanation appended to every refusal |
+| `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
+| `McpToolRouterExecutor.supported_prompt_blocks` | `{"text"}` — what `promptCapabilities` is derived from |
 
 ## What later beads own
 
 - `pyacp-eg1.1` — the richer MCP-result mapping. `_as_tool_content` carries **text** and
   skips what it does not understand rather than guessing, because a wrong `type` on the
   wire is harder to notice than a missing block.
-- `pyacp-hnk.3` — content-block typing and the `promptCapabilities` gates. This module
-  only reads `.text`, so image and audio blocks refuse today, which is what those literals
-  being `false` promises.
+- `pyacp-hnk.3` ✔ — content-block typing and the `promptCapabilities` gates. Settled
+  above: text only, the rest declined by name, and the literals derived from
+  `supported_prompt_blocks`.
 - `pyacp-hnk.4` — the rest of the `session/update` variant set.
 - `pyacp-hnk.5` — `stopReason` breadth beyond `end_turn`, `refusal`, and `cancelled`.
 

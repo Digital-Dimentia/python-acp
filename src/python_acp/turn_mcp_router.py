@@ -122,6 +122,27 @@ class Invocation:
         return f"{self.server}/{self.tool}" if self.server else self.tool
 
 
+#: Why each non-text prompt block is declined, keyed by its `type` discriminator.
+#:
+#: Every one is declined for the **same** reason and it is worth saying out loud: an
+#: image, a sound, or an embedded document is context for a model to reason over, and
+#: decision D1 puts no model in this runtime. There is no defensible mapping from a
+#: picture to an MCP tool call, and inventing one would be worse than refusing.
+#:
+#: `resource_link` is the odd one: `PromptCapabilities` has fields for image, audio, and
+#: embeddedContext only, so **no capability governs a resource link** and a client may
+#: send one however this agent answers `initialize`. Refusing it needs its own reason
+#: rather than an advertisement, which is why it is here.
+DECLINED_BLOCKS: dict[str, str] = {
+    "image": "an image, which needs a model to look at it",
+    "audio": "audio, which needs a model to listen to it",
+    "resource": "an embedded resource, which is context for a model to read",
+    "resource_link": (
+        "a link to a resource, which this agent would have to fetch and reason about"
+    ),
+}
+
+
 class McpToolRouterExecutor:
     """Runs the tool calls a prompt names, against that session's MCP backends.
 
@@ -129,6 +150,11 @@ class McpToolRouterExecutor:
     `docs/module-boundaries.md` has this module reach `mcp_registry.py` directly, so the
     context does not have to widen for one executor's dependency.
     """
+
+    #: Text only, and that is what `initialize` therefore advertises — `capabilities.py`
+    #: derives `promptCapabilities.image`, `.audio`, and `.embeddedContext` from this set,
+    #: so the advertisement cannot drift from what this class actually reads.
+    supported_prompt_blocks: frozenset[str] = frozenset({"text"})
 
     def __init__(self, backends: McpBackendRegistry) -> None:
         self._backends = backends
@@ -222,11 +248,17 @@ class McpToolRouterExecutor:
         ]
 
     def _parse_block(self, index: int, block: Any, backends: Any) -> Invocation:
+        kind = getattr(block, "type", None)
+        if kind in DECLINED_BLOCKS:
+            raise PromptConventionError(
+                f"Prompt block {index} is {DECLINED_BLOCKS[kind]}, and this agent runs "
+                "tools rather than reasoning, so it is declined."
+            )
         text = getattr(block, "text", None)
         if not isinstance(text, str):
             raise PromptConventionError(
-                f"Prompt block {index} is {_describe(block)}, and this agent runs tools "
-                "rather than reading prose, so only text blocks are understood."
+                f"Prompt block {index} is {_describe(block)}, and only text blocks carry "
+                "an invocation."
             )
         try:
             payload = json.loads(text)

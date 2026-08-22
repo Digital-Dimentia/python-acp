@@ -374,6 +374,17 @@ class TurnExecutor(Protocol):
     `asyncio.CancelledError` propagate.
     """
 
+    #: The `ContentBlock` `type` discriminators this executor actually reads — `"text"`,
+    #: `"image"`, `"audio"`, `"resource"`, `"resource_link"`.
+    #:
+    #: Declarative rather than discovered, because `initialize` has to promise it before
+    #: any prompt arrives: `promptCapabilities.image`, `.audio`, and `.embeddedContext`
+    #: are **derived from this set**, so an executor that starts reading images flips the
+    #: literal by saying so, and one that says so without reading them fails a test. The
+    #: capability block is per-agent and an agent knows its executor, which is what makes
+    #: a per-executor promise expressible at all.
+    supported_prompt_blocks: frozenset[str]
+
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 
 
@@ -390,6 +401,10 @@ class IdleTurnExecutor:
     nothing. The warning fires once per turn on purpose: a silent no-op turn is exactly
     the failure someone would otherwise spend an afternoon on.
     """
+
+    #: It reads nothing at all, so it promises nothing. An agent wired with only this
+    #: advertises no prompt capabilities, which is the accurate statement.
+    supported_prompt_blocks: frozenset[str] = frozenset()
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         logger.warning(

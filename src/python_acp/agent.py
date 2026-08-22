@@ -203,7 +203,13 @@ class PythonAcpAgent:
 
         return InitializeResponse(
             protocolVersion=negotiated,
-            agentCapabilities=build_agent_capabilities(unstable=self._unstable),
+            agentCapabilities=build_agent_capabilities(
+                unstable=self._unstable,
+                # What a content block *means* depends on the executor, which D3 makes
+                # swappable, so the three promptCapabilities literals come from it rather
+                # than from a table that cannot see it.
+                prompt_blocks=getattr(self._executor, "supported_prompt_blocks", frozenset()),
+            ),
             authMethods=list(AUTH_METHODS),
             agentInfo=Implementation(name=_AGENT_NAME, version=__version__),
         )

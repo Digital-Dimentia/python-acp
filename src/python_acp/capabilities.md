@@ -41,12 +41,36 @@ offered", and anything else owes the suite a proof.
 | `loadSession` | **`true`** | `pyacp-3rw.3` |
 | `sessionCapabilities.list` | **`{}`** | `pyacp-3rw.3` |
 | `sessionCapabilities.fork` / `.resume` / `.close` | **`{}`**, *only on an unstable connection* | `pyacp-3rw.3` |
-| `promptCapabilities.image` / `.audio` / `.embeddedContext` | `false` | `pyacp-hnk.3` |
+| `promptCapabilities.image` / `.audio` / `.embeddedContext` | `false` — **derived** | `pyacp-hnk.3` |
 | `sessionCapabilities.additionalDirectories` | **`{}`** | `pyacp-3rw.4` |
 | `mcpCapabilities.http` / `.sse` / `.acp` | `false` | never — transports we do not drive |
 | `sessionCapabilities.delete` | `null` | never — no route, no `Agent` member in 0.12.1 |
 | `auth.logout` | `null` | never — nothing to log out of, and `logout` is unrouted |
 | `providers`, `nes`, `positionEncoding` | `null` | never — UNSTABLE and unrouted |
+
+### The prompt capabilities are derived, not written
+
+`build_agent_capabilities(prompt_blocks=...)` takes the turn executor's
+`supported_prompt_blocks`, and those three rows come from it.
+
+**What a content block means depends on the executor**, which decision D3 makes
+swappable. A literal fixed in this table would be a promise about a component the table
+cannot see — and the moment an LLM-backed executor is dropped in, a hand-written `false`
+would be wrong with nothing to catch it. So the row records the value *when the block is
+read*, and the build derives whether it is.
+
+The binding runs both ways: an executor that starts reading images flips the literal by
+declaring it, and one that declares it without reading them fails
+`test_the_shipped_executor_advertises_exactly_what_it_reads`.
+
+The shipped [`McpToolRouterExecutor`](turn_mcp_router.md) reads `text` only, so all three
+read `false`. That is not a gap waiting to be filled — see that module for why an image
+has no defensible mapping to an MCP tool call.
+
+**`resource_link` is governed by nothing.** `PromptCapabilities` has three fields and the
+prompt union has four non-text block types, so a client may send a resource link whatever
+`initialize` says. Declining it needs a stated reason rather than an advertisement, which
+is why it lives in `turn_mcp_router.DECLINED_BLOCKS` and not here.
 
 ### The unstable gate
 
@@ -109,7 +133,8 @@ fields, and they are not interchangeable.
 
 | Symbol | Purpose |
 |---|---|
-| `Capability` | One leaf of the advertised block: path, value, owner, why |
+| `Capability` | One leaf: path, value, owner, why, and the two conditions that can take the value away — `requires_unstable` and `prompt_block` |
+| `Capability.value_for(unstable=, prompt_blocks=)` | What the row puts on the wire for one connection and executor |
 | `AGENT_CAPABILITY_MANIFEST` | Every leaf, in one tuple — the source `initialize` is built from |
 | `build_agent_capabilities()` | Assembles `AgentCapabilities` from the manifest; a fresh object per call, so no connection can reach another's |
 | `AUTH_METHODS` | The auth methods offered at `initialize` — empty |

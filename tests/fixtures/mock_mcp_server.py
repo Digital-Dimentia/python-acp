@@ -24,6 +24,17 @@ _list_stuck = os.environ.get("MOCK_MCP_LIST_STUCK") == "1"
 _list_empty_middle = os.environ.get("MOCK_MCP_LIST_EMPTY_MIDDLE") == "1"
 
 
+# Protocol-version negotiation knobs. Default echoes back whatever the client
+# proposed, which is what a server that supports the proposal must do.
+#   MOCK_MCP_PROTOCOL_VERSION=<v> -> answer with <v> no matter what was
+#                            proposed: the counter-offer a server makes when it
+#                            cannot speak the client's revision.
+#   MOCK_MCP_OMIT_PROTOCOL_VERSION=1 -> leave protocolVersion out of the result
+#                            entirely, which the lifecycle forbids.
+_protocol_version = os.environ.get("MOCK_MCP_PROTOCOL_VERSION")
+_omit_protocol_version = os.environ.get("MOCK_MCP_OMIT_PROTOCOL_VERSION") == "1"
+
+
 def write(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -120,16 +131,13 @@ while True:
         continue
 
     if method == "initialize":
-        write(
-            {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"},
-                    "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                },
-            }
-        )
+        result = {}
+        if not _omit_protocol_version:
+            proposed = (req.get("params") or {}).get("protocolVersion")
+            result["protocolVersion"] = _protocol_version or proposed or "2024-11-05"
+        result["serverInfo"] = {"name": "mock-mcp", "version": "1.0.0"}
+        result["capabilities"] = {"tools": {}, "prompts": {}, "resources": {}}
+        write({"jsonrpc": "2.0", "id": req_id, "result": result})
     elif method == "tools/list":
         write(
             {

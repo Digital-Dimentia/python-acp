@@ -26,7 +26,9 @@ flowchart TD
     AsyncRun --> Log[configure logging]
     Log --> MCPStart[start MCPStdioClient context]
     MCPStart --> Init[initialize MCP handshake]
-    Init --> BridgeStart[start ACPWebSocketBridge]
+    Init --> Version{"protocol version agreed?"}
+    Version -- no --> Abort["MCPProtocolError; MCP process stopped"]
+    Version -- yes --> BridgeStart[start ACPWebSocketBridge]
     BridgeStart --> Serve[serve_forever]
     Serve --> Stop[KeyboardInterrupt or shutdown]
 ```
@@ -35,6 +37,9 @@ flowchart TD
 
 - `KeyboardInterrupt` is caught in `run()` to allow clean interactive shutdown.
 - MCP process lifecycle is managed by `MCPStdioClient` context manager (`__aenter__` / `__aexit__`).
+- A protocol-version mismatch during the handshake aborts startup: `initialize()`
+  stops the MCP subprocess and raises `MCPProtocolError`, so the WebSocket
+  listener is never bound. See [mcp_stdio.py docs](mcp_stdio.md).
 
 ## Related
 

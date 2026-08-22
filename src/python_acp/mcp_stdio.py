@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 logger = logging.getLogger("python_acp.mcp_stdio")
 
@@ -85,6 +86,12 @@ class MCPStdioClient:
 
     command: Sequence[str]
     request_timeout: float = 30.0
+    #: Environment variables to add for the subprocess, **overlaid on this process's
+    #: own** rather than replacing it. A server command almost always needs `PATH` and
+    #: `HOME` to run at all, and withholding them would make every client-supplied
+    #: server fail for a reason that looks nothing like the cause. It is not a sandbox
+    #: boundary either way: whoever supplies `env` already supplies `command`.
+    env: Mapping[str, str] | None = None
     on_server_request: ServerRequestHandler | None = field(default=None)
     on_notification: NotificationHandler | None = field(default=None)
 
@@ -121,6 +128,7 @@ class MCPStdioClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=self._STREAM_LIMIT,
+            env=None if self.env is None else {**os.environ, **self.env},
         )
         self._stdout_task = asyncio.create_task(self._read_loop(self._proc))
         self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc))

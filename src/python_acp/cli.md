@@ -82,13 +82,32 @@ flowchart TD
 - Under `--transport stdio`, the client closing the pipe ends `run_stdio` and the
   process exits normally.
 
-## The session registry is created here
+## Both registries are created here, because only here can they be connected
 
-One `SessionRegistry` per process, constructed in `_run` and handed to whichever transport
-is bound. It lives here rather than in a transport or an agent because a session must
+```python
+backends = McpBackendRegistry()
+sessions = SessionRegistry(on_close=backends.close)
+```
+
+They live here rather than in a transport or an agent for two reasons. A session must
 outlive the connection that created it — `session/resume` means nothing otherwise — and
-the WebSocket transport builds one agent per socket. See
-[sessions.py](sessions.md) and [transport_ws.py](transport_ws.md).
+the WebSocket transport builds one agent per socket. And `on_close` is the entire coupling
+between them (decision B6a): `sessions.py` never imports MCP, so if this wiring is missed,
+every closed session leaks a subprocess. `_run` also calls `sessions.close_all()` on the
+way out, because sessions the client never closed still own theirs.
+
+See [sessions.py](sessions.md), [mcp_registry.py](mcp_registry.md), and
+[transport_ws.py](transport_ws.md).
+
+## `--mcp-command` is optional
+
+It starts a **process-wide** MCP server, handshaked before any listener binds so a bad
+command fails at startup rather than mid-session. Since `pyacp-db3` it is not required:
+ACP sessions carry their own servers in `session/new`, and that is what the agent uses.
+
+What still needs it is the deprecated action surface in [legacy_ws.py](legacy_ws.md),
+which predates sessions and has nowhere else to look. Without it, ACP works and the
+deprecated surface answers an error naming both ways out.
 
 ## Related
 

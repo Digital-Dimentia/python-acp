@@ -310,6 +310,18 @@ in the stdout loop would raise on it.
   `stop()`) is logged, not raised.
 - A server that ignores both EOF and `SIGTERM` is `SIGKILL`ed after ~4s.
 
+## `env`
+
+`MCPStdioClient(command, env=...)` adds environment variables for the subprocess,
+**overlaid on this process's own** rather than replacing it. A server command almost
+always needs `PATH` and `HOME` to run at all, and withholding them would make every
+client-supplied server fail for a reason that looks nothing like the cause. It is not a
+sandbox boundary either way: whoever supplies `env` already supplies `command`.
+
+`None` — the default — passes no `env` to `create_subprocess_exec` at all, so the child
+inherits normally. Added by `pyacp-db3` for `session/new`'s `McpServerStdio.env`; see
+[mcp_registry.py](mcp_registry.md).
+
 ## Related
 
 - [MCP protocol skill](../../.claude/skills/mcp-protocol/SKILL.md) — transport MUSTs,

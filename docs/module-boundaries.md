@@ -96,7 +96,7 @@ pre-empt that matrix; it only places boundaries.
 | `sessions.py` | `Session` records — id, cwd, `additionalDirectories`, mode id, config options, title, timestamps, the in-flight turn — and the registry that creates, looks up, forks, resumes, lists, and closes them | JSON-RPC shapes; MCP subprocesses; prompt execution; **path validation**, which is `pyacp-3rw.4`'s | `Session`, `SessionRegistry`, `UnknownSessionError`, `TurnAlreadyRunningError` | `pyacp-3rw.1` ✔, `pyacp-3rw.3` |
 | `turns.py` | The `TurnExecutor` Protocol (D3), the turn context handed to it (session handle, client handle, `session/update` channel), and `stopReason` semantics | Any concrete execution strategy | `TurnExecutor`, `TurnContext`, `IdleTurnExecutor`, later `TurnResult` | seeded by `pyacp-3rw.2` ✔; **completed by `pyacp-hnk.1`**, `pyacp-hnk.5` |
 | `turn_mcp_router.py` | The shipped default executor: map prompt content blocks to MCP tool calls, emit `session/update` through the client handle, return a `stopReason` | Being the only possible executor; being imported by `agent.py` directly (it is selected, not hardcoded) | `McpToolRouterExecutor` | `pyacp-hnk.2`, `pyacp-hnk.4`, `pyacp-eg1.1` |
-| `mcp_registry.py` | Per-session MCP backends: spawn/reuse/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session, with lifetime bound to the session | The stdio wire protocol itself | `McpBackendRegistry` | `pyacp-3rw.3`, `pyacp-db3` |
+| `mcp_registry.py` | Per-session MCP backends: spawn/tear down `MCPStdioClient` instances from `new_session`'s `mcpServers`, keyed by session then by name, with lifetime bound to the session | The stdio wire protocol itself; **reuse across sessions**, which is refused on purpose | `McpBackendRegistry`, `connect_stdio`, `Connector`, `UnknownBackendError` | `pyacp-db3` ✔ |
 | `mcp_stdio.py` | **Unchanged role.** One MCP server subprocess: stdio framing, `initialize` handshake, stderr drain, request correlation, `MCPProtocolError` | Knowing about ACP, sessions, or more than one server | `MCPStdioClient`, `MCPProtocolError` | already exists; hardened by `pyacp-eg1.1`, `pyacp-z3y`, `pyacp-pb7`, `pyacp-a92`, `pyacp-k5w`, `pyacp-ua1`, `pyacp-x8l` |
 | `transport_stdio.py` | Binding the agent to the process's own stdin/stdout via the SDK's stdio helpers, and the listen/shutdown loop | Argument parsing; anything agent-shaped | `run_stdio(agent, ...)` | `pyacp-tzd.2` |
 | `transport_ws.py` | Binding the agent to a WebSocket. Server lifecycle, a `Transport`-shaped message adapter over the `websockets` library, and the framing errors the SDK cannot express. **One `AgentSideConnection` and one `PythonAcpAgent` per socket.** | Dispatch, error codes, capability blocks — all of which moved to the SDK router, `errors.py`, and `capabilities.py` | `WebSocketMessageTransport`, `WebSocketAgentServer`, `serve_websocket(...)` | `pyacp-tzd.3` ✔ |
@@ -273,6 +273,23 @@ synchronous, single-step, or free of client round-trips — which is hnk.1's sta
 constraint. `turns.md` names what hnk.1 must still add: `stopReason` beyond
 `end_turn`/`cancelled`, capability-gated client-method access, a cancellation token,
 content-block typing, and a `TurnResult` carrying usage.
+
+### B6c. `--mcp-command` becomes optional (`pyacp-db3`)
+
+The bead says the per-session registry replaces "the single `MCPStdioClient` held by
+`ACPWebSocketBridge`". It replaces it for **ACP**, but not entirely: the deprecated
+surface in `legacy_ws.py` predates sessions and has nowhere else to look for a backend.
+
+**Decision:** keep the process-wide client, make `--mcp-command` optional, and have
+`LegacyActionHandler` say so when it is absent. Leaving it required would mean a client
+running purely on `session/new`'s `mcpServers` still had to name an unrelated server on
+the command line, which makes db3's deliverable half-usable. Phase 7 (`pyacp-sld.3`)
+removes the flag with the surface.
+
+Also settled here, matching `sessions.py`'s fork semantics: **two sessions naming the same
+server do not share a subprocess.** Sharing would make `session/close` on one tear down
+another's tools, and the two modules must agree or a forked session's close becomes a
+landmine.
 
 ### B7. `errors.py` exists even though it is small
 

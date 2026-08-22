@@ -97,9 +97,11 @@ decides whether to cancel and retry.
 - **Path validation.** `pyacp-3rw.4` enforces the absolute-path constraint on `cwd` and
   `additionalDirectories`, at the edge where a bad value must become `-32602`. A registry
   that also validated would put the rule in two places and let them disagree.
-- **MCP backends.** A session's backends are keyed by session id in `mcp_registry.py`.
-  The registry is the only thing that knows when a session ends, so it takes an
-  `on_close` hook — that is the seam, and the only coupling.
+- **MCP backends.** A session's backends are keyed by session id in
+  [mcp_registry.py](mcp_registry.md). The registry is the only thing that knows when a
+  session ends, so it takes an `on_close` hook — that is the seam, and the only coupling.
+  `cli.py` wires it (`SessionRegistry(on_close=backends.close)`); a deployment that
+  forgot to would leak one subprocess per session.
 - **`stopReason`.** `cancel_turn()` delivers the cancellation; `pyacp-hnk.5` decides what
   the turn reports.
 - **Pagination.** `list()` fixes the ordering — most recently active first — so a

@@ -31,6 +31,7 @@
   - [sessions.py](src/python_acp/sessions.md)
   - [turns.py](src/python_acp/turns.md)
   - [cli.py](src/python_acp/cli.md)
+  - [mcp_registry.py](src/python_acp/mcp_registry.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
@@ -72,6 +73,10 @@ verification. Prefer `PIP_CERT=/path/to/proxy-ca.pem` when you have the proxy's 
 python-acp --mcp-command python /path/to/your_mcp_server.py --host 127.0.0.1 --port 8765
 ```
 
+`--mcp-command` starts a **process-wide** MCP server and is **optional**. ACP sessions
+carry their own servers in `session/new`, so an agent does not need one; what still does
+is the deprecated action surface below, which predates sessions.
+
 ### As an ACP agent over stdio
 
 `--transport stdio` speaks ACP on the process's own stdin and stdout, which is how an
@@ -99,6 +104,31 @@ codes a stdio client gets:
 
 `ws` remains the default transport because it also carries the deprecated surface below,
 which stdio never had. See [transport_ws.py](src/python_acp/transport_ws.md).
+
+### Sessions bring their own MCP servers
+
+`session/new` names the MCP servers that session should talk to. Each gets its own
+subprocess, spawned and handshaked before the response returns, and torn down when the
+session closes:
+
+```json
+{"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {
+  "cwd": "/absolute/path",
+  "mcpServers": [
+    {"name": "tools", "command": "python", "args": ["my_mcp_server.py"], "env": []}
+  ]
+}}
+```
+
+`name`, `command`, `args`, and `env` are all **required** by the schema — an entry
+missing one is silently dropped before the agent sees it. `env` is added on top of the
+agent's own environment rather than replacing it.
+
+Only **stdio** servers are accepted. `initialize` advertises
+`mcpCapabilities: {http: false, sse: false, acp: false}`, so an `http` or `sse` entry is
+refused with `-32602` rather than accepted and quietly ignored. If any server fails to
+start, the whole `session/new` fails — a session id whose tools do not exist would be
+worse than an error.
 
 ## WebSocket actions (deprecated)
 

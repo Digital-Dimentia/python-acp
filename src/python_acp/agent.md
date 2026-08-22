@@ -40,7 +40,7 @@ member.
 
 | Member | Wire method | State today | Filled in by |
 |---|---|---|---|
-| `initialize` | `initialize` | **live** — negotiates the version, stores `clientCapabilities`, returns the capability block | refined by `pyacp-tzd.4` |
+| `initialize` | `initialize` | **live** — negotiates the version, stores `clientCapabilities`, returns the capability block from [capabilities.py](capabilities.md) | — |
 | `authenticate` | `authenticate` | **live** — refuses with `-32000 auth_required` | `pyacp-fln.1` |
 | `cancel` | `session/cancel` | **live** — logs and returns; a notification must never raise | `pyacp-3rw.2`, `pyacp-hnk.5` |
 | `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
@@ -64,26 +64,34 @@ already correct.
 every `methodId` is one we never offered. `-32000 auth_required` says "the method exists,
 the credentials do not"; `-32601` would say the opposite.
 
-## The capability block is a promise
+## `initialize` does three things
 
-`initialize` returns `AgentCapabilities` with every feature flag false or null, because
-Phase 1 implements no features. **A literal flips in the same commit as the feature it
-advertises, never ahead of it.** Each one is owned by a row of the compliance matrix:
+**Negotiates the version.** `capabilities.negotiate_protocol_version` echoes a version
+we serve and answers with our newest when the client asked for one we do not. This is
+not a rejection point — the client reads the answer and decides whether to disconnect —
+so an unsupported version is logged, not raised.
 
-- `loadSession` → `pyacp-3rw.3`
-- `promptCapabilities.image` / `.audio` / `.embeddedContext` → `pyacp-hnk.3`
-- `mcpCapabilities.http` / `.sse` / `.acp` → stay false; these gate the *transport* of a
-  client-supplied MCP server, and stdio (which needs no flag) is the only one we drive
-- `sessionCapabilities.list` → `pyacp-3rw.3`; `.additionalDirectories` → `pyacp-3rw.4`;
-  `.delete` stays null (the SDK routes no `session/delete`)
-- `authMethods` stays `[]` — this process runs locally under the user's own credentials
+**Stores `clientCapabilities`.** Whatever the client declared is kept for the life of
+the connection and read back through `PythonAcpAgent.client_capabilities`. Phase 4 gates
+every `fs/*`, `terminal/*`, and `elicitation/*` call on it; a call made without checking
+is a conformance bug the client is entitled to answer `-32601` to. `None` means the
+handshake has not happened and is deliberately not collapsed with a `ClientCapabilities`
+that declares nothing.
 
-`PROTOCOL_VERSION` comes from the SDK. It is the **ACP** version and is unrelated to
+*Per-connection* means per instance: **one `PythonAcpAgent` serves one connection.**
+`on_connect` stores that connection's `Client` facade on the same object, so the two
+have the same lifetime by construction. A transport that binds one agent to several
+connections would break both, which is why `cli.py` constructs the agent at the point it
+binds it.
+
+**Returns the capability block.** Not assembled here —
+[capabilities.py](capabilities.md) owns it, so a literal cannot be flipped on without a
+manifest row and a test proving the feature it advertises actually runs. Everything is
+`false`/`null` today because Phase 1 implements no features; the owner of each flip is
+in that module's table.
+
+`PROTOCOL_VERSION` is the **ACP** version, an integer. It is unrelated to
 `MCPStdioClient`'s MCP `protocolVersion` string. Two protocols, two version fields.
-
-Version negotiation answers with `PROTOCOL_VERSION` whatever the client asked for, and
-logs when they differ. That is the spec's shape: the agent states what it supports and
-the *client* decides whether to disconnect.
 
 ## Main symbols
 

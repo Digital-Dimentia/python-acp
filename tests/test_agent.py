@@ -15,6 +15,7 @@ from acp.schema import ClientCapabilities, FileSystemCapabilities
 
 from python_acp import __version__
 from python_acp.agent import PythonAcpAgent
+from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
 
 # Every wire method the SDK routes to an agent, and whether it is gated behind
 # use_unstable_protocol. Derived from docs/acp-compliance-matrix.md.
@@ -90,7 +91,7 @@ def test_the_sdk_routes_every_agent_method_to_us() -> None:
     assert [m for m, route in router._requests.items() if route.func is None] == []
 
 
-async def test_initialize_negotiates_and_advertises_nothing_it_cannot_do() -> None:
+async def test_initialize_identifies_this_agent() -> None:
     router = make_router()
 
     result = await router("initialize", PARAMS["initialize"], False)
@@ -98,27 +99,76 @@ async def test_initialize_negotiates_and_advertises_nothing_it_cannot_do() -> No
     assert result.protocol_version == PROTOCOL_VERSION
     assert result.agent_info.name == "python-acp"
     assert result.agent_info.version == __version__
-    # The block is a promise. Phase 1 implements no features, so it promises none.
-    assert result.agent_capabilities.load_session is False
-    assert result.agent_capabilities.prompt_capabilities.image is False
-    assert result.agent_capabilities.prompt_capabilities.audio is False
-    assert result.agent_capabilities.prompt_capabilities.embedded_context is False
-    assert result.agent_capabilities.mcp_capabilities.http is False
-    assert result.agent_capabilities.mcp_capabilities.sse is False
-    assert result.agent_capabilities.mcp_capabilities.acp is False
-    assert result.agent_capabilities.session_capabilities.list is None
-    assert result.agent_capabilities.session_capabilities.delete is None
-    assert result.agent_capabilities.session_capabilities.additional_directories is None
+
+
+async def test_initialize_advertises_the_manifest_and_nothing_else() -> None:
+    """What reaches the wire is the manifest, not a block assembled beside it.
+
+    `tests/test_capabilities.py` owns *which* literals are correct and why. This owns
+    the join: `initialize` must not be able to answer with a different block.
+    """
+    router = make_router()
+
+    result = await router("initialize", PARAMS["initialize"], False)
+
+    assert result.agent_capabilities == build_agent_capabilities()
     assert result.auth_methods == []
 
 
-async def test_an_unsupported_protocol_version_is_answered_not_rejected() -> None:
+async def test_initialize_promises_nothing_it_cannot_do() -> None:
+    """Spelled out per field, so the promise is legible without running the walker."""
+    router = make_router()
+
+    capabilities = (await router("initialize", PARAMS["initialize"], False)).agent_capabilities
+
+    assert capabilities.load_session is False
+    assert capabilities.prompt_capabilities.image is False
+    assert capabilities.prompt_capabilities.audio is False
+    assert capabilities.prompt_capabilities.embedded_context is False
+    assert capabilities.mcp_capabilities.http is False
+    assert capabilities.mcp_capabilities.sse is False
+    assert capabilities.mcp_capabilities.acp is False
+    assert capabilities.session_capabilities.list is None
+    assert capabilities.session_capabilities.delete is None
+    assert capabilities.session_capabilities.additional_directories is None
+    # Advertising these three would promise session/fork, /resume, and /close, which
+    # are unstable-gated in the router and unimplemented until pyacp-3rw.3.
+    assert capabilities.session_capabilities.fork is None
+    assert capabilities.session_capabilities.resume is None
+    assert capabilities.session_capabilities.close is None
+    assert capabilities.auth.logout is None
+    assert capabilities.providers is None
+    assert capabilities.nes is None
+    assert capabilities.position_encoding is None
+
+
+async def test_the_capability_block_is_not_shared_between_connections() -> None:
+    """A client that mutated its response must not be able to reach the next one's."""
+    first = (await make_router()("initialize", PARAMS["initialize"], False)).agent_capabilities
+    first.load_session = True
+
+    second = (await make_router()("initialize", PARAMS["initialize"], False)).agent_capabilities
+
+    assert second.load_session is False
+
+
+@pytest.mark.parametrize("requested", sorted(SUPPORTED_PROTOCOL_VERSIONS))
+async def test_a_supported_protocol_version_is_echoed_back(requested: int) -> None:
+    router = make_router()
+
+    result = await router("initialize", {"protocolVersion": requested}, False)
+
+    assert result.protocol_version == requested
+
+
+@pytest.mark.parametrize("requested", [0, PROTOCOL_VERSION + 1, 9999])
+async def test_an_unsupported_protocol_version_is_answered_not_rejected(requested: int) -> None:
     """The spec has the client decide whether our version is usable, not us."""
     router = make_router()
 
-    result = await router("initialize", {"protocolVersion": PROTOCOL_VERSION + 1}, False)
+    result = await router("initialize", {"protocolVersion": requested}, False)
 
-    assert result.protocol_version == PROTOCOL_VERSION
+    assert result.protocol_version == max(SUPPORTED_PROTOCOL_VERSIONS)
 
 
 async def test_initialize_stores_client_capabilities_for_phase_4() -> None:
@@ -141,6 +191,39 @@ async def test_initialize_stores_client_capabilities_for_phase_4() -> None:
     assert caps.fs.read_text_file is True
     assert caps.fs.write_text_file is False
     assert caps.terminal is True
+
+
+async def test_client_capabilities_are_per_connection() -> None:
+    """One agent instance serves one connection, so this is where "per-connection" lives.
+
+    Phase 4 gates `fs/*` and `terminal/*` on these. Two clients declaring different
+    capabilities must not be able to unlock each other's calls.
+    """
+    permissive, restricted = PythonAcpAgent(), PythonAcpAgent()
+
+    await build_agent_router(permissive, use_unstable_protocol=True)(
+        "initialize",
+        {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {"terminal": True}},
+        False,
+    )
+    await build_agent_router(restricted, use_unstable_protocol=True)(
+        "initialize", {"protocolVersion": PROTOCOL_VERSION}, False
+    )
+
+    assert permissive.client_capabilities.terminal is True
+    assert restricted.client_capabilities.terminal is False
+
+
+async def test_a_client_that_declares_nothing_is_not_the_same_as_no_initialize() -> None:
+    """`None` means the handshake has not happened; a defaults-only object means it has."""
+    agent = PythonAcpAgent()
+    assert agent.client_capabilities is None
+
+    await build_agent_router(agent, use_unstable_protocol=True)(
+        "initialize", {"protocolVersion": PROTOCOL_VERSION}, False
+    )
+
+    assert isinstance(agent.client_capabilities, ClientCapabilities)
 
 
 async def test_meta_keys_do_not_break_dispatch() -> None:

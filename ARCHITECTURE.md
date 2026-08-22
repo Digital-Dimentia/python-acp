@@ -32,11 +32,17 @@ The runtime is being rebuilt on the `agent-client-protocol` SDK. See
 and [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md) for the per-method
 dispositions.
 
-**Two pieces are built.** `agent.py` (`PythonAcpAgent`, all 15 `acp.interfaces.Agent`
-members) and `transport_stdio.py`, which binds it to stdin/stdout under
+**Three pieces are built.** `agent.py` (`PythonAcpAgent`, all 15 `acp.interfaces.Agent`
+members), `capabilities.py` (the block `initialize` advertises, and version
+negotiation), and `transport_stdio.py`, which binds the agent to stdin/stdout under
 `--transport stdio`. An ACP client can spawn the process and complete `initialize`
 today; session and prompt methods answer `-32601` until Phases 2 and 3 fill them in, and
 the agent cannot reach the MCP backend yet — that is the Phase 2 registry.
+
+The capability block that handshake returns is **entirely off**, by construction rather
+than by omission: every field is a row of `AGENT_CAPABILITY_MANIFEST` carrying the bead
+that will flip it, and a row cannot be turned on without a test proving the feature
+behind it runs. See [capabilities.py](src/python_acp/capabilities.md).
 
 The WebSocket path is **not** rebound yet (`pyacp-tzd.3`), so under the default
 `--transport ws` the live request path is still the one under
@@ -49,10 +55,13 @@ sequenceDiagram
     participant T as transport_stdio.py
     participant SDK as acp.run_agent + router
     participant A as agent.py
+    participant C as capabilities.py
 
     E->>T: spawns the process; JSON-RPC over stdin
     T->>SDK: run_agent(agent, use_unstable_protocol=True)
     SDK->>A: initialize(protocol_version, client_capabilities)
+    A->>C: negotiate version, build the capability block
+    C-->>A: negotiated version + AgentCapabilities
     A-->>SDK: InitializeResponse
     SDK-->>E: result on stdout
     SDK->>A: session/new
@@ -62,6 +71,7 @@ sequenceDiagram
 
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire. Nothing else.
 - Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation; translates and delegates.
+- Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake. One table, derived from the compliance matrix; nothing else builds a capability block.
 - Session registry (`sessions.py`): cwd, additional directories, modes, config options, lifetimes.
 - Turn executor (`turns.py` + `turn_mcp_router.py`): serves one prompt turn and streams `session/update`.
 - MCP backend (`mcp_registry.py` + `mcp_stdio.py`): per-session MCP servers behind a registry.
@@ -77,6 +87,7 @@ flowchart LR
     Legacy["legacy_ws.py<br/>(deprecated)"]
     SDK["acp.run_agent<br/>+ agent router"]
     Agent["agent.py<br/>PythonAcpAgent"]
+    Caps["capabilities.py<br/>capability manifest"]
     Errors["errors.py"]
     Sessions["sessions.py"]
     Turns["turns.py<br/>TurnExecutor"]
@@ -93,6 +104,7 @@ flowchart LR
     TStdio --> SDK
     TWs --> SDK
     SDK <--> Agent
+    Agent --> Caps
     Agent --> Errors
     Agent --> Sessions
     Agent --> Turns
@@ -152,6 +164,7 @@ which beads redraw it.
 ## Module Documentation
 
 - [ACP agent module](src/python_acp/agent.md)
+- [Capability manifest module](src/python_acp/capabilities.md)
 - [CLI module](src/python_acp/cli.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)

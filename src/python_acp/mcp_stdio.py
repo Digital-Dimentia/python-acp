@@ -377,6 +377,11 @@ class MCPStdioClient:
 
         - **It never raises.** A dead subprocess has nothing left to cancel, and
           a failure here must not mask the failure that prompted the cancel.
+          That covers the OSError family too: `_write` reaches `drain()`, so a
+          subprocess dying *mid-write* — after the `is_closing()` guard passed —
+          surfaces as `BrokenPipeError`/`ConnectionResetError` rather than
+          `MCPProtocolError`, and letting one escape would replace the timeout
+          error the caller is about to raise with an unrelated OSError.
         - **It does not touch `_pending`.** Whoever abandoned the request owns
           that future; this method only puts the notification on the wire.
 
@@ -389,7 +394,7 @@ class MCPStdioClient:
             params["reason"] = reason
         try:
             await self.notify("notifications/cancelled", params)
-        except MCPProtocolError:
+        except (MCPProtocolError, OSError):
             # Best-effort by contract: log where the courtesy went undelivered.
             logger.debug("Could not cancel MCP request %r", request_id, exc_info=True)
 

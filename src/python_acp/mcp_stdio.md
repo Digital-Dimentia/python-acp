@@ -254,9 +254,18 @@ Three properties it is worth not re-deriving:
 
 | Property | Why |
 |---|---|
-| It never raises | A dead subprocess has nothing left to cancel, and a failed courtesy must not mask the failure that prompted it |
+| It never raises | A dead subprocess has nothing left to cancel, and a failed courtesy must not mask the failure that prompted it. This covers `OSError` as well as `MCPProtocolError` — see below |
 | It does not touch `_pending` | Whoever abandoned the request owns that future; this only puts the notification on the wire |
 | A late reply is still tolerated | The notification and a real response can cross in flight; `_resolve_response` discards a response for a forgotten id |
+
+**Both error families are swallowed, not just `MCPProtocolError`.** The
+`stdin.is_closing()` guard in `_write()` catches a subprocess that is already
+gone, but not one that dies *during* `drain()` — that window surfaces as
+`BrokenPipeError`/`ConnectionResetError`. Letting one escape would replace the
+`MCPProtocolError` the timeout path is about to raise with an unrelated
+`OSError`, so `cancel_request` catches `(MCPProtocolError, OSError)` and logs at
+debug. `test_timeout_still_raises_mcp_error_when_cancelling_breaks` pins the
+outcome that matters: the caller still sees the timeout.
 
 **`initialize` is the exception.** A client MUST NOT cancel the handshake, so
 `request()` skips the notification for that one method: there is no session for
@@ -343,7 +352,9 @@ in the stdout loop would raise on it.
 
 - Timeout waiting for a response raises `MCPProtocolError` and sends
   `notifications/cancelled` for the abandoned request — except for
-  `initialize`, which MUST NOT be cancelled.
+  `initialize`, which MUST NOT be cancelled. If that notification cannot be
+  written (including a `BrokenPipeError` mid-`drain()`), the failure is logged
+  and the original timeout error still reaches the caller.
 - Closed stdout, a failed read loop, or a stopped process fails every pending
   request with `MCPProtocolError`.
 - Non-dict or malformed stdout lines are skipped with a debug log.

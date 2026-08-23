@@ -639,6 +639,50 @@ async def test_cancel_request_never_raises_when_the_process_is_gone() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_request_swallows_a_broken_pipe_mid_write() -> None:
+    """The is_closing() guard cannot catch a subprocess that dies during drain().
+
+    That window surfaces as BrokenPipeError, not MCPProtocolError. If it escaped,
+    the timeout path would raise an OSError in place of the MCPProtocolError its
+    caller is documented to raise.
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        async def die_mid_write(payload: dict[str, object]) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        client._write = die_mid_write  # type: ignore[method-assign]
+
+        await client.cancel_request(7, reason="subprocess died mid-write")
+
+
+@pytest.mark.asyncio
+async def test_timeout_still_raises_mcp_error_when_cancelling_breaks() -> None:
+    """A failed cancel must not replace the timeout error that prompted it."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, request_timeout=0.5) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        real_write = client._write
+        sent_first = False
+
+        async def die_after_the_request(payload: dict[str, object]) -> None:
+            nonlocal sent_first
+            if not sent_first:
+                sent_first = True
+                await real_write(payload)
+                return
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+        client._write = die_after_the_request  # type: ignore[method-assign]
+
+        with pytest.raises(MCPProtocolError, match="Timed out"):
+            await client.call_tool("stall", {})
+
+
+@pytest.mark.asyncio
 async def test_initialize_is_never_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     """MCP forbids cancelling the handshake, timeout or not."""
     monkeypatch.setenv("MOCK_MCP_STALL_INITIALIZE", "1")

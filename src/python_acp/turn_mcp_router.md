@@ -139,6 +139,39 @@ plan-less client still gets everything else — see [turns.md](turns.md).
 The full disposition of all thirteen `session/update` variants — emitted, deferred, and
 declined, each with a reason — is `turns.SESSION_UPDATE_DISPOSITIONS`.
 
+## Session modes
+
+Three, and each changes what a turn **does** — the bead is explicit that a mode with no
+behavioural difference should not exist.
+
+| Mode | Runs tools | Asks permission |
+|---|---|---|
+| `execute` *(default)* | yes | yes, per call |
+| `dry-run` | **no** | no — nothing runs, so there is nothing to approve |
+| `auto-approve` | yes | **no** — choosing the mode *is* the consent |
+
+Declared on the executor (`session_modes`) for the same reason as
+`supported_prompt_blocks`: `session/new` advertises them before any turn runs, and a mode
+only means anything to the executor that acts on it. Each session gets a **deep copy**,
+because `set_mode` mutates `current_mode_id` in place and the declaration is shared by
+every session the executor serves.
+
+A session whose executor advertises no modes has `modes = None` and behaves as
+`execute` — the safe default is the one that asks.
+
+### `dry-run` and the status ACP does not have
+
+A dry run emits the `tool_call` with its `title` and `rawInput` — the arguments are the
+point of a preview — and then a `tool_call_update` marked `completed` with content
+`[dry-run] tools/echo was not executed.`
+
+`completed` is a **choice**, not a claim: ACP's `ToolCallStatus` is
+`pending | in_progress | completed | failed`, and none of them means "skipped". Leaving
+the call `pending` would hang a client waiting for a terminal status; `failed` would say
+something went wrong. So the status marks the tool-call *activity* as concluded and two
+other signals say nothing ran: the content says so in words, and **`rawOutput` is
+absent** — a real completion always carries the server's result.
+
 ## Permission
 
 **Every tool call is consequential**, so every one is asked about. That is not caution
@@ -246,6 +279,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |
+| `SESSION_MODES` | The three modes, and `EXECUTE` / `DRY_RUN` / `AUTO_APPROVE` for their ids |
 | `McpToolRouterExecutor.supported_prompt_blocks` | `{"text"}` — what `promptCapabilities` is derived from |
 
 ## What later beads own

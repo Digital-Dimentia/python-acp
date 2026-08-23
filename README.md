@@ -96,7 +96,7 @@ nothing else**, and all diagnostics go to stderr.
 
 The agent serves `initialize`, the full session lifecycle (`new`, `prompt`, `cancel`,
 `load`, `list`, `fork`, `resume`, `close`), and refuses `authenticate`.
-`session/set_mode` and `session/set_config_option` return `-32601` until Phase 5.
+`session/set_config_option` returns `-32601` until Phase 5.
 See [agent.py](src/python_acp/agent.md) for the per-method state and
 [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
 
@@ -184,6 +184,20 @@ A prompt that is not an invocation — prose, malformed JSON, an empty prompt �
 with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convention. It is
 not an error, and **nothing runs**: the whole prompt is parsed before the first tool, so a
 malformed third block does not leave two side effects behind.
+
+### Session modes
+
+`session/new` advertises three modes and `session/set_mode` switches between them. Each
+changes what a turn does:
+
+| Mode | Runs tools | Asks permission |
+|---|---|---|
+| `execute` *(default)* | yes | yes, per call |
+| `dry-run` | no — reports what *would* run, with arguments | no |
+| `auto-approve` | yes | no; choosing the mode is the consent |
+
+A change is announced with a `current_mode_update` notification, including when the
+client is the one that asked — so a second client on the same session stays in step.
 
 **Every tool call asks the client for permission first**, via
 `session/request_permission`. MCP `2024-11-05` has no tool annotations, so there is no way

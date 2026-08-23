@@ -116,6 +116,20 @@ SDK itself refuses to keep, so `PythonAcpAgent(unstable=...)` mirrors the connec
 flag and `capabilities.build_agent_capabilities(unstable=...)` withholds those three rows
 when it is off. Both transports pass `True`.
 
+## Mode changes go out through one door
+
+`announce_mode` is the only thing that emits `current_mode_update`, and
+`set_session_mode` calls it rather than emitting inline. The notification goes out even
+though the client is the one who asked, for two reasons: a second client attached to the
+same session needs it to stay in step, and an internally-originated change — a future
+executor deciding it must drop out of `auto-approve`, say — should be indistinguishable
+on the wire from a client-driven one. Nothing internal changes a mode today; the door
+exists so that when something does, it does not invent a second way to say so.
+
+Modes themselves come from the **executor** (`TurnExecutor.session_modes`), the only
+thing that can act on one — the same arrangement as `promptCapabilities`. Each session
+gets a deep copy, because `set_mode` mutates in place.
+
 ## Paths are validated here and nowhere else
 
 `cwd` and `additionalDirectories` must be absolute — `-32602` otherwise — and are stored
@@ -166,14 +180,14 @@ member.
 | `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
 | `on_connect` | — | **live** — stores the `Client` facade | — |
 | `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
-| `new_session` | `session/new` | **live** — registers a session, opens its MCP servers, rejects the transports `initialize` did not advertise | — |
+| `new_session` | `session/new` | **live** — registers a session with the executor's modes, opens its MCP servers, rejects the transports `initialize` did not advertise | — |
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | **live** — replays the session's transcript, then returns its settings | — |
 | `list_sessions` | `session/list` | **live** — one keyset-paginated page, most recently active first | — |
 | `close_session` | `session/close` | **live** *(unstable-gated)* — cancels the turn, drops the session, releases its backends | — |
 | `fork_session` | `session/fork` | **live** *(unstable-gated)* — deep copy under a new id, with its own MCP subprocesses | — |
 | `resume_session` | `session/resume` | **live** *(unstable-gated)* — reattaches; deliberately does **not** replay | — |
-| `set_session_mode` | `session/set_mode` | `-32601` | `pyacp-fln.2` |
+| `set_session_mode` | `session/set_mode` | **live** — switches the mode and emits `current_mode_update` | — |
 | `set_config_option` | `session/set_config_option` | `-32601` | `pyacp-fln.3` |
 
 `_not_implemented` returns exactly what the router produces for an absent attribute, so

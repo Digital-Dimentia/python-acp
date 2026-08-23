@@ -84,9 +84,9 @@ CONFORMANCE: tuple[Case, ...] = (
     Case(
         "set_session_mode",
         "session/set_mode",
-        "unimplemented",
-        {"sessionId": "s1", "modeId": "ask"},
-        why="pyacp-fln.2. Nothing offers modes yet.",
+        "implemented",
+        {"modeId": "dry-run"},
+        needs_session=True,
     ),
     Case(
         "set_config_option",

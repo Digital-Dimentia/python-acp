@@ -79,15 +79,14 @@ async def test_a_real_acp_client_initializes_over_the_subprocess() -> None:
 async def test_unbuilt_methods_answer_method_not_found_over_the_wire() -> None:
     """The -32601 must survive the round trip, not just the router.
 
-    `session/set_mode` is one of the two members left unbuilt (`pyacp-fln.2`,
-    `pyacp-fln.3`); swap it for another when they land.
+    `session/set_config_option` is the last member left unbuilt (`pyacp-fln.3`).
     """
     async with agent_process() as (conn, _proc):
         await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
 
         with pytest.raises(RequestError) as excinfo:
             await asyncio.wait_for(
-                conn.set_session_mode(session_id="s1", mode_id="ask"), timeout=30
+                conn.set_config_option(session_id="s1", config_id="c1", value=True), timeout=30
             )
 
     assert excinfo.value.code == -32601

@@ -32,6 +32,7 @@ from typing import Any
 
 from acp import RequestError
 from acp.interfaces import Client
+from acp.helpers import update_current_mode
 from acp.schema import (
     AuthenticateResponse,
     CloseSessionResponse,
@@ -45,6 +46,7 @@ from acp.schema import (
     NewSessionResponse,
     PromptResponse,
     ResumeSessionResponse,
+    SessionModeState,
     SetSessionConfigOptionResponse,
     SetSessionModeResponse,
 )
@@ -59,7 +61,12 @@ from python_acp.capabilities import (
 from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
-from python_acp.sessions import SessionRegistry, TurnAlreadyRunningError, UnknownSessionError
+from python_acp.sessions import (
+    Session,
+    SessionRegistry,
+    TurnAlreadyRunningError,
+    UnknownSessionError,
+)
 from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.turns import TurnContext, TurnExecutor
 
@@ -244,13 +251,13 @@ class PythonAcpAgent:
         for a relative one — and stored tidied. See `paths.py` for why they are
         normalised but not resolved, and for the containment rule Phase 4.2 builds on.
 
-        `modes` and `configOptions` are absent because nothing offers any yet
-        (`pyacp-fln.2`, `pyacp-fln.3`). The registry carries both, so those beads change
-        what is created rather than what is returned.
+        `modes` come from the executor, which is the only thing that can act on one —
+        the same arrangement as `promptCapabilities`. `configOptions` are still absent
+        (`pyacp-fln.3`).
         """
         stdio_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
         root, extra = normalize_roots(cwd, additional_directories)
-        session = self._sessions.create(root, additional_directories=extra)
+        session = self._sessions.create(root, additional_directories=extra, modes=self._modes())
         try:
             await self._backends.open(session.session_id, stdio_servers)
         except Exception:
@@ -391,7 +398,45 @@ class PythonAcpAgent:
     async def set_session_mode(
         self, session_id: str, mode_id: str, **kwargs: Any
     ) -> SetSessionModeResponse | None:
-        raise self._not_implemented("session/set_mode")
+        """Switch a session's mode and tell the client it changed.
+
+        The notification goes out even though the client is the one who asked: a client
+        is not the only possible source of a change, and every mode change looking the
+        same on the wire is what lets `announce_mode` serve an internal one too. It is
+        also what a second client attached to the same session needs in order to stay in
+        step.
+
+        `Session.set_mode` refuses an unknown mode *and* a session that advertises none,
+        so the notification cannot describe a mode the client was never offered.
+        """
+        session = self._sessions.get(session_id)
+        session.set_mode(mode_id)
+        await self.announce_mode(session)
+        return SetSessionModeResponse()
+
+    async def announce_mode(self, session: Session) -> None:
+        """Emit `current_mode_update` for a session's current mode.
+
+        One place, so an internally-originated change — a future executor deciding it
+        must drop out of `auto-approve`, say — is indistinguishable on the wire from a
+        client-driven one. Nothing internal changes a mode today; this exists so that
+        when something does, it does not invent a second way to say so.
+        """
+        if session.modes is None:
+            return
+        await self.client.session_update(
+            session_id=session.session_id,
+            update=update_current_mode(session.modes.current_mode_id),
+        )
+
+    def _modes(self) -> SessionModeState | None:
+        """The modes a new session starts with — the executor's, deep-copied.
+
+        Copied because `Session.set_mode` mutates `current_mode_id` in place, and the
+        executor's declaration is shared by every session it serves.
+        """
+        declared = getattr(self._executor, "session_modes", None)
+        return None if declared is None else declared.model_copy(deep=True)
 
     @as_request_error
     async def set_config_option(

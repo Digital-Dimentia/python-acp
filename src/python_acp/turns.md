@@ -12,6 +12,7 @@ for, satisfied once.
 ```python
 class TurnExecutor(Protocol):
     supported_prompt_blocks: frozenset[str]
+    session_modes: SessionModeState | None
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 ```
 
@@ -31,6 +32,11 @@ because `initialize` has to promise it **before any prompt arrives**:
 which D3 makes swappable, so the promise has to come from the executor rather than from a
 table that cannot see it — and the capability block is per-agent, which is what makes a
 per-executor promise expressible at all.
+
+`session_modes` is declarative for the same reason, and for a second one: a mode only
+means something to the executor that acts on it, so nothing else can say what modes
+exist. `None` is not "no opinion" — `Session.set_mode` refuses a session that advertises
+no modes, so an executor without them cannot have one imposed.
 
 ## What a turn is handed
 
@@ -109,7 +115,7 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 
 | Symbol | Purpose |
 |---|---|
-| `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks` |
+| `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks` and `session_modes` |
 | `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
 | `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
@@ -132,8 +138,8 @@ structural reason).
 
 | Disposition | Variants |
 |---|---|
-| **emitted** | `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, `ToolCallProgress`, `AgentPlanUpdate`, `AvailableCommandsUpdate` |
-| **deferred** | `CurrentModeUpdate` (`pyacp-fln.2`), `ConfigOptionUpdate` (`pyacp-fln.3`) — both need a feature that does not exist yet |
+| **emitted** | `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, `ToolCallProgress`, `AgentPlanUpdate`, `AvailableCommandsUpdate`, `CurrentModeUpdate` |
+| **deferred** | `ConfigOptionUpdate` (`pyacp-fln.3`) — nothing offers config options yet |
 | **declined** | `AgentThoughtChunk`, `UsageUpdate` — no LLM, so no reasoning trace and no tokens; `AgentPlanContentUpdate`, `AgentPlanRemovedUpdate` — the plan is complete before the first tool runs and no step is ever withdrawn; `SessionInfoUpdate` — nothing mutates a session's title or cwd after creation, by design |
 
 `tests/test_turns.py::test_every_variant_the_sdk_defines_has_a_disposition` walks the

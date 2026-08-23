@@ -155,8 +155,8 @@ async def test_unimplemented_acp_methods_answer_method_not_found() -> None:
     """Proof the SDK router is doing the dispatching, not a hand-rolled branch."""
     async with bound_socket() as websocket:
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "session/set_mode",
-             "params": {"sessionId": "s1", "modeId": "ask"}}
+            {"jsonrpc": "2.0", "id": 2, "method": "session/set_config_option",
+             "params": {"type": "boolean", "sessionId": "s1", "configId": "c1", "value": True}}
         )
 
     assert reply["error"]["code"] == -32601

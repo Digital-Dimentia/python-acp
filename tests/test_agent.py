@@ -28,9 +28,10 @@ from python_acp.agent import PythonAcpAgent
 from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
 from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
+from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
-from python_acp.turns import TurnContext, TurnResult
+from python_acp.turns import IdleTurnExecutor, TurnContext, TurnResult
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
@@ -273,7 +274,7 @@ async def test_meta_keys_do_not_break_dispatch() -> None:
 # Methods with a body. Everything else still answers -32601, and moving a name here is
 # the same commit as implementing it.
 # Only the two Phase 5 methods are left unbuilt.
-IMPLEMENTED = set(ROUTED_REQUESTS) - {"session/set_mode", "session/set_config_option"}
+IMPLEMENTED = set(ROUTED_REQUESTS) - {"session/set_config_option"}
 
 
 @pytest.mark.parametrize("method", [m for m in ROUTED_REQUESTS if m not in IMPLEMENTED])
@@ -490,8 +491,8 @@ async def test_new_session_registers_a_session_and_returns_its_id() -> None:
 
     assert result.session_id in registry
     assert registry.get(result.session_id).cwd == "/work"
-    # Nothing offers modes or config options yet (pyacp-fln.2, pyacp-fln.3).
-    assert result.modes is None
+    # Modes come from the executor (pyacp-fln.2); config options still have no source.
+    assert result.modes.current_mode_id == "execute"
     assert result.config_options is None
 
 
@@ -1058,3 +1059,81 @@ async def test_resume_and_load_validate_a_cwd_they_do_not_apply(
         await router(method, {"sessionId": session_id, **params}, False)
 
     assert excinfo.value.code == -32602
+
+
+# ---------------------------------------------------------------------------
+# Mode switching (pyacp-fln.2)
+# ---------------------------------------------------------------------------
+
+
+async def test_new_session_advertises_the_executors_modes() -> None:
+    """Modes come from the executor, the only thing that can act on one."""
+    agent, router, _client, session_id = await _lifecycle_agent(
+        executor=McpToolRouterExecutor(McpBackendRegistry())
+    )
+
+    listed = agent.sessions.get(session_id).modes
+    assert listed.current_mode_id == "execute"
+    assert {m.id for m in listed.available_modes} == {"execute", "dry-run", "auto-approve"}
+
+
+async def test_setting_a_mode_updates_the_session_and_tells_the_client() -> None:
+    """The notification goes out even though the client asked, so an internal change and
+    a client-driven one look the same — and a second client stays in step."""
+    agent, router, client, session_id = await _lifecycle_agent(
+        executor=McpToolRouterExecutor(McpBackendRegistry())
+    )
+
+    await router("session/set_mode", {"sessionId": session_id, "modeId": "dry-run"}, False)
+
+    assert agent.sessions.get(session_id).modes.current_mode_id == "dry-run"
+    announced = [u for _s, u in client.updates if u.session_update == "current_mode_update"]
+    assert [u.current_mode_id for u in announced] == ["dry-run"]
+
+
+async def test_an_unknown_mode_is_refused_and_changes_nothing() -> None:
+    agent, router, client, session_id = await _lifecycle_agent(
+        executor=McpToolRouterExecutor(McpBackendRegistry())
+    )
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/set_mode", {"sessionId": session_id, "modeId": "nope"}, False)
+
+    assert excinfo.value.code == -32602
+    assert agent.sessions.get(session_id).modes.current_mode_id == "execute"
+    assert client.updates == []
+
+
+async def test_setting_a_mode_on_a_session_that_has_none_is_refused() -> None:
+    """`IdleTurnExecutor` advertises no modes, and a notification for a mode the client
+    was never offered would be worse than an error."""
+    _agent, router, _client, session_id = await _lifecycle_agent(executor=IdleTurnExecutor())
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/set_mode", {"sessionId": session_id, "modeId": "dry-run"}, False)
+
+    assert excinfo.value.code == -32602
+
+
+async def test_each_session_gets_its_own_copy_of_the_declared_modes() -> None:
+    """`set_mode` mutates `current_mode_id` in place, and the executor's declaration is
+    shared by every session it serves."""
+    executor = McpToolRouterExecutor(McpBackendRegistry())
+    agent, router, _client, first = await _lifecycle_agent(executor=executor)
+    second = (await router("session/new", {"cwd": "/work", "mcpServers": []}, False)).session_id
+
+    await router("session/set_mode", {"sessionId": first, "modeId": "dry-run"}, False)
+
+    assert agent.sessions.get(second).modes.current_mode_id == "execute"
+    assert executor.session_modes.current_mode_id == "execute"
+
+
+async def test_a_fork_does_not_inherit_a_later_mode_change() -> None:
+    agent, router, _client, session_id = await _lifecycle_agent(
+        executor=McpToolRouterExecutor(McpBackendRegistry())
+    )
+    forked = await router("session/fork", {"sessionId": session_id, "cwd": "/work"}, False)
+
+    await router("session/set_mode", {"sessionId": session_id, "modeId": "auto-approve"}, False)
+
+    assert agent.sessions.get(forked.session_id).modes.current_mode_id == "execute"

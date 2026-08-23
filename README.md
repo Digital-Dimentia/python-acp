@@ -30,6 +30,7 @@
   - [legacy_ws.py](src/python_acp/legacy_ws.md)
   - [paths.py](src/python_acp/paths.md)
   - [sessions.py](src/python_acp/sessions.md)
+  - [terminals.py](src/python_acp/terminals.md)
   - [turns.py](src/python_acp/turns.md)
   - [turn_mcp_router.py](src/python_acp/turn_mcp_router.md)
   - [cli.py](src/python_acp/cli.md)
@@ -161,6 +162,7 @@ block must be a JSON object naming an MCP tool:
 | `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
 | `read` | no | `{"<argument>": {"path": "/abs", "line": 1, "limit": 40}}` — files to read into arguments |
 | `write` | no | `{"path": "/abs/out.txt"}` — where the tool's text output goes |
+| `run` | no | `{"<argument>": {"command": "git", "args": ["log"]}}` — commands to run into arguments |
 
 Each text block is one call, run in order, and returns `stopReason: "end_turn"`. The turn
 streams, in this order:
@@ -229,6 +231,36 @@ calls them so you stay in control of what is read and written.
 
 `ToolCall.locations` carries the resolved paths, so a client can show or follow which
 files a call is about.
+
+### Running commands
+
+`run` goes through **your** terminals, never through this process: `terminal/create`,
+`/wait_for_exit`, `/output`, `/kill`, and `/release` are ACP *client* methods, and this
+agent calls them so the command runs where you can see it.
+
+```json
+{"tool": "summarise",
+ "run": {"log": {"command": "git", "args": ["log", "--oneline", "-5"],
+                 "cwd": "/abs/repo", "env": {"TZ": "UTC"}, "outputByteLimit": 65536}}}
+```
+
+- **Gated on `clientCapabilities.terminal`**, which is one boolean covering all five
+  methods — there is no per-method granularity in the protocol. A prompt asking to run a
+  command without it is answered with `stopReason: "refusal"`, before anything runs.
+- **Permission comes first.** Nothing is started until you approve that tool call.
+- **`outputByteLimit` is always sent**, defaulting to 1 MiB. The captured output becomes
+  an MCP tool argument, so it has to fit through that request; unbounded output is a
+  failure mode with no error message attached. Name your own limit if 1 MiB is wrong for
+  your command. When your client truncates, the tool call's content says so.
+- **`cwd` defaults to the session's** and must be absolute and inside the session's roots
+  when you name one.
+- **The terminal is always released** — on completion, on failure, on cancellation, and on
+  `session/close`. The one thing this agent cannot do is release a terminal after *you*
+  disconnect: the release is a request, and the connection that would carry it is gone. It
+  drops its handles and says so rather than pretending. See
+  [terminals.md](src/python_acp/terminals.md).
+- **A command that exits non-zero means the tool is not called**, and the failure names
+  the exit status. Its output was going to *be* an argument, and inventing one is worse.
 
 ### Session modes
 

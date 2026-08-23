@@ -11,8 +11,11 @@ codes against, and every refusal it can produce is part of that contract.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,7 @@ from acp.schema import (
     AllowedOutcome,
     AudioContentBlock,
     ClientCapabilities,
+    CreateTerminalResponse,
     EmbeddedResourceContentBlock,
     EnvVariable,
     FileSystemCapabilities,
@@ -33,13 +37,17 @@ from acp.schema import (
     ReadTextFileResponse,
     RequestPermissionResponse,
     ResourceContentBlock,
+    TerminalExitStatus,
+    TerminalOutputResponse,
     TextContentBlock,
     TextResourceContents,
+    WaitForTerminalExitResponse,
 )
 
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
+from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turn_mcp_router import (
     CONVENTION,
     DECLINED_BLOCKS,
@@ -136,6 +144,166 @@ def has_fs(*, read: bool = True, write: bool = True) -> ClientCapabilities:
     return ClientCapabilities(fs=FileSystemCapabilities(readTextFile=read, writeTextFile=write))
 
 
+def has_terminal(*, read: bool = False, write: bool = False) -> ClientCapabilities:
+    """`clientCapabilities.terminal` — one boolean covering all five methods."""
+    return ClientCapabilities(
+        terminal=True,
+        fs=FileSystemCapabilities(readTextFile=read, writeTextFile=write),
+    )
+
+
+class TerminalClient(RecordingClient):
+    """A client whose `terminal/*` methods really run processes.
+
+    Real subprocesses, for the same reason `FilesystemClient` uses real files and the MCP
+    backend is a real server: the point of a terminal is that a command runs somewhere
+    this process does not control, and a stub handing back a canned string would prove
+    nothing about `outputByteLimit`, about an exit status, or about a kill actually
+    reaching a running process.
+
+    Shared with `tests/test_terminals.py`, which drives the registry directly.
+    """
+
+    def __init__(
+        self,
+        *answers: str,
+        create_error: Exception | None = None,
+        release_error: Exception | None = None,
+    ) -> None:
+        super().__init__(*answers)
+        self.create_error = create_error
+        self.release_error = release_error
+        self.created: list[dict[str, Any]] = []
+        self.killed: list[str] = []
+        self.released: list[str] = []
+        #: Every process ever started, by terminal id, and never removed — a test asking
+        #: "did the kill land" needs the handle after the terminal is gone.
+        self.processes: dict[str, asyncio.subprocess.Process] = {}
+        #: Set when `wait_for_terminal_exit` is actually in flight, so a cancellation test
+        #: can cancel *during* the wait rather than racing the create.
+        self.waiting = asyncio.Event()
+        self._live: dict[str, asyncio.subprocess.Process] = {}
+        self._readers: dict[str, asyncio.Task[None]] = {}
+        self._buffers: dict[str, bytearray] = {}
+        self._truncated: dict[str, bool] = {}
+        self._limits: dict[str, int] = {}
+
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[str] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kw: Any,
+    ) -> CreateTerminalResponse:
+        self.created.append(
+            {
+                "session_id": session_id,
+                "command": command,
+                "args": list(args or []),
+                "env": {variable.name: variable.value for variable in env or []},
+                "cwd": cwd,
+                "output_byte_limit": output_byte_limit,
+            }
+        )
+        if self.create_error is not None:
+            raise self.create_error
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *(args or []),
+            cwd=cwd,
+            env={**os.environ, **{variable.name: variable.value for variable in env or []}},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        terminal_id = f"terminal-{len(self.created)}"
+        self.processes[terminal_id] = process
+        self._live[terminal_id] = process
+        self._buffers[terminal_id] = bytearray()
+        self._truncated[terminal_id] = False
+        self._limits[terminal_id] = (
+            DEFAULT_OUTPUT_BYTE_LIMIT if output_byte_limit is None else output_byte_limit
+        )
+        self._readers[terminal_id] = asyncio.create_task(self._drain(terminal_id, process))
+        return CreateTerminalResponse(terminalId=terminal_id)
+
+    async def _drain(self, terminal_id: str, process: asyncio.subprocess.Process) -> None:
+        """Keep the last `outputByteLimit` bytes, truncating from the beginning.
+
+        Which is what the schema tells a client to do, and is the half of the contract an
+        agent cannot verify from its own side.
+        """
+        assert process.stdout is not None
+        buffer = self._buffers[terminal_id]
+        limit = self._limits[terminal_id]
+        while True:
+            chunk = await process.stdout.read(4096)
+            if not chunk:
+                return
+            buffer += chunk
+            if len(buffer) > limit:
+                del buffer[: len(buffer) - limit]
+                self._truncated[terminal_id] = True
+
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kw: Any
+    ) -> WaitForTerminalExitResponse:
+        self.waiting.set()
+        code = await self._live[terminal_id].wait()
+        await self._readers[terminal_id]
+        return WaitForTerminalExitResponse(**_exit_fields(code))
+
+    async def terminal_output(
+        self, session_id: str, terminal_id: str, **kw: Any
+    ) -> TerminalOutputResponse:
+        process = self._live[terminal_id]
+        status = (
+            None
+            if process.returncode is None
+            else TerminalExitStatus(**_exit_fields(process.returncode))
+        )
+        return TerminalOutputResponse(
+            output=bytes(self._buffers[terminal_id]).decode(errors="replace"),
+            truncated=self._truncated[terminal_id],
+            exitStatus=status,
+        )
+
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kw: Any) -> None:
+        self.killed.append(terminal_id)
+        process = self._live[terminal_id]
+        if process.returncode is None:
+            process.kill()
+        return None
+
+    async def release_terminal(self, session_id: str, terminal_id: str, **kw: Any) -> None:
+        self.released.append(terminal_id)
+        if self.release_error is not None:
+            raise self.release_error
+        process = self._live.pop(terminal_id, None)
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        reader = self._readers.pop(terminal_id, None)
+        if reader is not None:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+        return None
+
+
+def _exit_fields(code: int) -> dict[str, Any]:
+    """A `returncode` as the schema's two fields: a signal has no exit code."""
+    if code < 0:
+        return {"signal": signal.Signals(-code).name}
+    return {"exitCode": code}
+
+
+def prints(text: str) -> dict[str, Any]:
+    """A `run` spec for a command that prints `text` and exits 0."""
+    return {"command": sys.executable, "args": ["-c", f"print({text!r})"]}
+
+
 class Harness:
     """A session with `server_names` MCP servers open, and an executor over them."""
 
@@ -149,13 +317,17 @@ class Harness:
         self.server_names = server_names
         self.capabilities = capabilities
         self.backends = McpBackendRegistry()
+        # Deliberately **not** closed on exit, unlike the backends: every test here
+        # asserts on what the turn itself released, and a harness that tidied up first
+        # would hide exactly the leak these tests are for.
+        self.terminals = TerminalRegistry()
         self.client = client or RecordingClient()
         self.session = SessionRegistry().create(cwd)
 
     async def __aenter__(self) -> Harness:
         await self.backends.open(self.session.session_id, [spec(n) for n in self.server_names])
         self.context = TurnContext(self.session, self.client, self.capabilities)  # type: ignore[arg-type]
-        self.executor = McpToolRouterExecutor(self.backends)
+        self.executor = McpToolRouterExecutor(self.backends, self.terminals)
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -181,6 +353,9 @@ class Harness:
 
     def refusal(self) -> str:
         return self.of("agent_message_chunk")[0].content.text
+
+    def live_terminals(self) -> tuple[Any, ...]:
+        return self.terminals.live(self.session.session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1469,3 +1644,407 @@ async def test_an_argument_named_in_both_arguments_and_read_is_refused(tmp_path:
 
     assert result.stop_reason == "refusal"
     assert "named in both 'arguments' and 'read'" in harness.refusal()
+
+
+# ---------------------------------------------------------------------------
+# Commands through the client's terminals (pyacp-8bv.3)
+# ---------------------------------------------------------------------------
+
+
+def terminal_harness(tmp_path: Path, *, capabilities: Any = None, client: Any = None) -> Harness:
+    """A session rooted at `tmp_path`, because a command has to start somewhere real."""
+    return Harness(
+        "tools",
+        capabilities=has_terminal() if capabilities is None else capabilities,
+        client=client if client is not None else TerminalClient(),
+        cwd=str(tmp_path),
+    )
+
+
+async def test_a_command_runs_on_the_client_and_its_output_becomes_an_argument(
+    tmp_path: Path,
+) -> None:
+    """The whole point: the bytes come from a process this runtime never started."""
+    async with terminal_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="echo", run={"text": prints("from a terminal")}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call_update")[-1].content[-1].content.text == "from a terminal\n"
+    # `in_progress` re-publishes the arguments, which is the only place the substitution
+    # is visible to a client.
+    assert harness.of("tool_call_update")[0].raw_input == {"text": "from a terminal\n"}
+
+
+async def test_all_four_ordinary_terminal_methods_are_used(tmp_path: Path) -> None:
+    """`create` → `wait_for_exit` → `output` → `release`, in that order and every time."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        await harness.run(block(tool="echo", run={"text": prints("hi")}))
+
+    assert [call["command"] for call in client.created] == [sys.executable]
+    assert client.waiting.is_set()
+    assert client.released == ["terminal-1"]
+    assert client.killed == []
+    assert harness.live_terminals() == ()
+
+
+async def test_a_terminal_is_released_even_when_the_tool_then_fails(tmp_path: Path) -> None:
+    """The command ran on someone's machine; a failing tool afterwards does not un-run it,
+    and must not strand the terminal it produced."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(block(tool="boom", run={"text": prints("ignored")}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call_update")[-1].status == "failed"
+    assert client.released == ["terminal-1"]
+    assert harness.live_terminals() == ()
+
+
+async def test_the_note_says_what_ran_and_where_it_went(tmp_path: Path) -> None:
+    """A command that ran on the client's machine and left no trace in the transcript
+    would make the turn unreadable afterwards."""
+    async with terminal_harness(tmp_path) as harness:
+        await harness.run(block(tool="echo", run={"text": prints("noted")}))
+
+    note = harness.of("tool_call_update")[-1].content[0].content.text
+    assert note.startswith("Ran ")
+    assert "'text'" in note
+
+
+async def test_the_output_byte_limit_is_always_set(tmp_path: Path) -> None:
+    """Unbounded output is the failure mode the field exists to prevent, so the request
+    never omits it."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        await harness.run(block(tool="echo", run={"text": prints("bounded")}))
+
+    assert client.created[0]["output_byte_limit"] == DEFAULT_OUTPUT_BYTE_LIMIT
+
+
+async def test_a_client_may_ask_for_a_different_limit_and_is_told_about_truncation(
+    tmp_path: Path,
+) -> None:
+    """The client truncates from the beginning, so the tail is what survives — and the
+    note says so, because an argument silently missing its first 90 bytes is worse than
+    one that admits it."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        await harness.run(
+            block(
+                tool="echo",
+                run={"text": {**prints("x" * 100), "outputByteLimit": 10}},
+            )
+        )
+
+    assert client.created[0]["output_byte_limit"] == 10
+    note = harness.of("tool_call_update")[-1].content[0].content.text
+    assert "truncated it to the last 10 bytes" in note
+    assert harness.of("tool_call_update")[-1].content[-1].content.text == "x" * 9 + "\n"
+
+
+async def test_cancelling_a_turn_mid_command_kills_and_releases_the_terminal(
+    tmp_path: Path,
+) -> None:
+    """The leak path that matters most: the turn is torn out while the command is still
+    running, so nobody is left to read its output. It is killed rather than left burning
+    the client's machine, and released rather than left in its terminal list."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        turn = asyncio.create_task(
+            harness.run(
+                block(
+                    tool="echo",
+                    run={
+                        "text": {
+                            "command": sys.executable,
+                            "args": ["-c", "import time; time.sleep(30)"],
+                        }
+                    },
+                )
+            )
+        )
+        await asyncio.wait_for(client.waiting.wait(), timeout=10)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+
+    assert client.killed == ["terminal-1"]
+    assert client.released == ["terminal-1"]
+    assert harness.live_terminals() == ()
+    # The kill really reached a process, rather than only being recorded.
+    assert client.processes["terminal-1"].returncode is not None
+
+
+async def test_a_command_that_exits_non_zero_fails_the_call_and_never_calls_the_tool(
+    tmp_path: Path,
+) -> None:
+    """The same asymmetry as a failed read: an argument built from a failed command's
+    output would be inventing input."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                run={"text": {"command": sys.executable, "args": ["-c", "raise SystemExit(3)"]}},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert "exited with status 3" in last.content[0].content.text
+    assert [u.status for u in harness.tool_calls()] == ["pending", "failed"]
+    # Failing is not leaking.
+    assert client.released == ["terminal-1"]
+    assert harness.live_terminals() == ()
+
+
+async def test_a_command_killed_by_a_signal_names_the_signal(tmp_path: Path) -> None:
+    """`exitCode` is null for a signalled process, so the message has to read the other
+    field rather than print `None` at somebody."""
+    async with terminal_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                run={
+                    "text": {
+                        "command": sys.executable,
+                        "args": ["-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"],
+                    }
+                },
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert "was killed by SIGKILL" in harness.of("tool_call_update")[-1].content[0].content.text
+
+
+async def test_a_client_that_errors_on_create_fails_the_call_not_the_turn(
+    tmp_path: Path,
+) -> None:
+    client = TerminalClient(create_error=RequestError(-32603, "no terminals here"))
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            block(tool="echo", run={"text": prints("never")}),
+            block(tool="echo", arguments={"text": "still ran"}),
+        )
+
+    assert result.stop_reason == "end_turn"
+    first = harness.of("tool_call_update")[0]
+    assert first.status == "failed"
+    assert "-32603: no terminals here" in first.content[0].content.text
+    assert harness.live_terminals() == ()
+
+
+async def test_a_release_that_fails_does_not_fail_the_turn(tmp_path: Path) -> None:
+    """A client refusing to take a terminal back is not information the turn can act on,
+    and replacing the tool's result with a cleanup error would lose the answer."""
+    client = TerminalClient(release_error=RequestError(-32603, "unknown terminal"))
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(block(tool="echo", run={"text": prints("kept")}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call_update")[-1].status == "completed"
+    # Tracking is dropped anyway: the handle is useless either way, and holding it would
+    # be a leak of our own on top of the client's.
+    assert harness.live_terminals() == ()
+
+
+async def test_a_denied_call_starts_no_terminal(tmp_path: Path) -> None:
+    """Permission comes first: approving the call is what authorises starting a process
+    on the client's machine."""
+    client = TerminalClient("reject")
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(block(tool="echo", run={"text": prints("never")}))
+
+    assert result.stop_reason == "end_turn"
+    assert client.created == []
+
+
+async def test_a_dry_run_names_the_command_and_starts_nothing(tmp_path: Path) -> None:
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        in_mode(harness, "dry-run")
+        result = await harness.run(block(tool="echo", run={"text": prints("previewed")}))
+
+    assert result.stop_reason == "end_turn"
+    assert "Would run" in harness.of("tool_call_update")[-1].content[0].content.text
+    assert client.created == []
+
+
+async def test_the_session_cwd_is_where_a_command_starts_unless_one_is_named(
+    tmp_path: Path,
+) -> None:
+    """A command has to start somewhere, and the client's process directory is not
+    something this side can see."""
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        await harness.run(
+            block(tool="echo", run={"a": prints("default")}),
+            block(tool="echo", run={"b": {**prints("named"), "cwd": str(inner)}}),
+        )
+
+    assert client.created[0]["cwd"] == str(tmp_path)
+    assert client.created[1]["cwd"] == str(inner.resolve())
+
+
+async def test_a_cwd_outside_the_session_roots_refuses_the_turn(tmp_path: Path) -> None:
+    """Containment is the same rule `read` and `write` go through — `paths.py` owns it."""
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            block(tool="echo", run={"a": {**prints("nope"), "cwd": "/etc"}})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "outside this session's directories" in harness.refusal()
+    assert client.created == []
+
+
+async def test_environment_variables_reach_the_command(tmp_path: Path) -> None:
+    client = TerminalClient()
+
+    async with terminal_harness(tmp_path, client=client) as harness:
+        await harness.run(
+            block(
+                tool="echo",
+                run={
+                    "text": {
+                        "command": sys.executable,
+                        "args": ["-c", "import os; print(os.environ['PYACP_MARKER'])"],
+                        "env": {"PYACP_MARKER": "carried"},
+                    }
+                },
+            )
+        )
+
+    assert client.created[0]["env"] == {"PYACP_MARKER": "carried"}
+    assert harness.of("tool_call_update")[-1].content[-1].content.text == "carried\n"
+
+
+# ---------------------------------------------------------------------------
+# The terminal gate
+# ---------------------------------------------------------------------------
+
+
+async def test_running_a_command_without_the_capability_is_a_refusal(tmp_path: Path) -> None:
+    """A client with no terminals has done nothing wrong, so it gets a `refusal` and not
+    the `-32603` that `require` would produce — and no convention footer, because the
+    convention was followed."""
+    client = TerminalClient()
+
+    async with terminal_harness(
+        tmp_path, capabilities=ClientCapabilities(), client=client
+    ) as harness:
+        result = await harness.run(block(tool="echo", run={"text": prints("unreachable")}))
+
+    assert result.stop_reason == "refusal"
+    assert "clientCapabilities.terminal" in harness.refusal()
+    assert CONVENTION not in harness.refusal()
+    assert client.created == []
+    assert harness.of("tool_call") == []
+
+
+async def test_a_filesystem_grant_does_not_satisfy_a_terminal(tmp_path: Path) -> None:
+    """`fs` and `terminal` are different capabilities, and one is not the other."""
+    async with terminal_harness(tmp_path, capabilities=has_fs()) as harness:
+        result = await harness.run(block(tool="echo", run={"text": prints("unreachable")}))
+
+    assert result.stop_reason == "refusal"
+    assert "clientCapabilities.terminal" in harness.refusal()
+
+
+async def test_an_empty_run_object_needs_no_capability(tmp_path: Path) -> None:
+    """`"run": {}` names no command, so refusing it would refuse a request never made."""
+    async with terminal_harness(tmp_path, capabilities=ClientCapabilities()) as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}, run={}))
+
+    assert result.stop_reason == "end_turn"
+
+
+def test_the_terminal_gate_is_still_an_assertion_at_the_call_site() -> None:
+    """Parsing refuses first, so reaching the call with a shut gate is our conformance
+    bug. A design assertion, like its `fs` counterpart: no prompt can produce it."""
+    source = inspect.getsource(McpToolRouterExecutor)
+
+    assert "context.require(Gate.TERMINAL)" in source
+
+
+# ---------------------------------------------------------------------------
+# Parsing `run`
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec, because",
+    [
+        ({"run": []}, "'run' must be an object mapping an argument name to a command"),
+        ({"run": {"": {"command": "x"}}}, "every key of 'run' must be a non-empty"),
+        ({"run": {"a": "ls"}}, "'run.a' must be an object with a 'command'"),
+        ({"run": {"a": {}}}, "'run.a.command' must be a non-empty string"),
+        ({"run": {"a": {"command": ""}}}, "'run.a.command' must be a non-empty string"),
+        ({"run": {"a": {"command": "ls", "args": "-la"}}}, "'run.a.args' must be a list of"),
+        ({"run": {"a": {"command": "ls", "args": [3]}}}, "'run.a.args' must be a list of"),
+        ({"run": {"a": {"command": "ls", "env": [["A", "1"]]}}}, "'run.a.env' must be an object"),
+        ({"run": {"a": {"command": "ls", "env": {"A": 1}}}}, "'run.a.env' must be an object"),
+        (
+            {"run": {"a": {"command": "ls", "outputByteLimit": -1}}},
+            "'run.a.outputByteLimit' must be a non-negative integer",
+        ),
+    ],
+)
+async def test_every_malformed_run_names_what_is_wrong(
+    tmp_path: Path, spec: dict[str, Any], because: str
+) -> None:
+    async with terminal_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="echo", **spec))
+
+    assert result.stop_reason == "refusal"
+    assert because in harness.refusal()
+
+
+async def test_an_argument_named_by_both_a_command_and_something_else_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Two sources for one value, whichever two they are."""
+    async with terminal_harness(tmp_path) as harness:
+        inline = await harness.run(
+            block(tool="echo", arguments={"text": "inline"}, run={"text": prints("also")})
+        )
+
+    assert inline.stop_reason == "refusal"
+    assert "named in 'run' and somewhere else too" in harness.refusal()
+
+
+async def test_a_file_and_a_command_cannot_fill_the_same_argument(tmp_path: Path) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("from disk")
+
+    async with terminal_harness(
+        tmp_path, capabilities=has_terminal(read=True), client=TerminalClient()
+    ) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                read={"text": {"path": str(source)}},
+                run={"text": prints("from a command")},
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "named in 'run' and somewhere else too" in harness.refusal()

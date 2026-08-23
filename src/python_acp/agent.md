@@ -42,8 +42,17 @@ connection that has since dropped, and `session/resume` would be meaningless. A 
 would hide that. `cli.py` constructs the one registry and hands it to whichever transport
 is bound.
 
+The [`McpBackendRegistry`](mcp_registry.md) and [`TerminalRegistry`](terminals.md) are
+process-wide for the same reason and are taken the same way: both are keyed by session id,
+and both are torn down by the session registry's `on_close` hook rather than by anything
+here. `cli.py` is the only place that constructs all three, which is why it is the only
+place that can wire them together.
+
 The `Client` facade goes the other way — `on_connect` stores *the* connection's, so it
-must not be shared.
+must not be shared. `connected_client` exposes it without raising, for the one caller that
+runs *after* a connection ends: `transport_ws.py` hands it to
+`TerminalRegistry.forget_client` when a socket closes, where "there was never a client" is
+an ordinary answer rather than the bug `client` treats it as.
 
 ## Running a turn
 
@@ -214,7 +223,7 @@ member.
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | **live** — replays the session's transcript, then returns its settings | — |
 | `list_sessions` | `session/list` | **live** — one keyset-paginated page, most recently active first | — |
-| `close_session` | `session/close` | **live** *(unstable-gated)* — cancels the turn, drops the session, releases its backends | — |
+| `close_session` | `session/close` | **live** *(unstable-gated)* — cancels the turn, drops the session, releases its backends and its client terminals | — |
 | `fork_session` | `session/fork` | **live** *(unstable-gated)* — deep copy under a new id, with its own MCP subprocesses | — |
 | `resume_session` | `session/resume` | **live** *(unstable-gated)* — reattaches; deliberately does **not** replay | — |
 | `set_session_mode` | `session/set_mode` | **live** — switches the mode and emits `current_mode_update` | — |
@@ -276,6 +285,8 @@ in that module's table.
 |---|---|
 | `PythonAcpAgent` | The `acp.interfaces.Agent` implementation |
 | `PythonAcpAgent.client` | The connected `Client` facade; raises `RuntimeError` before `on_connect` |
+| `PythonAcpAgent.connected_client` | The same facade or `None` — the non-raising form, for cleanup after a connection ends |
+| `PythonAcpAgent.terminals` | The process-wide [`TerminalRegistry`](terminals.md) this agent's turns create through |
 | `PythonAcpAgent.client_capabilities` | What the client declared at `initialize`, or `None` before it ran — Phase 4 gates every client call on this |
 
 `client_capabilities` distinguishes `None` (no `initialize` yet) from "declared nothing";

@@ -173,6 +173,13 @@ Notes that the table cannot carry:
 - **Ungated calls are a conformance bug, not a runtime error.** A client that never advertised
   `terminal` is entitled to answer `-32601`; the failure surfaces as a broken turn, so
   `pyacp-6ni.3` tests the gate, not the recovery.
+- **A terminal cannot be released after a disconnect, and `pyacp-8bv.3` says so rather
+  than pretending.** The five `terminal/*` methods are calls, and a call needs a
+  connection. Sessions deliberately survive a disconnect, so their entries stay and the
+  departed client's terminal *handles* are dropped — the processes are that client's to
+  reap, because it is the only party that can. Release on completion, cancellation, and
+  `session/close` is real; release on disconnect is not available to any ACP agent. See
+  [../src/python_acp/terminals.md](../src/python_acp/terminals.md).
 - **A client that simply lacks a capability is not that bug.** `UngatedClientCallError` →
   `-32603` says *we* reached for something unadvertised. The ordinary case — a client with
   no `fs` at all — is decided with `context.allows(...)` before the call, and

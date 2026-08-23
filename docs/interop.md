@@ -28,11 +28,20 @@ checks the AST rather than the text, because the file legitimately *names*
 The run covers `initialize` → `session/new` with its own MCP server → a prompt turn that
 really runs a tool → **a file round trip through `fs/read_text_file` and
 `fs/write_text_file`** → a prompt refused for naming a path outside the session's roots →
-a refused prompt → `session/list` → `session/close` → clean exit, and reports one JSON
+**a command run in the client's own terminal** → a refused prompt → `session/list` →
+`session/close` → clean exit, and reports one JSON
 object so a failure is diagnosable from the transcript rather than from an exit code.
 
 **It deliberately answers `session/request_permission` with `-32601`**, copying the SDK's
 own example client. See below for why that matters.
+
+**It also serves all five `terminal/*` methods with real subprocesses** (`pyacp-8bv.3`),
+and that is the only place `outputByteLimit` can be observed as it actually crosses the
+wire: an in-process test hands the client a Python keyword argument and would still pass
+if the field were never encoded at all. The report carries the limit that arrived
+(`"terminalLimits": [1048576]`) and the terminals the agent gave back
+(`"terminalsReleased": ["terminal-1"]`, `"terminalsLeftOpen": []`) — the leak, checked
+from the side that would have leaked.
 
 **It does serve `fs/*`, and advertises them** (`pyacp-8bv.2`). The session's `cwd` is a
 temporary directory the client creates, so containment is exercised on real paths. The

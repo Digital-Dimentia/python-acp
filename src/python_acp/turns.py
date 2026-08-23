@@ -279,7 +279,8 @@ STOP_REASON_DISPOSITIONS: tuple[StopReasonUse, ...] = (
         "error would be wrong, because the request itself was valid. `pyacp-8bv.2` added "
         "a second source with the same shape: a prompt that correctly asks for a client "
         "method the client never advertised — an `fs/*` call without "
-        "`clientCapabilities.fs` — is refused rather than raising "
+        "`clientCapabilities.fs`, or a `terminal/*` one without "
+        "`clientCapabilities.terminal` (`pyacp-8bv.3`) — is refused rather than raising "
         "`UngatedClientCallError`, which would report our conformance bug for the "
         "client's ordinary absence of a capability.",
     ),

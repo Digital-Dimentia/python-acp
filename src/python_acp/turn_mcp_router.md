@@ -29,6 +29,7 @@ A **text** content block whose entire text is a JSON object:
 | `server` | only when the session opened **more than one** MCP server | Which server from `session/new`'s `mcpServers` |
 | `read` | no | `{argument: {path, line?, limit?}}` — files to read **through the client** into arguments |
 | `write` | no | `{path}` — where the tool's text output goes, **through the client** |
+| `run` | no | `{argument: {command, args?, cwd?, env?, outputByteLimit?}}` — commands to run **in the client's terminal**, into arguments |
 
 Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
 are arbitrary and may contain a slash, so a separator would be ambiguous exactly where
@@ -82,6 +83,67 @@ this side can do is send the resolved path, so the client is not asked to re-wal
 already walked, and that is what it does. Closing the window properly is the *client's*
 `fs/*` implementation, and no ACP agent can do it on the client's behalf.
 
+## Commands run on the client's machine, and are always given back
+
+`terminal/create`, `/wait_for_exit`, `/output`, `/kill`, and `/release` are
+`acp.interfaces.Client` methods, the same arrangement as `fs/*`: an agent calls them and
+never serves them. So the executor starts no process of its own.
+
+```json
+{"tool": "summarise",
+ "run": {"log": {"command": "git", "args": ["log", "--oneline", "-5"],
+                 "cwd": "/abs/repo", "env": {"TZ": "UTC"}, "outputByteLimit": 65536}}}
+```
+
+`run` maps an **argument name** to a command exactly as `read` maps one to a file: the
+command's captured output becomes that argument's value immediately before the tool runs.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `command` | yes | The executable, as the client will run it |
+| `args` | no | A list of **strings**; `["-n", 5]` is refused rather than coerced, because a number in a string field fails at the client with nothing naming the block |
+| `cwd` | no, defaults to the session's `cwd` | Absolute and inside the session's roots, checked by [paths.py](paths.md) like every other path here |
+| `env` | no | `{"NAME": "value"}` — an object rather than the schema's `[{name, value}]` list, because duplicate names cannot happen in one and this is the shape a client writing JSON reaches for |
+| `outputByteLimit` | no, defaults to 1 MiB | Spelled as the schema field it sets. **Never absent on the wire** — see [terminals.md](terminals.md) for where the default comes from |
+
+An argument named twice — in `arguments`, in `read`, and in `run` in any combination — is
+refused, for the reason two sources for one value always are.
+
+**Containment on `cwd` is consistency, not a sandbox.** `command` is arbitrary and the
+client is the party that decides whether to run it; a command may `chdir` anywhere the
+moment it starts. What the check buys is that a prompt cannot *point* the working
+directory outside the session's declared roots, which is the same promise `read` and
+`write` make, and it costs nothing to keep the three consistent.
+
+### Every path releases the terminal
+
+A terminal exists on the client until `terminal/release` arrives, so `_capture` gives it
+back on every exit:
+
+| Path | What happens |
+|---|---|
+| The command succeeds | `wait_for_exit` → `output` → `release`; the output becomes the argument |
+| The command exits non-zero, or on a signal | released, and the **tool is not called** — its argument would have to be invented |
+| The client errors on `create` or on a read | released if it exists at all; the call is `failed` with the client's own code and message |
+| The tool fails afterwards | already released; a tool failing does not un-run the command |
+| `session/cancel` arrives mid-command | `kill` then `release`, under `asyncio.shield`, then the `CancelledError` is re-raised |
+| `session/close` reaches a turn still running | [terminals.py](terminals.md)'s registry releases it through the `on_close` hook |
+
+The cancelled path is the one worth reading. The cleanup is shielded because the
+cancellation is *already in flight*: an unshielded `await` would be cancelled at its first
+suspension point and the release would never reach the wire. The `CancelledError` is
+re-raised rather than swallowed, because a turn that swallowed it would report `end_turn`
+for a turn the client stopped.
+
+The command runs **after** the permission prompt, like the reads: approving the call is
+what authorises starting a process on someone's machine. A dry run starts nothing and
+names the command it would have run.
+
+Each command adds a note to the tool call's content — what ran, how many characters it
+produced, and which argument they went into, plus whether the client had to truncate.
+A command that ran on somebody's machine and left no trace in the transcript would make
+the turn unreadable afterwards.
+
 ## A client with no filesystem is not a bug — the gate is read twice
 
 `clientCapabilities.fs` carries **two independent booleans**, and a read grant must never
@@ -89,7 +151,7 @@ satisfy a write.
 
 | Where | Call | Because |
 |---|---|---|
-| **Parse time** | `context.allows(Gate.READ_TEXT_FILE)` / `WRITE_TEXT_FILE` | A client that never advertised `fs` has done nothing wrong. The prompt is **refused before anything runs**, with a message naming the missing capability — and **without** the convention footer, because the convention was followed |
+| **Parse time** | `context.allows(Gate.READ_TEXT_FILE)` / `WRITE_TEXT_FILE` / `TERMINAL` | A client that never advertised `fs` or `terminal` has done nothing wrong. The prompt is **refused before anything runs**, with a message naming the missing capability — and **without** the convention footer, because the convention was followed |
 | **Call site** | `context.require(...)` | By then an unadvertised gate is *our* conformance bug: parsing should already have refused. That is exactly what `UngatedClientCallError` → `-32603` means |
 
 Routing the ordinary "this client has no filesystem" case through `require` would have
@@ -102,7 +164,11 @@ discovering *after* a tool ran that its output has nowhere to go would leave the
 effect behind and lose the result.
 
 `"read": {}` names no file, so it needs no capability — refusing it would refuse a request
-never made.
+never made. `"run": {}` is the same.
+
+`fs` carries two independent booleans and `terminal` carries **one** covering all five
+methods. Neither satisfies the other: a client that advertised a filesystem and no
+terminals gets a refusal for `run`, and the message says which capability was missing.
 
 ## A file operation that fails is a failed call, not a failed turn
 
@@ -117,6 +183,7 @@ Four cases, each decided rather than defaulted:
 | Case | What happens | Why |
 |---|---|---|
 | The read fails | the tool is **never called**; no `in_progress` | its argument is missing, and calling it with a placeholder would be inventing input |
+| The command fails to start, or exits non-zero | the tool is **never called**; the terminal is still released | same reason, and the failure names the exit status or signal |
 | The tool reported `isError` | the write is **skipped**, and said so | a tool's error message is a diagnostic, not the document the client asked for |
 | The tool returned no text content | the write is **skipped**, and said so | writing `""` is a truncation, not a write |
 | The write fails | the call is `failed`, but the tool's own output is still in the update | the tool did run; only the disposal of its result did not |

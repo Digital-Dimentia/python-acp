@@ -64,6 +64,7 @@ from python_acp.legacy_ws import LegacyActionHandler, is_legacy
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
+from python_acp.terminals import TerminalRegistry
 from python_acp.turns import TurnExecutor
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ class WebSocketAgentServer:
         *,
         sessions: SessionRegistry | None = None,
         backends: McpBackendRegistry | None = None,
+        terminals: TerminalRegistry | None = None,
         executor: TurnExecutor | None = None,
         use_unstable_protocol: bool = True,
     ) -> None:
@@ -190,6 +192,7 @@ class WebSocketAgentServer:
         # socket that created it, which is the whole meaning of `session/resume`.
         self._sessions = sessions if sessions is not None else SessionRegistry()
         self._backends = backends if backends is not None else McpBackendRegistry()
+        self._terminals = terminals if terminals is not None else TerminalRegistry()
         self._executor = executor
         self._use_unstable_protocol = use_unstable_protocol
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
@@ -227,6 +230,7 @@ class WebSocketAgentServer:
                 self._mcp_client,
                 sessions=self._sessions,
                 backends=self._backends,
+                terminals=self._terminals,
                 executor=self._executor,
                 use_unstable_protocol=self._use_unstable_protocol,
             )
@@ -240,6 +244,7 @@ async def serve_websocket(
     *,
     sessions: SessionRegistry | None = None,
     backends: McpBackendRegistry | None = None,
+    terminals: TerminalRegistry | None = None,
     executor: TurnExecutor | None = None,
     use_unstable_protocol: bool = True,
 ) -> None:
@@ -255,12 +260,27 @@ async def serve_websocket(
     the same client gets different answers depending on how it connected.
     """
     transport = WebSocketMessageTransport(websocket, LegacyActionHandler(mcp_client))
-    await run_agent(
-        PythonAcpAgent(
-            sessions if sessions is not None else SessionRegistry(),
-            executor,
-            backends if backends is not None else McpBackendRegistry(),
-        ),
-        input_stream=transport,
-        use_unstable_protocol=use_unstable_protocol,
+    live_terminals = terminals if terminals is not None else TerminalRegistry()
+    agent = PythonAcpAgent(
+        sessions if sessions is not None else SessionRegistry(),
+        executor,
+        backends if backends is not None else McpBackendRegistry(),
+        live_terminals,
     )
+    try:
+        await run_agent(
+            agent,
+            input_stream=transport,
+            use_unstable_protocol=use_unstable_protocol,
+        )
+    finally:
+        # The sessions stay — another connection may resume them — but the terminals this
+        # client created cannot outlive it in any useful sense: `terminal/release` is a
+        # request, and the connection that would carry it has just ended. So the handles
+        # are dropped, nothing is released, and `terminals.md` says plainly that the
+        # terminals themselves are the departed client's to reap.
+        dropped = live_terminals.forget_client(agent.connected_client)
+        if dropped:
+            logger.info(
+                "Client disconnected holding %d terminal(s); dropped the handles", dropped
+            )

@@ -67,6 +67,7 @@ from python_acp.sessions import (
     TurnAlreadyRunningError,
     UnknownSessionError,
 )
+from python_acp.terminals import TerminalRegistry
 from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.turns import TurnContext, TurnExecutor
 
@@ -93,6 +94,7 @@ class PythonAcpAgent:
         sessions: SessionRegistry,
         executor: TurnExecutor | None = None,
         backends: McpBackendRegistry | None = None,
+        terminals: TerminalRegistry | None = None,
         *,
         unstable: bool = True,
     ) -> None:
@@ -104,15 +106,24 @@ class PythonAcpAgent:
         # The backend registry has to exist before the default executor can be built
         # over it, which is why this line reads out of order with the parameters.
         backend_registry = backends if backends is not None else McpBackendRegistry()
+        # Same, and for the same reason `backends` is here: the executor needs it at
+        # construction time, and `session/close` needs it to reach terminals a turn on
+        # another connection left running.
+        terminal_registry = terminals if terminals is not None else TerminalRegistry()
         # Decision D3's default (`pyacp-hnk.2`): a deterministic MCP tool-router, no LLM.
         # `turns.IdleTurnExecutor` remains for callers that want a turn to do nothing.
-        self._executor = executor or McpToolRouterExecutor(backend_registry)
+        self._executor = executor or McpToolRouterExecutor(backend_registry, terminal_registry)
         # Same sharing rule as the session registry, and for the same reason: a
         # session's MCP servers outlive the connection that created it. Teardown is the
         # session registry's `on_close` hook, not ours — `cli.py` wires the two together
         # (`SessionRegistry(on_close=backends.close)`), which is the only place that can,
         # because it is the only place that constructs both.
         self._backends = backend_registry
+        # Process-wide for the same reason as the other two, and torn down by the same
+        # `on_close` hook — `cli.py` wires `terminals.close` alongside `backends.close`.
+        # What it does *not* share with them is the disconnect path: a departed client's
+        # terminals cannot be released, only forgotten. See `terminals.md`.
+        self._terminals = terminal_registry
         # Mirrors the connection's `use_unstable_protocol`. It changes what `initialize`
         # may advertise, because the SDK's router refuses `session/close`, `/fork`, and
         # `/resume` outright when the flag is off — see `capabilities.py`.
@@ -129,6 +140,11 @@ class PythonAcpAgent:
     def backends(self) -> McpBackendRegistry:
         """The per-session MCP servers. `pyacp-hnk.2`'s executor reads through this."""
         return self._backends
+
+    @property
+    def terminals(self) -> TerminalRegistry:
+        """The terminals this agent's turns created on clients (`pyacp-8bv.3`)."""
+        return self._terminals
 
     # ------------------------------------------------------------------
     # Connection
@@ -154,6 +170,17 @@ class PythonAcpAgent:
         """
         if self._client is None:
             raise RuntimeError("No ACP client is connected; on_connect has not run")
+        return self._client
+
+    @property
+    def connected_client(self) -> Client | None:
+        """The client facade, or `None` before `on_connect` — the non-raising form.
+
+        For a caller cleaning up *after* a connection rather than working inside one:
+        `transport_ws.py` hands this to `TerminalRegistry.forget_client` when a socket
+        closes, and "there was never a client" is an ordinary answer there rather than
+        the bug `client` treats it as.
+        """
         return self._client
 
     @property

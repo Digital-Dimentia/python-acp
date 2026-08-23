@@ -32,6 +32,7 @@ from python_acp.capabilities import build_agent_capabilities
 from python_acp.legacy_ws import LEGACY_METHODS, is_legacy
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
+from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
     WebSocketAgentServer,
     WebSocketMessageTransport,
@@ -542,3 +543,38 @@ async def test_the_server_binds_each_accepted_socket_to_an_agent() -> None:
 
     assert reply["result"]["protocolVersion"] == PROTOCOL_VERSION
     assert websocket.closed is True
+
+
+async def test_a_disconnect_hands_the_departed_client_to_the_terminal_registry() -> None:
+    """The wiring half of the disconnect rule (`pyacp-8bv.3`).
+
+    A terminal lives in the client, so a connection ending means its terminals can never
+    be released — only forgotten. This proves the transport asks, with the real client
+    facade that just went away; `tests/test_terminals.py` proves what the asking does.
+    """
+    forgotten: list[Any] = []
+
+    class Watching(TerminalRegistry):
+        def forget_client(self, client: Any) -> int:
+            forgotten.append(client)
+            return super().forget_client(client)
+
+    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
+        await mcp_client.initialize()
+        terminals = Watching()
+        websocket = FakeWebSocket()
+        connection = asyncio.create_task(
+            serve_websocket(websocket, mcp_client, terminals=terminals)
+        )
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION,
+                        "clientCapabilities": {"terminal": True}}}
+        )
+        websocket.hang_up()
+        await asyncio.wait_for(connection, timeout=TIMEOUT)
+
+    assert len(forgotten) == 1
+    # The facade the SDK built for that socket, not None: `on_connect` ran.
+    assert forgotten[0] is not None
+    assert hasattr(forgotten[0], "create_terminal")

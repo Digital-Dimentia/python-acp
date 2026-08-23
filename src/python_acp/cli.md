@@ -82,22 +82,39 @@ flowchart TD
 - Under `--transport stdio`, the client closing the pipe ends `run_stdio` and the
   process exits normally.
 
-## Both registries are created here, because only here can they be connected
+## All three registries are created here, because only here can they be connected
 
 ```python
 backends = McpBackendRegistry()
-sessions = SessionRegistry(on_close=backends.close)
+terminals = TerminalRegistry()
+
+async def release_session(session_id: str) -> None:
+    await terminals.close(session_id)
+    await backends.close(session_id)
+
+sessions = SessionRegistry(on_close=release_session)
 ```
 
 They live here rather than in a transport or an agent for two reasons. A session must
 outlive the connection that created it — `session/resume` means nothing otherwise — and
 the WebSocket transport builds one agent per socket. And `on_close` is the entire coupling
-between them (decision B6a): `sessions.py` never imports MCP, so if this wiring is missed,
-every closed session leaks a subprocess. `_run` also calls `sessions.close_all()` on the
-way out, because sessions the client never closed still own theirs.
+between them (decision B6a): `sessions.py` never imports MCP or terminals, so if this
+wiring is missed, every closed session leaks a subprocess and a client-side process. `_run`
+also calls `sessions.close_all()` on the way out, because sessions the client never closed
+still own theirs.
 
-See [sessions.py](sessions.md), [mcp_registry.py](mcp_registry.md), and
-[transport_ws.py](transport_ws.md).
+`SessionRegistry` takes **one** hook and two registries need it, so the composition is
+here too — this is the only place that constructs all three. Terminals are released first:
+they are requests over a live connection with a client waiting on `session/close`, while
+MCP teardown is local subprocess work nobody is watching.
+
+Under `--transport stdio` there is deliberately **no** disconnect hook: the client going
+away is this process ending, so the shutdown path above is the same event. The WebSocket
+transport does have one, and it forgets rather than releases — see
+[terminals.md](terminals.md).
+
+See [sessions.py](sessions.md), [mcp_registry.py](mcp_registry.md),
+[terminals.py](terminals.md), and [transport_ws.py](transport_ws.md).
 
 ## `--mcp-command` is optional
 

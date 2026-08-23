@@ -138,3 +138,22 @@ def test_a_foreign_client_is_never_asked_to_open_a_path_outside_the_roots(report
     """Refused before the call, not after: the read count does not grow."""
     assert report["outsideStopReason"] == "refusal"
     assert len(report["reads"]) == 1
+
+
+def test_a_foreign_client_runs_a_command_in_its_own_terminal(report: dict) -> None:
+    """`pyacp-8bv.3` over a real pipe, and the one assertion only a client can make.
+
+    `outputByteLimit` is an optional schema field the agent promises never to omit. An
+    in-process test hands the client a Python keyword argument, so it would pass even if
+    the field were never encoded; the number below arrived as JSON.
+    """
+    assert report["terminalStopReason"] == "end_turn"
+    assert report["terminalLimits"] == [1024 * 1024]
+    # The command's output reached the tool, and the tool echoed it back.
+    assert "from a client terminal\n" in report["texts"]
+
+
+def test_a_foreign_client_gets_every_terminal_back(report: dict) -> None:
+    """The leak this bead is about, observed from the side that would have leaked."""
+    assert report["terminalsReleased"] == ["terminal-1"]
+    assert report["terminalsLeftOpen"] == []

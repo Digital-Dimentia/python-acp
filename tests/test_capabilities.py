@@ -164,6 +164,46 @@ def test_no_auth_method_is_offered() -> None:
     assert AUTH_METHODS == ()
 
 
+def test_declining_authentication_holds_only_while_no_remote_mcp_transport_does() -> None:
+    """The premise `pyacp-fln.1` decided on, bound to the thing that could invalidate it.
+
+    Declining authentication rests on there being no credential in the picture: no LLM,
+    and every MCP backend a local subprocess inheriting the user's own environment. The
+    part that can change is the second half — a *remote* MCP backend over http, sse, or
+    acp is exactly the credential `AUTH_METHODS` would have to carry.
+
+    So the two are asserted together. Flipping any of those three capabilities fails here
+    until the auth decision is revisited, rather than leaving a stale `[]` advertising
+    that nothing needs a credential.
+    """
+    remote = {"http", "sse", "acp"}
+    advertised = {
+        capability.path[-1]
+        for capability in AGENT_CAPABILITY_MANIFEST
+        if capability.path[0] == "mcp_capabilities"
+        and capability.path[-1] in remote
+        and capability.is_advertised
+    }
+
+    assert AUTH_METHODS == (), "AUTH_METHODS changed; re-read the reasoning above"
+    assert advertised == set(), (
+        "a remote MCP transport is advertised while AUTH_METHODS is empty; "
+        "pyacp-fln.1's decision to decline authentication assumed there was nothing "
+        "to authenticate to"
+    )
+
+
+def test_nothing_to_log_out_of_while_nothing_logs_in() -> None:
+    """`auth.logout` advertises an exit from a state no client can enter.
+
+    Doubly so: `logout` is unrouted in the SDK at 0.12.1, so even with an auth method it
+    could not be dispatched — `tests/test_conformance.py` pins that.
+    """
+    logout = build_agent_capabilities().auth.logout
+
+    assert (AUTH_METHODS == ()) is (logout is None)
+
+
 def test_a_supported_version_is_echoed_back() -> None:
     for version in SUPPORTED_PROTOCOL_VERSIONS:
         assert negotiate_protocol_version(version) == version

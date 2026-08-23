@@ -107,12 +107,32 @@ Four things, in one commit. Any three without the fourth fails the suite:
 (`test_phase_1_advertises_nothing` existed to assert the block was entirely off and died
 with the first flip, as intended.)
 
-## `AUTH_METHODS`
+## `AUTH_METHODS` — authentication is declined, and why that is checkable
 
-An empty tuple, and not provisionally. This process runs locally as a subprocess of the
-client, under the user's own credentials, and authenticates nobody. Empty is the accurate
-statement — and it is what makes `Agent.authenticate` a typed `-32000 auth_required`
-refusal rather than a `-32601`. Advertising a method would turn that refusal into a lie.
+An empty tuple, **decided rather than deferred** (`pyacp-fln.1`). The bead's question was
+whether this runtime has a credential in the picture at all. It does not:
+
+1. Decision D1 puts **no LLM** here, so there is no model-provider key.
+2. Every MCP backend is an `McpServerStdio` **spawned locally by this process**, inheriting
+   the user's own environment. A subprocess of the user does not authenticate to the user.
+3. The three *remote* MCP transports are advertised `false` and refused outright at
+   `session/new` — so the bead's "if there IS something (a remote MCP backend over
+   http/sse)" branch is closed by a decision already made and enforced.
+
+Empty is therefore the accurate statement, and it is what makes `Agent.authenticate` a
+typed `-32000 auth_required` refusal rather than a `-32601`. Advertising a method would
+turn that refusal into a lie.
+
+**The third premise is the one that can rot**, so it is bound rather than trusted:
+`test_declining_authentication_holds_only_while_no_remote_mcp_transport_does` asserts the
+two together. Flipping `mcpCapabilities.http`, `.sse`, or `.acp` fails until this decision
+is revisited — because a remote backend is exactly the credential `AUTH_METHODS` would
+have to carry.
+
+`auth.logout` is `null` for a reason of its own on top: it would advertise an exit from a
+state no client can enter. And `logout` is **unrouted** in the SDK at 0.12.1 — no route,
+no `Agent` member — so even with an auth method the SDK could not dispatch it.
+`tests/test_conformance.py` pins that, so an SDK bump that starts routing it is noticed.
 
 ## Version negotiation
 

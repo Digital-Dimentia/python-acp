@@ -67,6 +67,18 @@ set **before** the task is cancelled, which is the entire value of it: inside an
 racing the cancellation that is already in flight.
 
 Raising anything else *is* an error and becomes a JSON-RPC error through `errors.py`.
+
+## Every `stopReason`, and what produces it
+
+`STOP_REASON_DISPOSITIONS` names all five values of the SDK's `StopReason` literal the
+same way `SESSION_UPDATE_DISPOSITIONS` names the `session/update` variants: three are
+produced here, and the two limit conditions are `DECLINED` with a structural reason
+rather than left unexplained. There is no LLM, so there is no token budget to exhaust and
+no agent-initiated request loop to bound; the number of steps in a turn is the number of
+invocations the client itself named.
+
+`TurnResult.ended()`, `.refused()`, and `.cancelled()` are the three an executor
+constructs, so an exit path reads as a name rather than as a string literal.
 """
 
 from __future__ import annotations
@@ -85,7 +97,12 @@ logger = logging.getLogger(__name__)
 
 
 class Disposition(str, Enum):
-    """What this project does about one `session/update` variant."""
+    """What this project does about one member of a protocol enumeration.
+
+    Shared by the two tables below — the `session/update` variants and the `stopReason`
+    values — because the question is the same in both: does something here produce it,
+    is something going to, or will nothing ever?
+    """
 
     #: Something produces it today.
     EMITTED = "emitted"
@@ -209,6 +226,74 @@ SESSION_UPDATE_DISPOSITIONS: tuple[UpdateVariant, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class StopReasonUse:
+    """One `StopReason` the schema defines, and what makes a turn end that way."""
+
+    name: str
+    disposition: Disposition
+    owner: str
+    why: str
+
+
+#: Every value of the SDK's `StopReason` literal, and what produces it here.
+#:
+#: Same contract as `SESSION_UPDATE_DISPOSITIONS`, for the same reason: a `stopReason`
+#: this agent never returns is either waiting on a feature (`DEFERRED`, naming the bead)
+#: or has no source and never will (`DECLINED`, with the structural reason).
+#: `tests/test_turns.py` walks the SDK's literal so a release that grows a value forces a
+#: decision, and pairs every `EMITTED` row with the test that proves a turn really ends
+#: that way.
+#:
+#: **A backend failure is not on this list.** An `MCPProtocolError` propagates out of the
+#: turn and becomes a JSON-RPC error through `errors.py`, keeping the server's own code —
+#: collapsing it into a `stopReason` would tell the client the turn ended normally.
+STOP_REASON_DISPOSITIONS: tuple[StopReasonUse, ...] = (
+    StopReasonUse(
+        "end_turn",
+        Disposition.EMITTED,
+        "pyacp-hnk.2",
+        "The ordinary completion: every invocation the prompt named has been run. A tool "
+        "that reported `isError` ends the turn this way too — the turn finished, one tool "
+        "did not, and the `tool_call_update` carries which and why.",
+    ),
+    StopReasonUse(
+        "refusal",
+        Disposition.EMITTED,
+        "pyacp-hnk.2",
+        "The prompt was well-formed ACP but named nothing this agent can run, so nothing "
+        "ran at all. It comes with an `agent_message_chunk` naming the convention; a "
+        "JSON-RPC error would be wrong, because the request itself was valid.",
+    ),
+    StopReasonUse(
+        "cancelled",
+        Disposition.EMITTED,
+        "pyacp-hnk.5",
+        "Two routes reach it and both must keep working: `session/cancel` cancels the "
+        "turn task, and a client answering `session/request_permission` with "
+        "`DeniedOutcome` — whose literal is `cancelled` — makes the executor return it "
+        "directly, with no task cancellation anywhere.",
+    ),
+    StopReasonUse(
+        "max_tokens",
+        Disposition.DECLINED,
+        "never",
+        "A token budget belongs to a model. Decision D1 puts no LLM in this runtime, so "
+        "there is nothing to exhaust — the same root as the declined `UsageUpdate` "
+        "variant, and returning it would mean inventing a limit nothing measures.",
+    ),
+    StopReasonUse(
+        "max_turn_requests",
+        Disposition.DECLINED,
+        "never",
+        "A cap on how many requests an agent makes *of a model* within one turn. This "
+        "executor makes none: it runs exactly the invocations the client itself named, so "
+        "the step count is the client's own and there is no agent-initiated loop to "
+        "bound. A prompt this agent will not run is refused before anything runs.",
+    ),
+)
+
+
 class Gate(str, Enum):
     """A client capability, named after what it unlocks rather than where it lives.
 
@@ -302,6 +387,24 @@ class TurnResult:
     def ended(cls) -> TurnResult:
         """The ordinary completion. Named so the common case does not read as a literal."""
         return cls("end_turn")
+
+    @classmethod
+    def refused(cls) -> TurnResult:
+        """The prompt named nothing this agent can run, so nothing ran."""
+        return cls("refusal")
+
+    @classmethod
+    def cancelled(cls) -> TurnResult:
+        """The client stopped the turn.
+
+        For the route that has **no** task cancellation behind it: a client answering
+        `session/request_permission` with `DeniedOutcome` (literal `"cancelled"`) is
+        telling us to stop, and the executor says so by returning. An executor must never
+        raise `asyncio.CancelledError` to mean this — nothing was cancelled, the response
+        would never be sent, and `agent.py` checks `Task.cancelled()`, which would be
+        `False`.
+        """
+        return cls("cancelled")
 
 
 class TurnContext:

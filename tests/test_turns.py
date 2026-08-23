@@ -10,12 +10,14 @@ collapse.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import typing
 
 import pytest
 from acp.schema import (
     SessionNotification,
+    StopReason,
     AgentMessageChunk,
     ClientCapabilities,
     ElicitationCapabilities,
@@ -29,6 +31,7 @@ from python_acp.errors import to_request_error
 from python_acp.sessions import SessionRegistry
 from python_acp.turns import (
     SESSION_UPDATE_DISPOSITIONS,
+    STOP_REASON_DISPOSITIONS,
     ClientGates,
     Disposition,
     Gate,
@@ -360,3 +363,85 @@ def test_the_declined_variants_share_a_structural_reason() -> None:
         "SessionInfoUpdate",
         "UsageUpdate",
     }
+
+
+# ---------------------------------------------------------------------------
+# The stopReason dispositions (pyacp-hnk.5)
+# ---------------------------------------------------------------------------
+
+# The proof obligation, in the shape `tests/test_capabilities.py` uses for capability
+# literals: a `stopReason` claimed as produced must name a test that watches a turn end
+# that way, written `"module:test_name"` and resolved by import. `cancelled` names both
+# of its routes, because they share nothing — one is a cancelled task, the other is a
+# value returned from a turn nothing cancelled.
+STOP_REASON_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "end_turn": ("test_turn_mcp_router:test_a_prompt_naming_a_tool_runs_it_and_ends_the_turn",),
+    "refusal": ("test_turn_mcp_router:test_an_empty_prompt_is_refused",),
+    "cancelled": (
+        "test_agent:test_cancel_stops_an_in_flight_turn_with_stop_reason_cancelled",
+        "test_turn_mcp_router:test_cancelling_the_prompt_ends_the_turn_as_cancelled_not_denied",
+    ),
+}
+
+
+def test_every_stop_reason_the_sdk_defines_has_a_disposition() -> None:
+    """Walks the SDK's own literal, so a release that grows one forces a decision."""
+    defined = set(typing.get_args(StopReason))
+    recorded = {use.name for use in STOP_REASON_DISPOSITIONS}
+
+    assert defined - recorded == set(), "SDK stopReason with no recorded disposition"
+    assert recorded - defined == set(), "disposition for a stopReason the SDK dropped"
+
+
+def test_no_stop_reason_is_recorded_twice() -> None:
+    names = [use.name for use in STOP_REASON_DISPOSITIONS]
+
+    assert len(names) == len(set(names))
+
+
+@pytest.mark.parametrize(
+    "use", STOP_REASON_DISPOSITIONS, ids=lambda u: getattr(u, "name", str(u))
+)
+def test_every_stop_reason_says_who_and_why(use) -> None:
+    assert use.owner
+    assert len(use.why) > 30
+    if use.disposition is Disposition.DEFERRED:
+        assert use.owner.startswith("pyacp-")  # pragma: no cover - none exist
+    if use.disposition is Disposition.DECLINED:
+        assert use.owner == "never"
+
+
+def test_the_declined_stop_reasons_are_the_two_limit_conditions() -> None:
+    """Both are limits on a *model*, and decision D1 puts none in this runtime.
+
+    `max_turn_requests` is the one worth stating out loud: this executor runs exactly the
+    invocations the client named, so there is no agent-initiated loop whose length could
+    exceed a cap. A prompt it will not run is a `refusal` before anything runs.
+    """
+    declined = {u.name for u in STOP_REASON_DISPOSITIONS if u.disposition is Disposition.DECLINED}
+
+    assert declined == {"max_tokens", "max_turn_requests"}
+
+
+def test_every_produced_stop_reason_names_the_test_that_watches_it() -> None:
+    """A `stopReason` claimed as reachable, with nothing that ever reaches it, is the
+    same failure as an aspirational capability literal."""
+    produced = {u.name for u in STOP_REASON_DISPOSITIONS if u.disposition is Disposition.EMITTED}
+
+    assert produced == set(STOP_REASON_EVIDENCE)
+    for reason, references in STOP_REASON_EVIDENCE.items():
+        for reference in references:
+            module_name, _, test_name = reference.partition(":")
+            module = importlib.import_module(module_name)
+            assert callable(getattr(module, test_name, None)), (
+                f"{reason} names {reference}, which does not exist"
+            )
+
+
+def test_the_three_named_results_are_the_three_produced_reasons() -> None:
+    """An exit path reads as a name, not as a string literal, and the names agree with
+    the table."""
+    named = {TurnResult.ended(), TurnResult.refused(), TurnResult.cancelled()}
+
+    assert {result.stop_reason for result in named} == set(STOP_REASON_EVIDENCE)
+    assert all(result.usage is None for result in named)

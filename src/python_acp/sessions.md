@@ -150,8 +150,9 @@ decides whether to cancel and retry.
   session ends, so it takes an `on_close` hook — that is the seam, and the only coupling.
   `cli.py` wires it (`SessionRegistry(on_close=backends.close)`); a deployment that
   forgot to would leak one subprocess per session.
-- **`stopReason`.** `cancel_turn()` delivers the cancellation; `pyacp-hnk.5` decides what
-  the turn reports. `cancel_turn` sets `Session.cancellation` **before** cancelling the
+- **`stopReason`.** `cancel_turn()` delivers the cancellation; [agent.py](agent.md)
+  reports it, answering `cancelled` both when the task ends cancelled and when
+  `Session.cancellation` is set but the executor returned anyway. `cancel_turn` sets `Session.cancellation` **before** cancelling the
   task, which is what lets an executor tell `session/cancel` from the whole request dying
   — see [turns.py](turns.md). `attach_turn` replaces the event, so a new turn never starts
   already flagged by the previous turn's cancel.

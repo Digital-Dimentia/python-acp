@@ -79,9 +79,23 @@ carries the second and nothing was filling it.
 
 The client's declared capabilities are handed to the `TurnContext`, because gating is
 per-connection and an executor must not have to reach back through the agent for it. The
-`stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals, interleaving
-with in-flight updates and MCP calls — is `pyacp-hnk.5`'s. The seam itself is
-[turns.py](turns.md).
+seam itself is [turns.py](turns.md), and `turns.STOP_REASON_DISPOSITIONS` is the whole
+`stopReason` contract — which three this agent returns, and why the two limit conditions
+are not among them.
+
+**The response is built only after the turn task is done.** That is what makes "no
+`session/update` after the response" a property of the code rather than a rule executors
+are asked to follow: an executor emitting from an `except CancelledError` cleanup block
+is still inside the task, so its notification is on the wire before the answer is.
+
+`prompt` reports the executor's `stopReason` rather than deciding it, with **one
+override**: if `session/cancel` was delivered to this turn and the executor still returned
+something other than `cancelled`, the response says `cancelled` and a warning names the
+executor. Answering `end_turn` for a turn the client explicitly stopped would be a lie,
+and the flag is per turn — `attach_turn` installs a fresh event — so a previous turn's
+cancellation cannot trigger it. Route two to `cancelled` needs no such rescue: a client
+that answers a permission request with `DeniedOutcome` makes the executor *return*
+`cancelled` with nothing cancelled anywhere.
 
 ## Load reconstitutes, resume reattaches
 

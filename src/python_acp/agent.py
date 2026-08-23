@@ -516,8 +516,13 @@ class PythonAcpAgent:
         ourselves are cancelled, so `turn.cancelled()` afterwards is an unambiguous answer
         to "did `session/cancel` reach it".
 
-        The `stopReason` contract beyond `cancelled` and `end_turn` — limits, refusals,
-        interleaving with in-flight updates and MCP calls — is `pyacp-hnk.5`'s.
+        **The response is built only after the turn task is done**, which is what makes
+        "no `session/update` after the response" structural rather than a convention: an
+        executor emitting from an `except CancelledError` cleanup block is still inside
+        the task, so its notification is on the wire before the answer is.
+
+        Every `stopReason` this agent can return, and why the two limit conditions are not
+        among them, is `turns.STOP_REASON_DISPOSITIONS`.
         """
         session = self._sessions.get(session_id)
         context = TurnContext(session, self.client, self._client_capabilities)
@@ -545,6 +550,19 @@ class PythonAcpAgent:
             return PromptResponse(stopReason="cancelled")
         # Re-raises whatever the executor raised, for `as_request_error` to map.
         result = turn.result()
+        if session.cancellation.is_set() and result.stop_reason != "cancelled":
+            # `session/cancel` was delivered and the executor finished anyway — it caught
+            # the `CancelledError` and returned instead of letting it propagate. The
+            # client asked this turn to stop, so answering `end_turn` would be a lie about
+            # a turn it explicitly ended. The flag is per turn (`attach_turn` installs a
+            # fresh event), so it cannot be a previous turn's.
+            logger.warning(
+                "Turn for %s answered %r after session/cancel reached it; reporting "
+                "cancelled. An executor should let CancelledError propagate.",
+                session_id,
+                result.stop_reason,
+            )
+            return PromptResponse(stopReason="cancelled", usage=result.usage)
         return PromptResponse(stopReason=result.stop_reason, usage=result.usage)
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:

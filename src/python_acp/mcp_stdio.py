@@ -398,6 +398,27 @@ class MCPStdioClient:
             # Best-effort by contract: log where the courtesy went undelivered.
             logger.debug("Could not cancel MCP request %r", request_id, exc_info=True)
 
+    async def _abandon(self, request_id: int, method: str, reason: str) -> None:
+        """Stop waiting for a request, and tell the server to stop working on it.
+
+        The forgetting comes first: a reply that crosses the notification in flight then
+        finds no pending future and is discarded by `_resolve_response`, which is the
+        outcome we want either way.
+
+        `initialize` is the one request a client MUST NOT cancel — there is no session for
+        the server to abandon yet, and the lifecycle defines no state after a cancelled
+        handshake — so it is forgotten without a notification.
+
+        The notification goes out under `asyncio.shield` because one caller of this is an
+        `except asyncio.CancelledError` handler: if a *second* cancellation lands while
+        the write is in flight, the shielded write still completes and the cancellation
+        still reaches us at the `await`. `cancel_request` itself never raises.
+        """
+        self._pending.pop(request_id, None)
+        if method == "initialize":
+            return
+        await asyncio.shield(self.cancel_request(request_id, reason))
+
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -424,19 +445,24 @@ class MCPStdioClient:
         try:
             response = await asyncio.wait_for(future, timeout=self.request_timeout)
         except asyncio.TimeoutError as exc:
-            self._pending.pop(request_id, None)
-            # `initialize` is the one request a client MUST NOT cancel: there is
-            # no session for the server to abandon yet, and the lifecycle defines
-            # no state after a cancelled handshake. Every other abandoned request
-            # gets told to stop instead of computing a reply we will discard.
-            if method != "initialize":
-                await self.cancel_request(
-                    request_id,
-                    f"python-acp timed out after {self.request_timeout}s waiting for {method}",
-                )
+            await self._abandon(
+                request_id,
+                method,
+                f"python-acp timed out after {self.request_timeout}s waiting for {method}",
+            )
             raise MCPProtocolError(
                 f"Timed out waiting for MCP response to {method}"
             ) from exc
+        except asyncio.CancelledError:
+            # Our *caller* was cancelled — an ACP `session/cancel` tearing down the turn
+            # that made this call is the case that matters. A timeout and a cancellation
+            # leave the server in exactly the same state: working on a reply nobody will
+            # read. Same remedy, different reason text, and the cancellation still
+            # propagates: returning here would tell asyncio the cancel did not take.
+            await self._abandon(
+                request_id, method, f"python-acp abandoned {method}: the caller was cancelled"
+            )
+            raise
         finally:
             self._pending.pop(request_id, None)
 

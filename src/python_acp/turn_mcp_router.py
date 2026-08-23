@@ -309,7 +309,7 @@ class McpToolRouterExecutor:
                 # the client chose not to send the notification too.
                 plan[index].status = "pending"
                 await self._emit_plan(context, plan)
-                return TurnResult("cancelled")
+                return TurnResult.cancelled()
             plan[index].status = "failed" if failed else "completed"
             await self._emit_plan(context, plan)
             if failed and _option(context, ON_TOOL_FAILURE, "continue") == "stop":
@@ -637,7 +637,7 @@ class McpToolRouterExecutor:
         """Say why, then stop. A silent refusal is worse than a wrong one."""
         logger.info("Refusing prompt for session %s: %s", context.session_id, exc)
         await context.emit(update_agent_message_text(f"{exc} {CONVENTION}"))
-        return TurnResult("refusal")
+        return TurnResult.refused()
 
 
 #: Option id to kind, for reading an answer back. Built from `PERMISSION_OPTIONS` so the

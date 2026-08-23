@@ -48,6 +48,8 @@ rather than only while one of our requests is in flight.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
 - `MCPStdioClient.cancel_request()`: sends `notifications/cancelled` for a
   request whose answer this client abandoned. Best-effort and never raises.
+- `MCPStdioClient._abandon()`: forget one pending request and tell the server to
+  stop working on it — the shared path for a timeout and for a cancelled caller.
 - `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
   paginated list wrappers, each returning the accumulated items across all pages.
 - `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those three.
@@ -90,9 +92,9 @@ sequenceDiagram
         Loop->>Loop: on_notification, if set
     end
 
-    opt no reply within request_timeout
+    opt abandoned: no reply within request_timeout, or the caller was cancelled
         Client->>Proc: notifications/cancelled {requestId}
-        Client-->>Caller: MCPProtocolError
+        Client-->>Caller: MCPProtocolError, or the CancelledError re-raised
     end
 ```
 
@@ -268,9 +270,33 @@ debug. `test_timeout_still_raises_mcp_error_when_cancelling_breaks` pins the
 outcome that matters: the caller still sees the timeout.
 
 **`initialize` is the exception.** A client MUST NOT cancel the handshake, so
-`request()` skips the notification for that one method: there is no session for
+`_abandon()` skips the notification for that one method: there is no session for
 the server to abandon yet, and the lifecycle defines no state after a cancelled
 handshake. The timeout itself still raises.
+
+### Two ways to stop waiting, one remedy
+
+A timeout is not the only way a request is abandoned. When an ACP `session/cancel`
+tears down a turn, the `asyncio.CancelledError` lands on whatever `tools/call`
+that turn was awaiting — and leaves the server in **exactly** the state a timeout
+does. `request()` therefore catches both and routes them through `_abandon()`,
+which forgets the pending future, skips `initialize`, and sends the notification
+with reason text naming which of the two happened.
+
+| Caller | What it sees | What the server gets |
+|---|---|---|
+| Timed out | `MCPProtocolError("Timed out waiting for …")` | `notifications/cancelled`, reason "timed out after Ns" |
+| Cancelled | `asyncio.CancelledError`, **re-raised** | `notifications/cancelled`, reason "the caller was cancelled" |
+
+The cancellation is re-raised rather than converted: returning a value from a
+cancelled coroutine would tell asyncio the cancellation did not take, and
+`agent.py` reads `Task.cancelled()` to answer `stopReason: "cancelled"`.
+
+The notification goes out under `asyncio.shield`, because that branch runs
+*inside* an `except asyncio.CancelledError` handler: if a second cancellation
+lands while the write is in flight, the shielded write still completes and the
+cancellation still reaches us at the `await`. Since `cancel_request` never
+raises, nothing else can escape from there.
 
 The mock server makes both halves observable against a real subprocess rather
 than a spy — a request it accepts and never answers, and a report of what it
@@ -281,6 +307,11 @@ received:
 | `tools/call` name `stall` | read the request, never answer it, record its id |
 | `tools/call` name `cancel-report` | return `{"stalled": [...], "cancelled": [...]}` as JSON text |
 | `MOCK_MCP_STALL_INITIALIZE=1` | stall the handshake too, so the never-cancel-initialize rule is testable |
+
+`tests/test_agent.py::test_cancelling_mid_tool_call_answers_cancelled_and_unasks_the_backend`
+drives the same three knobs from the ACP side: a turn calling `stall`, a
+`session/cancel`, and a `cancel-report` proving the notification carried that
+call's own request id.
 
 ## Concurrency Model
 
@@ -355,6 +386,9 @@ in the stdout loop would raise on it.
   `initialize`, which MUST NOT be cancelled. If that notification cannot be
   written (including a `BrokenPipeError` mid-`drain()`), the failure is logged
   and the original timeout error still reaches the caller.
+- A **cancelled caller** takes the same path and re-raises the
+  `asyncio.CancelledError`, so an ACP `session/cancel` un-asks the in-flight MCP
+  call instead of merely walking away from it.
 - Closed stdout, a failed read loop, or a stopped process fails every pending
   request with `MCPProtocolError`.
 - Non-dict or malformed stdout lines are skipped with a debug log.

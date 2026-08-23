@@ -91,7 +91,15 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
 1.2. Bind the stdio transport and add a CLI entry point for it.
 1.3. Rebind WebSocket onto `acp.ws.server`, replacing the hand-rolled `websockets.serve`.
 1.4. Implement `initialize` negotiation with accurate capabilities and auth methods.
-1.5. Request registry and cooperative cancellation for `$/cancel_request`.
+1.5. ~~Request registry and cooperative cancellation for `$/cancel_request`.~~
+     **Dropped — `$/cancel_request` is not an ACP method.** The upstream schema
+     (`agentclientprotocol/agent-client-protocol`, `agent-client-protocol-schema/src/v1/`)
+     defines exactly one cancellation: the `session/cancel` notification. The Python
+     SDK's `CancelRequestNotification` (`acp/schema.py`) is an orphan model — no entry
+     in `AGENT_METHODS`/`CLIENT_METHODS`, absent from the `ClientNotification` union,
+     referenced nowhere, and carrying no wire name. Cancellation is covered by 3.5;
+     telling the MCP backend to stop is `MCPStdioClient.cancel_request()`, wired from
+     that path.
 1.6. Standardize ACP/JSON-RPC error mapping and payloads.
 
 ### Phase 2 — Session lifecycle and state
@@ -171,7 +179,8 @@ sequence diagram.** Phase 8.5 is the final consistency pass.
 ## Verification
 
 1. ACP conformance suite green for every method we claim to support.
-2. Cancellation verified for both `session/cancel` and `$/cancel_request`.
+2. Cancellation verified for `session/cancel` — including that an in-flight MCP
+   request is told to stop rather than left computing a reply nobody reads.
 3. Capability advertisement matches implemented behavior exactly — no aspirational literals.
 4. A real ACP client completes a session over stdio end to end.
 5. Full 3.11–3.14 CI matrix green.

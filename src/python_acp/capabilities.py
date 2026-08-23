@@ -55,11 +55,27 @@ from acp.schema import (
 #: the answer should not have to change.
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
 
-#: Authentication methods offered at `initialize`. Empty, and not provisionally so: this
-#: process runs locally as a subprocess of the client, under the user's own credentials,
-#: and authenticates nobody. An empty list is the accurate statement — and it is what
-#: makes `Agent.authenticate` a typed `auth_required` refusal instead of a `-32601`.
-#: Owner: `pyacp-fln.1`.
+#: Authentication methods offered at `initialize`. **Empty, decided rather than deferred**
+#: (`pyacp-fln.1`).
+#:
+#: The question the bead asks is whether this runtime has a credential in the picture at
+#: all. It does not, and the chain is checkable rather than asserted:
+#:
+#: 1. Decision D1 puts **no LLM** in this runtime, so there is no model-provider key.
+#: 2. Every MCP backend is an `McpServerStdio` **spawned locally by this process**, which
+#:    inherits the user's own environment (`mcp_registry.connect_stdio`). A subprocess of
+#:    the user does not authenticate to the user.
+#: 3. The three *remote* MCP transports are advertised `false` below and refused outright
+#:    at `session/new`, so the bead's "if there IS something (a remote MCP backend over
+#:    http/sse)" branch is closed by a decision already made and enforced.
+#:
+#: That third point is the one that can rot, so it is bound by
+#: `tests/test_capabilities.py::test_declining_authentication_holds_only_while_no_remote_mcp_transport_does`:
+#: flipping any of `mcpCapabilities.http`, `.sse`, or `.acp` fails until this decision is
+#: revisited, because a remote backend is exactly the credential this list would carry.
+#:
+#: An empty list is therefore the accurate statement, and it is what makes
+#: `Agent.authenticate` a typed `auth_required` refusal instead of a `-32601`.
 AUTH_METHODS: tuple[EnvVarAuthMethod | TerminalAuthMethod | AuthMethodAgent, ...] = ()
 
 
@@ -246,8 +262,10 @@ AGENT_CAPABILITY_MANIFEST: tuple[Capability, ...] = (
         advertised=None,
         owner="never",
         why=(
-            "AUTH_METHODS is empty, so there is nothing to log out of. `logout` is also "
-            "unrouted by build_agent_router in 0.12.1 — see the matrix's Consequences."
+            "AUTH_METHODS is empty, so there is nothing to log out of — advertising a "
+            "logout would promise an exit from a state no client can enter. `logout` is "
+            "also unrouted by build_agent_router in 0.12.1, so even if there were "
+            "something, the SDK could not dispatch it (pyacp-fln.1)."
         ),
     ),
     Capability(

@@ -184,7 +184,10 @@ reading the file named.
    `build_agent_router` registers no `logout` route and `acp.interfaces.Agent` has no `logout`
    member. It is reachable only via `ext_method` or a hand-added route. Since we advertise no
    auth methods (row 12), the resolution is to **drop logout from scope** and leave
-   `auth.logout` null — but `pyacp-fln.1` currently promises otherwise and needs amending.
+   `auth.logout` null. **Resolved by `pyacp-fln.1`:** logout is out of scope, authentication
+   is declined outright, and the decision is bound to its premise by a test — flipping any
+   remote `mcpCapabilities` literal fails until it is revisited. See
+   [../src/python_acp/capabilities.md](../src/python_acp/capabilities.md#auth_methods--authentication-is-declined-and-why-that-is-checkable).
 2. **`use_unstable_protocol` is a Phase 1 decision, not a Phase 2 one.** Rows 7–9 are dead
    code unless `pyacp-tzd.1` constructs the connection with the flag set. That is a
    *protocol-visible* choice — the flag changes what `session/close` returns to a client — so

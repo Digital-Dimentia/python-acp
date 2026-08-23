@@ -201,6 +201,44 @@ while True:
                 },
             }
         )
+    # Every MCP content type in one result, so `pyacp-eg1.1`'s mapping is exercised
+    # against a real server rather than against a hand-built dict. The trailing two are
+    # deliberately broken: one type nothing maps, and one of a known type missing what
+    # that type needs.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "every-content":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "some words",
+                            "annotations": {"audience": ["user"], "priority": 0.5},
+                        },
+                        {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+                        {"type": "audio", "data": "aGk=", "mimeType": "audio/wav"},
+                        {
+                            "type": "resource",
+                            "resource": {"uri": "file:///notes.txt", "text": "embedded"},
+                        },
+                        {
+                            "type": "resource",
+                            "resource": {
+                                "uri": "file:///doc.pdf",
+                                "blob": "aGk=",
+                                "mimeType": "application/pdf",
+                            },
+                        },
+                        {"type": "resource_link", "name": "notes", "uri": "file:///notes.txt"},
+                        {"type": "chart", "spec": {"kind": "bar"}},
+                        {"type": "image", "data": "aGk="},
+                    ],
+                    "isError": False,
+                },
+            }
+        )
     # A tool result that omits isError entirely. The spec defaults it to false;
     # the client is expected to fill it in rather than leave the field missing.
     elif method == "tools/call" and req.get("params", {}).get("name") == "no-flag":

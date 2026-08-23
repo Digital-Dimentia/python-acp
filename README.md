@@ -33,6 +33,7 @@
   - [turns.py](src/python_acp/turns.md)
   - [turn_mcp_router.py](src/python_acp/turn_mcp_router.md)
   - [cli.py](src/python_acp/cli.md)
+  - [mcp_content.py](src/python_acp/mcp_content.md)
   - [mcp_registry.py](src/python_acp/mcp_registry.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)

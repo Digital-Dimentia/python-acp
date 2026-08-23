@@ -250,9 +250,11 @@ directly, so the context does not widen for one executor's dependency. Servers w
 
 ## What later beads own
 
-- `pyacp-eg1.1` — the richer MCP-result mapping. `_as_tool_content` carries **text** and
-  skips what it does not understand rather than guessing, because a wrong `type` on the
-  wire is harder to notice than a missing block.
+- `pyacp-eg1.1` ✔ — the MCP-result mapping now lives in [mcp_content.py](mcp_content.md)
+  and covers all five MCP content types plus annotations. Unmappable content became a
+  **visible placeholder** rather than a skip: once the mapping claims to be complete, a
+  silent skip makes a client render "the tool did nothing" instead of "we could not show
+  this".
 - `pyacp-hnk.3` ✔ — content-block typing and the `promptCapabilities` gates. Settled
   above: text only, the rest declined by name, and the literals derived from
   `supported_prompt_blocks`.

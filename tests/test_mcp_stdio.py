@@ -695,3 +695,85 @@ async def test_initialize_is_never_cancelled(monkeypatch: pytest.MonkeyPatch) ->
 
     assert report["stalled"], "the fixture never saw the stalled initialize"
     assert report["cancelled"] == []
+
+
+# ---------------------------------------------------------------------------
+# Cancellation, the other half: the *caller* is cancelled rather than timing
+# out. `session/cancel` tearing down a turn mid `tools/call` is that case.
+# (pyacp-hnk.5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_request_tells_the_server_to_stop() -> None:
+    """A cancelled caller leaves the server in exactly the state a timeout does.
+
+    The default `request_timeout` is 30s, so nothing here is waiting for one: the
+    notification arrives because the call was abandoned, not because it expired.
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        call = asyncio.create_task(client.call_tool("stall", {}))
+        await asyncio.sleep(0.2)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        report = await _cancel_report(client)
+
+    assert report["stalled"], "the fixture never saw the stalled request"
+    assert [c["requestId"] for c in report["cancelled"]] == [report["stalled"][-1]]
+    assert "cancelled" in report["cancelled"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_request_still_reports_cancellation_to_its_caller() -> None:
+    """Returning a value from a cancelled coroutine would tell asyncio the cancel
+    did not take. The notification is sent *and* the exception still propagates."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        call = asyncio.create_task(client.call_tool("stall", {}))
+        await asyncio.sleep(0.2)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(call, timeout=5)
+
+        assert call.cancelled() is True
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_initialize_is_not_cancelled_either() -> None:
+    """MCP forbids cancelling the handshake — for a caller that gave up, too."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, env={"MOCK_MCP_STALL_INITIALIZE": "1"}) as client:
+        handshake = asyncio.create_task(client.initialize())
+        await asyncio.sleep(0.2)
+        handshake.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handshake
+
+        report = await _cancel_report(client)
+
+    assert report["stalled"], "the fixture never saw the stalled initialize"
+    assert report["cancelled"] == []
+
+
+@pytest.mark.asyncio
+async def test_abandoning_one_request_does_not_disturb_the_next() -> None:
+    """The client survives a cancelled call: one request ended, not the connection."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        call = asyncio.create_task(client.call_tool("stall", {}))
+        await asyncio.sleep(0.2)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        result = await asyncio.wait_for(client.call_tool("echo", {"text": "hi"}), timeout=10)
+
+    assert result["content"][0]["text"] == "hi"

@@ -111,9 +111,14 @@ and nothing was filling it — and because the next field the schema grows shoul
 type instead of every executor signature. `TurnResult.ended()` names the ordinary
 completion so the common case does not read as a string literal.
 
-The `stopReason` contract beyond `end_turn` and `cancelled` — `max_tokens`,
-`max_turn_requests`, `refusal`, and how each interleaves with in-flight updates and a
-running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
+`TurnResult.ended()`, `.refused()`, and `.cancelled()` name the three exit paths an
+executor constructs, so a turn's ending reads as a name rather than a string literal. The
+type can express all five `stopReason`s; the two it never returns are in the table below.
+
+**`.cancelled()` is for the route with no task cancellation behind it.** An executor must
+never raise `asyncio.CancelledError` to mean "the client stopped this": nothing was
+cancelled, `agent.py` checks `Task.cancelled()` (which would be `False`), and a
+`BaseException` the SDK does not catch leaves the request unanswered forever.
 
 ## Main symbols
 
@@ -121,9 +126,10 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 |---|---|
 | `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks`, `session_modes`, and `session_config_options` |
 | `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
-| `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
+| `TurnResult` | `stop_reason` plus optional `usage`; `ended()`, `refused()`, `cancelled()` name the three exit paths |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
 | `SESSION_UPDATE_DISPOSITIONS`, `UpdateVariant`, `Disposition` | Every `session/update` variant and its fate — see above |
+| `STOP_REASON_DISPOSITIONS`, `StopReasonUse` | Every `stopReason` and what produces it — see below |
 | `IdleTurnExecutor` | The default — a conforming turn that does nothing |
 
 `IdleTurnExecutor` is **no longer the default** — `pyacp-hnk.2` shipped
@@ -150,6 +156,57 @@ structural reason).
 SDK's union, so a release that grows a variant forces a decision rather than letting us
 inherit silence. Deferred rows must name a bead; declined rows must say `never`.
 
+## Every `stopReason`, and what produces it
+
+`STOP_REASON_DISPOSITIONS` records all five values of the SDK's `StopReason` literal, on
+the same terms as the `session/update` table: a reason we never return is `DECLINED` with
+a structural cause rather than left unexplained.
+
+| `stopReason` | Disposition | What reaches it |
+|---|---|---|
+| `end_turn` | **emitted** | Every invocation the prompt named has run — including one whose tool reported `isError`, which fails the *call*, not the turn |
+| `refusal` | **emitted** | The prompt was valid ACP but named nothing runnable, so nothing ran; an `agent_message_chunk` says why |
+| `cancelled` | **emitted** | Two routes — see below |
+| `max_tokens` | **declined** | A token budget is a model's, and decision D1 puts no model here. Same root as the declined `UsageUpdate` variant |
+| `max_turn_requests` | **declined** | A cap on requests made *of a model* inside one turn. This executor makes none: the step count is the number of invocations the client itself named, so there is no agent-initiated loop to bound |
+
+A **backend failure is not on this list.** `MCPProtocolError` propagates out of the turn
+and becomes a JSON-RPC error through [errors.py](errors.md), keeping the server's own
+code. Collapsing it into a `stopReason` would tell the client the turn ended normally.
+
+`tests/test_turns.py` walks the SDK's literal so a release that grows a value forces a
+decision, and `STOP_REASON_EVIDENCE` there pairs every produced reason with the test that
+watches a turn end that way — the same proof obligation `CAPABILITY_EVIDENCE` imposes on
+an advertised capability.
+
+### The two routes to `cancelled`
+
+They share nothing, and both must keep working.
+
+| | 1. `session/cancel` | 2. permission answered `cancelled` |
+|---|---|---|
+| What happens | `Session.cancel_turn()` sets the flag, then cancels the turn task | The client answers `session/request_permission` with `DeniedOutcome`, whose literal is **`cancelled`** |
+| What the executor does | lets `CancelledError` propagate | returns `TurnResult.cancelled()` |
+| Who answers | `agent.py`, from `Task.cancelled()` | `agent.py`, from the returned result |
+| Task cancellation involved | yes | **none at all** |
+
+Route 2 is why [turn_mcp_router.py](turn_mcp_router.md) raises a private `_TurnCancelled`
+rather than `asyncio.CancelledError`, and why `DeniedOutcome` must not be read as a
+rejection: a rejection is a *selected* reject option, and turning a "no" into a cancelled
+turn is the inversion this bead exists to prevent.
+
+### What cancellation costs elsewhere
+
+An in-flight MCP call is not merely abandoned. `MCPStdioClient.request` catches the
+`CancelledError` on its way out, sends `notifications/cancelled` for that request id, and
+re-raises — the server stops computing a reply nobody will read. See
+[mcp_stdio.md](mcp_stdio.md).
+
+Nothing emits after the turn's response, and that is **structural** rather than a
+convention: `agent.py` builds the `PromptResponse` only after the turn task is done, so
+even an executor emitting from an `except CancelledError` handler under `asyncio.shield`
+puts its notification on the wire first.
+
 ## What the later Phase 3 beads own
 
 - `pyacp-hnk.2` ✔ — the deterministic MCP tool-router, reading backends through
@@ -160,7 +217,8 @@ inherit silence. Deferred rows must name a bead; declined rows must say `never`.
   that bead enforces the gates.
 - `pyacp-hnk.4` ✔ — the full `session/update` variant set, including `PLAN_UPDATES`
   suppression, and the disposition table above.
-- `pyacp-hnk.5` — the rest of the `stopReason` contract.
+- `pyacp-hnk.5` ✔ — the rest of the `stopReason` contract: the table above, the two
+  routes to `cancelled`, and telling the MCP backend to stop.
 
 ## Tests
 

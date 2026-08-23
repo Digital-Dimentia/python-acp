@@ -175,6 +175,17 @@ streams, in this order:
 is no reasoning trace and no token count to report. The full disposition of every
 `session/update` variant is in [turns.py](src/python_acp/turns.md).
 
+**Three `stopReason`s, and only three.** A turn ends `end_turn`, `refusal`, or
+`cancelled`; `max_tokens` and `max_turn_requests` are limits on a model, and there is
+none here to limit. A backend failure is not a `stopReason` at all — it is a JSON-RPC
+error carrying the MCP server's own code. The table, with the reason for each, is in
+[turns.py](src/python_acp/turns.md).
+
+`session/cancel` ends the running turn with `stopReason: "cancelled"` — a response, never
+a raise and never a hang — and no `session/update` for that turn arrives after it. An MCP
+call still in flight is **un-asked** with `notifications/cancelled` rather than left
+running, so the server stops computing a reply nobody will read.
+
 **Only text blocks are read.** An `image`, `audio`, `resource`, or `resource_link` block
 is declined by name, because each is context for a model to reason over and there is no
 model here. `initialize` says so: `promptCapabilities` reports `image`, `audio`, and

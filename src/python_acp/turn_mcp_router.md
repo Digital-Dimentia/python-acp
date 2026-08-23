@@ -315,7 +315,9 @@ directly, so the context does not widen for one executor's dependency. Servers w
   above: text only, the rest declined by name, and the literals derived from
   `supported_prompt_blocks`.
 - `pyacp-hnk.4` — the rest of the `session/update` variant set.
-- `pyacp-hnk.5` — `stopReason` breadth beyond `end_turn`, `refusal`, and `cancelled`.
+- `pyacp-hnk.5` ✔ — the `stopReason` contract. There is no fourth reason to add: the two
+  this executor never returns are limits on a model, and it has none. See the table in
+  [turns.md](turns.md).
 
 ## Tests
 

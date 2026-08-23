@@ -233,6 +233,46 @@ Three things the diagram is drawn to make visible:
 Under `--transport stdio` the same picture holds with the deprecated branch removed —
 there is no legacy surface on stdio, and never was.
 
+### Cancelling a turn
+
+`session/cancel` is a *notification* that arrives while `session/prompt` is still open,
+which is why the turn runs as its own task: a cancel needs something to reach. It crosses
+four modules, and the ordering of the last two hops is the part worth drawing.
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant A as agent.py
+    participant S as sessions.py
+    participant X as turn_mcp_router.py
+    participant M as mcp_stdio.py
+    participant P as MCP server
+
+    C->>A: session/prompt
+    A->>S: attach_turn(task)
+    A->>X: execute(context, prompt) as a task
+    X->>M: tools/call
+    M->>P: JSON-RPC request id N
+    C-)A: session/cancel (notification)
+    A->>S: cancel_turn()
+    S->>S: set Session.cancellation, then task.cancel()
+    M->>P: notifications/cancelled {requestId: N}
+    M-->>X: CancelledError, re-raised
+    Note over A,X: the task finishes cancelled; only then is the response built
+    A-->>C: PromptResponse {stopReason: "cancelled"}
+```
+
+- **The flag is set before the task is cancelled**, so an executor's `except
+  CancelledError` handler can tell `session/cancel` from the whole request dying.
+- **The in-flight MCP request is un-asked, not merely dropped** — otherwise the server
+  keeps computing a reply nobody will read, and a stdio server queues everything behind
+  it.
+- **Nothing emits after the response**, because `agent.py` builds it only once the turn
+  task is done.
+- A client answering `session/request_permission` with `DeniedOutcome` reaches the same
+  `stopReason` with **no task cancellation at all**; the executor returns it. See
+  [turns.md](src/python_acp/turns.md).
+
 ## Module Documentation
 
 - [ACP agent module](src/python_acp/agent.md)

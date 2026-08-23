@@ -9,6 +9,7 @@ direct call would hide.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -735,6 +736,222 @@ async def test_cancelling_an_unknown_session_is_silent() -> None:
     router = make_router()
 
     assert await router("session/cancel", {"sessionId": "nope"}, True) is None
+
+
+# ---------------------------------------------------------------------------
+# stopReason semantics (pyacp-hnk.5)
+# ---------------------------------------------------------------------------
+
+
+def _chunk(text: str) -> AgentMessageChunk:
+    return AgentMessageChunk(
+        sessionUpdate="agent_message_chunk", content=TextContentBlock(type="text", text=text)
+    )
+
+
+async def _updates_until(client: RecordingClient, predicate, timeout: float = 10):
+    """Wait for a `session/update` matching `predicate`, so a test cancels a turn at a
+    known point rather than after a guessed sleep."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        for _session_id, update in list(client.updates):
+            if predicate(update):
+                return update
+        await asyncio.sleep(0.01)
+    raise AssertionError("the update never arrived")
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "refusal", "max_tokens"])
+async def test_the_response_carries_the_stop_reason_the_executor_returned(
+    stop_reason: StopReason,
+) -> None:
+    """`prompt` reports, it does not decide. The one case where it overrides the executor
+    is a cancelled turn, which the tests below cover."""
+    executor = RecordingExecutor(stop_reason=stop_reason)
+    executor.release.set()
+    agent, router, _client, session_id = await _lifecycle_agent(executor=executor)
+
+    result = await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+
+    assert result.stop_reason == stop_reason
+
+
+async def test_a_cancel_that_lands_before_the_turn_starts_answers_cancelled() -> None:
+    """Cancel-before-start. The task is attached before its first step runs, so the
+    cancellation reaches a turn that has emitted nothing — and the answer is still a
+    well-formed response rather than a raise or a hang."""
+    executor = RecordingExecutor()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    )
+    # One scheduling step: enough for `prompt` to reach `attach_turn`, not enough for the
+    # executor task queued behind this test to have run at all.
+    await asyncio.sleep(0)
+    await router("session/cancel", {"sessionId": session_id}, True)
+
+    result = await asyncio.wait_for(turn, timeout=5)
+    assert result.stop_reason == "cancelled"
+    assert executor.started.is_set() is False
+    assert client.updates == []
+
+
+async def test_a_cancel_with_no_turn_running_does_not_poison_the_next_turn() -> None:
+    """`attach_turn` installs a fresh event, so a stray cancel cannot pre-cancel a turn
+    that has not been asked for yet."""
+    executor = RecordingExecutor()
+    executor.release.set()
+    agent, router, _client, session_id = await _lifecycle_agent(executor=executor)
+
+    await router("session/cancel", {"sessionId": session_id}, True)
+    result = await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+
+    assert result.stop_reason == "end_turn"
+
+
+async def test_a_cancel_after_the_turn_completed_changes_nothing() -> None:
+    """Cancel-after-completion. The client is behaving correctly — it could not have
+    known the turn had finished — so the answer already sent stands and the next turn is
+    unaffected."""
+    executor = RecordingExecutor()
+    executor.release.set()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+    first = await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    updates_at_response = len(client.updates)
+
+    assert await router("session/cancel", {"sessionId": session_id}, True) is None
+    await asyncio.sleep(0.05)
+    second = await router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+
+    assert first.stop_reason == "end_turn"
+    assert second.stop_reason == "end_turn"
+    assert len(client.updates) == updates_at_response
+
+
+async def test_a_cancelled_turns_cleanup_update_lands_before_the_response() -> None:
+    """The ordering guarantee is structural: `prompt` builds the response only after the
+    turn task is done, so even an executor that emits from its `except CancelledError`
+    handler cannot put a notification on the wire after the answer."""
+
+    class CleaningUp:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def execute(self, context, prompt):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Shielded, so the emit survives the cancellation already in flight.
+                await asyncio.shield(context.emit(_chunk("stopping")))
+                raise
+
+    executor = CleaningUp()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    await router("session/cancel", {"sessionId": session_id}, True)
+
+    result = await asyncio.wait_for(turn, timeout=5)
+    assert result.stop_reason == "cancelled"
+    # Already delivered when the response was built, and nothing follows it.
+    assert [update for _session_id, update in client.updates] == [_chunk("stopping")]
+    await asyncio.sleep(0.05)
+    assert len(client.updates) == 1
+
+
+async def test_an_executor_that_swallows_the_cancellation_still_reports_cancelled() -> None:
+    """A turn the client explicitly stopped may not answer `end_turn`.
+
+    Letting `CancelledError` propagate is the contract; this is what happens when an
+    executor breaks it. The flag is per turn, so the override cannot fire on a turn
+    nobody cancelled."""
+
+    class Swallowing:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def execute(self, context, prompt):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return TurnResult.ended()
+
+    executor = Swallowing()
+    agent, router, _client, session_id = await _lifecycle_agent(executor=executor)
+    turn = asyncio.create_task(
+        router("session/prompt", {"sessionId": session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    await router("session/cancel", {"sessionId": session_id}, True)
+
+    result = await asyncio.wait_for(turn, timeout=5)
+    assert result.stop_reason == "cancelled"
+
+
+async def test_cancelling_mid_tool_call_answers_cancelled_and_unasks_the_backend() -> None:
+    """Cancel-mid-tool-call, against the real fixture server.
+
+    `stall` is read and never answered, so the only things that can end the turn are the
+    cancellation and the client's 30s MCP timeout — a `wait_for(5)` tells those apart.
+    The backend must then be *told* to stop rather than left computing a reply nobody
+    will read, which is `notifications/cancelled` carrying that request's own id.
+    """
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends)
+    client = RecordingClient()
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router(
+        "session/new",
+        {
+            "cwd": "/work",
+            "mcpServers": [
+                {
+                    "name": "tools",
+                    "command": sys.executable,
+                    "args": [str(FIXTURE_SERVER)],
+                    "env": [],
+                }
+            ],
+        },
+        False,
+    )
+    try:
+        turn = asyncio.create_task(
+            router(
+                "session/prompt",
+                {
+                    "sessionId": created.session_id,
+                    "prompt": [{"type": "text", "text": json.dumps({"tool": "stall"})}],
+                },
+                False,
+            )
+        )
+        await _updates_until(
+            client, lambda u: getattr(u, "status", None) == "in_progress"
+        )
+        await router("session/cancel", {"sessionId": created.session_id}, True)
+
+        result = await asyncio.wait_for(turn, timeout=5)
+        assert result.stop_reason == "cancelled"
+        updates_at_response = len(client.updates)
+
+        backend = backends.backends(created.session_id)["tools"]
+        report = json.loads(
+            (await backend.call_tool("cancel-report", {}))["content"][0]["text"]
+        )
+        assert report["stalled"], "the fixture never saw the stalled tools/call"
+        assert [c["requestId"] for c in report["cancelled"]] == [report["stalled"][-1]]
+        # Nothing from the abandoned turn arrives after its response.
+        assert len(client.updates) == updates_at_response
+    finally:
+        await backends.close_all()
 
 
 async def test_an_executor_that_raises_becomes_a_mapped_error() -> None:

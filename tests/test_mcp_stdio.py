@@ -15,6 +15,7 @@ from python_acp.mcp_stdio import (
     _MCP_PROTOCOL_VERSION,
     MCPProtocolError,
     MCPStdioClient,
+    tool_result_text,
 )
 
 
@@ -547,3 +548,150 @@ async def test_malformed_tool_result_is_a_protocol_error() -> None:
         client.request = bad  # type: ignore[method-assign]
         with pytest.raises(MCPProtocolError, match="isError"):
             await client.call_tool("echo", {"text": "hi"})
+
+
+# ---------------------------------------------------------------------------
+# Cancellation: a request we stop waiting for must be un-asked, not merely
+# forgotten, or the server keeps working on a reply nobody will read.
+# (pyacp-ua1)
+# ---------------------------------------------------------------------------
+
+
+async def _cancel_report(client: MCPStdioClient) -> dict:
+    """Ask the fixture what it actually received on the wire."""
+    result = await asyncio.wait_for(client.call_tool("cancel-report", {}), timeout=10)
+    return json.loads(tool_result_text(result))
+
+
+@pytest.mark.asyncio
+async def test_timeout_sends_notifications_cancelled_for_that_request() -> None:
+    """The abandoned request's own id is what reaches the server."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, request_timeout=0.5) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        with pytest.raises(MCPProtocolError, match="Timed out"):
+            await client.call_tool("stall", {})
+
+        report = await _cancel_report(client)
+
+    assert report["stalled"], "the fixture never saw the stalled request"
+    assert [c["requestId"] for c in report["cancelled"]] == [report["stalled"][-1]]
+    assert "timed out" in report["cancelled"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancellation_does_not_disturb_later_requests() -> None:
+    """A cancelled request is one request, not a broken client."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, request_timeout=0.5) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        with pytest.raises(MCPProtocolError):
+            await client.call_tool("stall", {})
+
+        result = await asyncio.wait_for(client.call_tool("echo", {"text": "hi"}), timeout=10)
+
+    assert result["content"][0]["text"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_is_usable_outside_the_timeout_path() -> None:
+    """The notification path is a method, not a branch inside the timeout.
+
+    `pyacp-tzd.5` cancels in-flight requests for reasons that have nothing to do
+    with a timeout; this asserts it can, with its own reason text.
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        await client.cancel_request(4242, reason="ACP client cancelled the turn")
+
+        report = await _cancel_report(client)
+
+    assert report["cancelled"] == [
+        {"requestId": 4242, "reason": "ACP client cancelled the turn"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_omits_an_absent_reason() -> None:
+    """`reason` is optional; an empty one is left off rather than sent empty."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        await client.cancel_request(7)
+
+        report = await _cancel_report(client)
+
+    assert report["cancelled"] == [{"requestId": 7}]
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_never_raises_when_the_process_is_gone() -> None:
+    """Cancelling is a courtesy; it must not mask the failure that prompted it."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    client = MCPStdioClient(cmd)
+    await client.start()
+    await asyncio.wait_for(client.initialize(), timeout=10)
+    await client.stop()
+
+    await client.cancel_request(1, reason="after shutdown")
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_swallows_a_broken_pipe_mid_write() -> None:
+    """The is_closing() guard cannot catch a subprocess that dies during drain().
+
+    That window surfaces as BrokenPipeError, not MCPProtocolError. If it escaped,
+    the timeout path would raise an OSError in place of the MCPProtocolError its
+    caller is documented to raise.
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        async def die_mid_write(payload: dict[str, object]) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        client._write = die_mid_write  # type: ignore[method-assign]
+
+        await client.cancel_request(7, reason="subprocess died mid-write")
+
+
+@pytest.mark.asyncio
+async def test_timeout_still_raises_mcp_error_when_cancelling_breaks() -> None:
+    """A failed cancel must not replace the timeout error that prompted it."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, request_timeout=0.5) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        real_write = client._write
+        sent_first = False
+
+        async def die_after_the_request(payload: dict[str, object]) -> None:
+            nonlocal sent_first
+            if not sent_first:
+                sent_first = True
+                await real_write(payload)
+                return
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+        client._write = die_after_the_request  # type: ignore[method-assign]
+
+        with pytest.raises(MCPProtocolError, match="Timed out"):
+            await client.call_tool("stall", {})
+
+
+@pytest.mark.asyncio
+async def test_initialize_is_never_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP forbids cancelling the handshake, timeout or not."""
+    monkeypatch.setenv("MOCK_MCP_STALL_INITIALIZE", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, request_timeout=0.5) as client:
+        with pytest.raises(MCPProtocolError, match="Timed out"):
+            await client.initialize()
+
+        report = await _cancel_report(client)
+
+    assert report["stalled"], "the fixture never saw the stalled initialize"
+    assert report["cancelled"] == []

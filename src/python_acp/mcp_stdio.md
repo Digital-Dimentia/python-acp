@@ -17,6 +17,8 @@ rather than only while one of our requests is in flight.
 - Serialize request and notification messages to JSON lines.
 - Read every stdout message and route it by shape: response, server request, or notification.
 - Answer server-initiated requests, including with an error.
+- Un-ask a request this client stops waiting for, so the server is not left
+  computing a reply nobody will read.
 - Expose convenience methods for tools, prompts, and resources.
 - Walk cursor-paginated list results to exhaustion instead of returning page one.
 - Preserve the server's JSON-RPC error code on the raised exception, and keep a
@@ -44,6 +46,8 @@ rather than only while one of our requests is in flight.
   proposed, and the set that may be accepted in reply.
 - `MCPStdioClient.request()`: sends a request and awaits its correlated reply.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
+- `MCPStdioClient.cancel_request()`: sends `notifications/cancelled` for a
+  request whose answer this client abandoned. Best-effort and never raises.
 - `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
   paginated list wrappers, each returning the accumulated items across all pages.
 - `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those three.
@@ -84,6 +88,11 @@ sequenceDiagram
         Loop->>Proc: write reply
     else notification
         Loop->>Loop: on_notification, if set
+    end
+
+    opt no reply within request_timeout
+        Client->>Proc: notifications/cancelled {requestId}
+        Client-->>Caller: MCPProtocolError
     end
 ```
 
@@ -224,6 +233,55 @@ The mock server exposes both failure kinds through dedicated tool names:
 These are argument-driven rather than env-driven so one client can exercise a tool
 failure and a request failure in the same test, the way `provoke` already works.
 
+## Cancelling an Abandoned Request
+
+JSON-RPC has no in-band cancel. A request this client stops waiting for is
+therefore still live on the server, which keeps computing a reply nobody will
+read — and, on a stdio server that works serially, keeps every later request
+queued behind it. MCP's remedy is the `notifications/cancelled` notification:
+
+```json
+{"jsonrpc": "2.0", "method": "notifications/cancelled",
+ "params": {"requestId": 7, "reason": "python-acp timed out after 30.0s waiting for tools/call"}}
+```
+
+`cancel_request(request_id, reason=None)` is that whole path, deliberately kept
+as one method rather than as a branch inside the timeout handler: cancelling for
+any other reason is the same call with different `reason` text. `reason` is
+optional and is omitted from the params when empty.
+
+Three properties it is worth not re-deriving:
+
+| Property | Why |
+|---|---|
+| It never raises | A dead subprocess has nothing left to cancel, and a failed courtesy must not mask the failure that prompted it. This covers `OSError` as well as `MCPProtocolError` — see below |
+| It does not touch `_pending` | Whoever abandoned the request owns that future; this only puts the notification on the wire |
+| A late reply is still tolerated | The notification and a real response can cross in flight; `_resolve_response` discards a response for a forgotten id |
+
+**Both error families are swallowed, not just `MCPProtocolError`.** The
+`stdin.is_closing()` guard in `_write()` catches a subprocess that is already
+gone, but not one that dies *during* `drain()` — that window surfaces as
+`BrokenPipeError`/`ConnectionResetError`. Letting one escape would replace the
+`MCPProtocolError` the timeout path is about to raise with an unrelated
+`OSError`, so `cancel_request` catches `(MCPProtocolError, OSError)` and logs at
+debug. `test_timeout_still_raises_mcp_error_when_cancelling_breaks` pins the
+outcome that matters: the caller still sees the timeout.
+
+**`initialize` is the exception.** A client MUST NOT cancel the handshake, so
+`request()` skips the notification for that one method: there is no session for
+the server to abandon yet, and the lifecycle defines no state after a cancelled
+handshake. The timeout itself still raises.
+
+The mock server makes both halves observable against a real subprocess rather
+than a spy — a request it accepts and never answers, and a report of what it
+received:
+
+| Knob | Effect |
+|---|---|
+| `tools/call` name `stall` | read the request, never answer it, record its id |
+| `tools/call` name `cancel-report` | return `{"stalled": [...], "cancelled": [...]}` as JSON text |
+| `MOCK_MCP_STALL_INITIALIZE=1` | stall the handshake too, so the never-cancel-initialize rule is testable |
+
 ## Concurrency Model
 
 - A write lock covers request-id allocation and the write only. Waiting for a
@@ -292,7 +350,11 @@ in the stdout loop would raise on it.
 
 ## Failure Modes
 
-- Timeout waiting for a response raises `MCPProtocolError`.
+- Timeout waiting for a response raises `MCPProtocolError` and sends
+  `notifications/cancelled` for the abandoned request — except for
+  `initialize`, which MUST NOT be cancelled. If that notification cannot be
+  written (including a `BrokenPipeError` mid-`drain()`), the failure is logged
+  and the original timeout error still reaches the caller.
 - Closed stdout, a failed read loop, or a stopped process fails every pending
   request with `MCPProtocolError`.
 - Non-dict or malformed stdout lines are skipped with a debug log.

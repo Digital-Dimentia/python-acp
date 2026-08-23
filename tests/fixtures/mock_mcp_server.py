@@ -44,6 +44,18 @@ _protocol_version = os.environ.get("MOCK_MCP_PROTOCOL_VERSION")
 _omit_protocol_version = os.environ.get("MOCK_MCP_OMIT_PROTOCOL_VERSION") == "1"
 
 
+# Cancellation knobs. A stalled request is read and then never answered, so the
+# only thing that ends the client's wait is its own request_timeout — after which
+# notifications/cancelled should arrive. Both are recorded here and handed back by
+# the `cancel-report` tool, so a test observes what this process really received
+# instead of spying on the client.
+#   MOCK_MCP_STALL_INITIALIZE=1 -> stall the handshake too, which is the one
+#                            request a client MUST NOT cancel.
+_stall_initialize = os.environ.get("MOCK_MCP_STALL_INITIALIZE") == "1"
+_stalled_ids = []
+_cancellations = []
+
+
 def write(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -143,7 +155,16 @@ while True:
     if method == "notifications/initialized":
         continue
 
-    if method == "initialize":
+    # A notification, so it gets no reply — only a record that it arrived, with
+    # whatever requestId and reason the client put on it.
+    if method == "notifications/cancelled":
+        _cancellations.append(req.get("params") or {})
+        continue
+
+    if method == "initialize" and _stall_initialize:
+        # Read the handshake and never answer it.
+        _stalled_ids.append(req_id)
+    elif method == "initialize":
         result = {}
         if not _omit_protocol_version:
             proposed = (req.get("params") or {}).get("protocolVersion")
@@ -157,6 +178,30 @@ while True:
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": list_result(req, "tools", tool_for_page),
+            }
+        )
+    # Accept the call and never answer it. The client's request_timeout is the
+    # only thing that ends the wait, which is what makes the cancellation path
+    # reachable from a test at all.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "stall":
+        _stalled_ids.append(req_id)
+    # Hand back everything stalled and every cancellation received, as JSON text.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "cancel-report":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"stalled": _stalled_ids, "cancelled": _cancellations}
+                            ),
+                        }
+                    ],
+                    "isError": False,
+                },
             }
         )
     elif method == "tools/call" and req.get("params", {}).get("name") == "provoke":

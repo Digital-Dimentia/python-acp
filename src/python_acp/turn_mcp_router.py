@@ -82,6 +82,8 @@ from acp.helpers import (
 from acp.schema import (
     AvailableCommand,
     PermissionOption,
+    SessionMode,
+    SessionModeState,
     PlanEntry,
     RequestPermissionRequest,
     RequestPermissionResponse,
@@ -138,6 +140,37 @@ class Invocation:
         from an unqualified name.
         """
         return f"{self.server}/{self.tool}" if self.server else self.tool
+
+
+#: Mode ids, so a branch reads as a name rather than a string literal.
+EXECUTE = "execute"
+DRY_RUN = "dry-run"
+AUTO_APPROVE = "auto-approve"
+
+#: The modes this executor offers. Each one changes what a turn *does*; the bead is
+#: explicit that a mode with no behavioural difference should not exist.
+#:
+#: | Mode | Runs tools | Asks permission |
+#: |---|---|---|
+#: | `execute` (default) | yes | yes, per call |
+#: | `dry-run` | **no** | no — nothing runs, so there is nothing to approve |
+#: | `auto-approve` | yes | **no** — choosing the mode *is* the consent |
+SESSION_MODES = SessionModeState(
+    currentModeId=EXECUTE,
+    availableModes=[
+        SessionMode(id=EXECUTE, name="Execute", description="Run each tool, asking first."),
+        SessionMode(
+            id=DRY_RUN,
+            name="Dry run",
+            description="Report which tools would run, with their arguments, and run none.",
+        ),
+        SessionMode(
+            id=AUTO_APPROVE,
+            name="Auto-approve",
+            description="Run each tool without asking. Choosing this mode is the consent.",
+        ),
+    ],
+)
 
 
 #: What a client is offered before a tool runs.
@@ -198,6 +231,7 @@ class McpToolRouterExecutor:
     #: derives `promptCapabilities.image`, `.audio`, and `.embeddedContext` from this set,
     #: so the advertisement cannot drift from what this class actually reads.
     supported_prompt_blocks: frozenset[str] = frozenset({"text"})
+    session_modes: SessionModeState | None = SESSION_MODES
 
     def __init__(self, backends: McpBackendRegistry) -> None:
         self._backends = backends
@@ -399,6 +433,21 @@ class McpToolRouterExecutor:
                 raw_input=invocation.arguments,
             )
         )
+        if _mode(context) == DRY_RUN:
+            await context.emit(
+                tracker.progress(
+                    key,
+                    status="completed",
+                    content=[
+                        tool_content(
+                            text_block(f"[dry-run] {invocation.title} was not executed.")
+                        )
+                    ],
+                )
+            )
+            tracker.forget(key)
+            return False
+
         if not await self._permitted(context, broker, invocation, key):
             await context.emit(
                 tracker.progress(
@@ -443,6 +492,10 @@ class McpToolRouterExecutor:
         what `pending` is for: the request carries the tool call, so the client has
         something to attach its prompt to.
         """
+        if _mode(context) == AUTO_APPROVE:
+            logger.debug("Mode %s: not asking about %s", AUTO_APPROVE, invocation.title)
+            return True
+
         remembered = context.session.remembered_permissions.get(invocation.title)
         if remembered is not None:
             logger.debug("Permission for %s remembered: %s", invocation.title, remembered)
@@ -553,6 +606,16 @@ def _requester(context: TurnContext):
         )
 
     return request
+
+
+def _mode(context: TurnContext) -> str:
+    """This session's mode id, defaulting to `execute`.
+
+    A session created by an agent whose executor advertises no modes has `modes` of
+    `None`, and the safe default is the one that asks.
+    """
+    modes = context.session.modes
+    return modes.current_mode_id if modes is not None else EXECUTE
 
 
 def _plan_for(invocations: list[Invocation]) -> list[PlanEntry]:

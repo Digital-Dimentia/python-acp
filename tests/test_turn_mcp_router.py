@@ -39,6 +39,7 @@ from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.turn_mcp_router import (
     DECLINED_BLOCKS,
+    SESSION_MODES,
     PERMISSION_OPTIONS,
     McpToolRouterExecutor,
 )
@@ -737,3 +738,100 @@ async def test_the_servers_original_result_is_still_there_verbatim() -> None:
 
     raw = harness.of("tool_call_update")[-1].raw_output
     assert [b["type"] for b in raw["content"]][-2:] == ["chart", "image"]
+
+
+# ---------------------------------------------------------------------------
+# Session modes (pyacp-fln.2)
+# ---------------------------------------------------------------------------
+
+
+def in_mode(harness: Harness, mode_id: str) -> None:
+    harness.session.modes = SESSION_MODES.model_copy(deep=True)
+    harness.session.set_mode(mode_id)
+
+
+def test_every_mode_changes_what_a_turn_does() -> None:
+    """The bead is explicit: do not invent modes with no behavioural difference.
+
+    Each of the three differs on at least one of the two axes a turn has.
+    """
+    assert {m.id for m in SESSION_MODES.available_modes} == {"execute", "dry-run", "auto-approve"}
+    assert SESSION_MODES.current_mode_id == "execute"
+    assert all(m.description for m in SESSION_MODES.available_modes)
+
+
+async def test_dry_run_reports_the_call_and_runs_nothing() -> None:
+    async with Harness("tools") as harness:
+        in_mode(harness, "dry-run")
+        result = await harness.run(block(tool="echo", arguments={"text": "would run"}))
+
+    assert result.stop_reason == "end_turn"
+    start = harness.of("tool_call")[0]
+    assert start.title == "tools/echo"
+    # The arguments are the point of a preview.
+    assert start.raw_input == {"text": "would run"}
+    final = harness.of("tool_call_update")[-1]
+    assert "[dry-run]" in final.content[0].content.text
+    assert harness.client.permission_requests == []
+
+
+async def test_a_dry_run_completion_carries_no_raw_output() -> None:
+    """ACP has no "skipped" status, so `completed` is the chosen encoding — and the
+    absent `rawOutput` is the second signal that nothing actually ran. A real completion
+    always carries the server's result."""
+    async with Harness("tools") as harness:
+        in_mode(harness, "dry-run")
+        await harness.run(block(tool="echo"))
+
+    assert harness.of("tool_call_update")[-1].raw_output is None
+
+
+async def test_dry_run_never_reaches_the_backend() -> None:
+    """The assertion that matters: `boom` would report a failure if it were called."""
+    async with Harness("tools") as harness:
+        in_mode(harness, "dry-run")
+        await harness.run(block(tool="boom"))
+
+    assert [u.status for u in harness.of("tool_call_update")] == ["completed"]
+
+
+async def test_auto_approve_runs_without_asking() -> None:
+    """Choosing the mode is the consent."""
+    async with Harness("tools", client=RecordingClient("reject")) as harness:
+        in_mode(harness, "auto-approve")
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.permission_requests == []
+    assert harness.of("tool_call_update")[-1].status == "completed"
+
+
+async def test_execute_is_the_default_and_still_asks() -> None:
+    async with Harness("tools") as harness:
+        in_mode(harness, "execute")
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.client.permission_requests) == 1
+
+
+async def test_a_session_with_no_modes_behaves_as_execute() -> None:
+    """A session created by an agent whose executor advertises none has `modes = None`,
+    and the safe default is the one that asks."""
+    async with Harness("tools") as harness:
+        assert harness.session.modes is None
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.client.permission_requests) == 1
+
+
+async def test_switching_mid_session_takes_effect_on_the_next_turn() -> None:
+    async with Harness("tools") as harness:
+        in_mode(harness, "execute")
+        await harness.run(block(tool="echo"))
+        harness.session.set_mode("dry-run")
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.client.permission_requests) == 1
+    assert [u.status for u in harness.of("tool_call_update")] == [
+        "in_progress", "completed", "completed",
+    ]

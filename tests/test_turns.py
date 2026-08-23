@@ -337,13 +337,13 @@ def test_every_disposition_says_who_and_why(variant) -> None:
         assert variant.owner == "never"
 
 
-def test_the_deferred_variants_are_the_phase_5_ones() -> None:
-    """Both need a feature that does not exist: nothing offers modes or config options."""
+def test_the_only_deferred_variant_is_the_last_phase_5_one() -> None:
+    """`CurrentModeUpdate` landed with `pyacp-fln.2`; nothing offers config options yet."""
     deferred = {
         v.name for v in SESSION_UPDATE_DISPOSITIONS if v.disposition is Disposition.DEFERRED
     }
 
-    assert deferred == {"CurrentModeUpdate", "ConfigOptionUpdate"}
+    assert deferred == {"ConfigOptionUpdate"}
 
 
 def test_the_declined_variants_share_a_structural_reason() -> None:

@@ -77,7 +77,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from acp.interfaces import Client
-from acp.schema import ClientCapabilities, StopReason, Usage
+from acp.schema import ClientCapabilities, SessionModeState, StopReason, Usage
 
 from python_acp.sessions import Session
 
@@ -178,10 +178,10 @@ SESSION_UPDATE_DISPOSITIONS: tuple[UpdateVariant, ...] = (
     ),
     UpdateVariant(
         "CurrentModeUpdate",
-        Disposition.DEFERRED,
+        Disposition.EMITTED,
         "pyacp-fln.2",
-        "`session/set_mode` must emit it, and nothing offers modes yet: `NewSessionResponse."
-        "modes` is None until Phase 5.",
+        "`session/set_mode` emits it, and so would an internal change — `agent.announce_mode` "
+        "is the one place either goes through, so the two are indistinguishable on the wire.",
     ),
     UpdateVariant(
         "ConfigOptionUpdate",
@@ -385,6 +385,14 @@ class TurnExecutor(Protocol):
     #: a per-executor promise expressible at all.
     supported_prompt_blocks: frozenset[str]
 
+    #: The modes this executor offers, or `None` when it has none. Declarative for the
+    #: same reason as `supported_prompt_blocks`: `session/new` advertises them before any
+    #: turn runs, and a mode only means something to the executor that acts on it.
+    #:
+    #: `None` is not "no opinion" — `Session.set_mode` refuses a session that advertises
+    #: no modes, so an executor without them cannot have one imposed.
+    session_modes: SessionModeState | None
+
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 
 
@@ -405,6 +413,8 @@ class IdleTurnExecutor:
     #: It reads nothing at all, so it promises nothing. An agent wired with only this
     #: advertises no prompt capabilities, which is the accurate statement.
     supported_prompt_blocks: frozenset[str] = frozenset()
+    #: It does nothing, so there is no mode in which it does something different.
+    session_modes: SessionModeState | None = None
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         logger.warning(

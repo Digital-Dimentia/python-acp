@@ -185,9 +185,11 @@ SESSION_UPDATE_DISPOSITIONS: tuple[UpdateVariant, ...] = (
     ),
     UpdateVariant(
         "ConfigOptionUpdate",
-        Disposition.DEFERRED,
+        Disposition.EMITTED,
         "pyacp-fln.3",
-        "`session/set_config_option` must emit it, and nothing offers config options yet.",
+        "`session/set_config_option` emits it through `agent.announce_config_options`, "
+        "carrying every option rather than the changed one — which is what the schema "
+        "asks for and what a client re-rendering a settings panel wants.",
     ),
     UpdateVariant(
         "SessionInfoUpdate",
@@ -393,6 +395,11 @@ class TurnExecutor(Protocol):
     #: no modes, so an executor without them cannot have one imposed.
     session_modes: SessionModeState | None
 
+    #: The config options this executor exposes, in their initial state. Declared for the
+    #: same reason as `session_modes`, and subject to the same rule: only expose an option
+    #: that changes what a turn does.
+    session_config_options: tuple[Any, ...]
+
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 
 
@@ -413,8 +420,10 @@ class IdleTurnExecutor:
     #: It reads nothing at all, so it promises nothing. An agent wired with only this
     #: advertises no prompt capabilities, which is the accurate statement.
     supported_prompt_blocks: frozenset[str] = frozenset()
-    #: It does nothing, so there is no mode in which it does something different.
+    #: It does nothing, so there is no mode in which it does something different, and
+    #: nothing to configure about the nothing.
     session_modes: SessionModeState | None = None
+    session_config_options: tuple[Any, ...] = ()
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         logger.warning(

@@ -116,7 +116,14 @@ SDK itself refuses to keep, so `PythonAcpAgent(unstable=...)` mirrors the connec
 flag and `capabilities.build_agent_capabilities(unstable=...)` withholds those three rows
 when it is off. Both transports pass `True`.
 
-## Mode changes go out through one door
+## Every routed method has a body
+
+`pyacp-fln.3` was the last. Nothing in this class answers `method_not_found` any more —
+the only `-32601` a client can get is the router's, for a name the SDK does not route at
+all, or `ext_method`'s for an unknown extension. `_not_implemented` was deleted with its
+last caller.
+
+## Mode and config changes go out through one door
 
 `announce_mode` is the only thing that emits `current_mode_update`, and
 `set_session_mode` calls it rather than emitting inline. The notification goes out even
@@ -126,9 +133,18 @@ executor deciding it must drop out of `auto-approve`, say — should be indistin
 on the wire from a client-driven one. Nothing internal changes a mode today; the door
 exists so that when something does, it does not invent a second way to say so.
 
-Modes themselves come from the **executor** (`TurnExecutor.session_modes`), the only
-thing that can act on one — the same arrangement as `promptCapabilities`. Each session
-gets a deep copy, because `set_mode` mutates in place.
+`announce_config_options` is its twin, for the same reasons.
+
+Modes and config options both come from the **executor** (`TurnExecutor.session_modes`,
+`session_config_options`), the only thing that can act on either — the same arrangement as
+`promptCapabilities`. Each session gets a deep copy, because both `set_mode` and
+`set_config_option` mutate in place.
+
+**`set_config_option` is one implementation for two request shapes.** The SDK
+discriminates `SetSessionConfigOptionBooleanRequest` from its select twin on `type` and
+splats either into the same parameters, so the only difference that arrives is what
+`value` holds — and `Session.set_config_option` is what knows which of the two the named
+option can take. Two methods would mean writing that check twice.
 
 ## Paths are validated here and nowhere else
 
@@ -188,7 +204,7 @@ member.
 | `fork_session` | `session/fork` | **live** *(unstable-gated)* — deep copy under a new id, with its own MCP subprocesses | — |
 | `resume_session` | `session/resume` | **live** *(unstable-gated)* — reattaches; deliberately does **not** replay | — |
 | `set_session_mode` | `session/set_mode` | **live** — switches the mode and emits `current_mode_update` | — |
-| `set_config_option` | `session/set_config_option` | `-32601` | `pyacp-fln.3` |
+| `set_config_option` | `session/set_config_option` | **live** — one implementation for both request shapes; emits `config_option_update` | — |
 
 `_not_implemented` returns exactly what the router produces for an absent attribute, so
 a later phase changes a body and nothing else; the wire behaviour before it does is

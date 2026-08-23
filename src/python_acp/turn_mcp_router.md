@@ -172,6 +172,27 @@ something went wrong. So the status marks the tool-call *activity* as concluded 
 other signals say nothing ran: the content says so in words, and **`rawOutput` is
 absent** — a real completion always carries the server's result.
 
+## Config options
+
+Two, one of each variant. The SDK discriminates the request on `type`, so an
+implementation that only ever saw booleans would not have exercised the other branch —
+and the same rule as the modes applies: only expose an option that changes what a turn
+*does*.
+
+| Option | Type | Default | Effect |
+|---|---|---|---|
+| `announce-tools` | boolean | `true` | Whether to list the session's MCP tools at the start of every turn. Off skips the `tools/list` behind it, which is the point |
+| `on-tool-failure` | select | `continue` | `continue` runs the remaining calls; `stop` ends the turn at the failed one |
+
+Declared on the executor and deep-copied per session, exactly as the modes are, and for
+the same two reasons.
+
+`stop` leaves the remaining plan entries `pending`, which is what says *where* the turn
+stopped. ACP has no `stopReason` for "a tool failed" — `end_turn` is what a turn that
+ended reports, and a `refusal` would claim nothing ran.
+
+A session whose executor exposes no options takes every default.
+
 ## Permission
 
 **Every tool call is consequential**, so every one is asked about. That is not caution
@@ -280,6 +301,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |
 | `SESSION_MODES` | The three modes, and `EXECUTE` / `DRY_RUN` / `AUTO_APPROVE` for their ids |
+| `SESSION_CONFIG_OPTIONS` | The two config options, and `ANNOUNCE_TOOLS` / `ON_TOOL_FAILURE` |
 | `McpToolRouterExecutor.supported_prompt_blocks` | `{"text"}` — what `promptCapabilities` is derived from |
 
 ## What later beads own

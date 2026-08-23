@@ -96,7 +96,8 @@ nothing else**, and all diagnostics go to stderr.
 
 The agent serves `initialize`, the full session lifecycle (`new`, `prompt`, `cancel`,
 `load`, `list`, `fork`, `resume`, `close`), and refuses `authenticate`.
-`session/set_config_option` returns `-32601` until Phase 5.
+**Every routed ACP method is implemented** — nothing answers `-32601` any more except a
+method the SDK does not route at all.
 See [agent.py](src/python_acp/agent.md) for the per-method state and
 [transport_stdio.py](src/python_acp/transport_stdio.md) for the binding.
 
@@ -198,6 +199,18 @@ changes what a turn does:
 
 A change is announced with a `current_mode_update` notification, including when the
 client is the one that asked — so a second client on the same session stays in step.
+
+### Session config options
+
+`session/set_config_option` handles both the boolean and select request shapes:
+
+| Option | Type | Default | Effect |
+|---|---|---|---|
+| `announce-tools` | boolean | `true` | List the session's MCP tools each turn. Off also skips the `tools/list` behind it |
+| `on-tool-failure` | select | `continue` | `continue` runs the remaining calls; `stop` ends the turn at the failed one |
+
+A change is announced with `config_option_update`, carrying **every** option rather than
+the changed one — which is what a client re-rendering a settings panel wants.
 
 **Every tool call asks the client for permission first**, via
 `session/request_permission`. MCP `2024-11-05` has no tool annotations, so there is no way

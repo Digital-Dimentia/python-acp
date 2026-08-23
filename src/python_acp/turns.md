@@ -13,6 +13,7 @@ for, satisfied once.
 class TurnExecutor(Protocol):
     supported_prompt_blocks: frozenset[str]
     session_modes: SessionModeState | None
+    session_config_options: tuple[Any, ...]
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 ```
 
@@ -37,6 +38,9 @@ per-executor promise expressible at all.
 means something to the executor that acts on it, so nothing else can say what modes
 exist. `None` is not "no opinion" — `Session.set_mode` refuses a session that advertises
 no modes, so an executor without them cannot have one imposed.
+
+`session_config_options` is declared the same way and for the same reason, and is subject
+to the same rule: only expose an option that changes what a turn does.
 
 ## What a turn is handed
 
@@ -115,7 +119,7 @@ running MCP call — is `pyacp-hnk.5`'s. The type can already express all five.
 
 | Symbol | Purpose |
 |---|---|
-| `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks` and `session_modes` |
+| `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks`, `session_modes`, and `session_config_options` |
 | `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
 | `TurnResult` | `stop_reason` plus optional `usage`; `TurnResult.ended()` for the common case |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
@@ -138,8 +142,8 @@ structural reason).
 
 | Disposition | Variants |
 |---|---|
-| **emitted** | `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, `ToolCallProgress`, `AgentPlanUpdate`, `AvailableCommandsUpdate`, `CurrentModeUpdate` |
-| **deferred** | `ConfigOptionUpdate` (`pyacp-fln.3`) — nothing offers config options yet |
+| **emitted** | `UserMessageChunk`, `AgentMessageChunk`, `ToolCallStart`, `ToolCallProgress`, `AgentPlanUpdate`, `AvailableCommandsUpdate`, `CurrentModeUpdate`, `ConfigOptionUpdate` |
+| **deferred** | *(none — Phase 5 finished the last two)* |
 | **declined** | `AgentThoughtChunk`, `UsageUpdate` — no LLM, so no reasoning trace and no tokens; `AgentPlanContentUpdate`, `AgentPlanRemovedUpdate` — the plan is complete before the first tool runs and no step is ever withdrawn; `SessionInfoUpdate` — nothing mutates a session's title or cwd after creation, by design |
 
 `tests/test_turns.py::test_every_variant_the_sdk_defines_has_a_disposition` walks the

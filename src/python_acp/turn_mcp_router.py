@@ -27,6 +27,8 @@ module a client codes against:
   guessing which of two servers a client meant is the kind of help nobody wants.
 * `read` and `write` — optional, and both go through the *client's* filesystem methods.
   See "Files move through the client" below.
+* `run` — optional, and goes through the *client's* terminals. See "Commands run on the
+  client's machine" below.
 
 Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
 are arbitrary and may contain a slash, so a separator would be ambiguous exactly where
@@ -91,6 +93,32 @@ anything: the client does. The lever does not exist on this side of the wire. Se
 resolved path narrows the window — the client is not asked to re-walk the links we already
 walked — and that is the whole of what this module can do about it.
 
+## Commands run on the client's machine, and are always given back
+
+`terminal/*` is the same arrangement as `fs/*`: five **client** methods an agent calls and
+never serves. A third optional key uses them:
+
+```json
+{"tool": "summarise",
+ "run": {"log": {"command": "git", "args": ["log", "--oneline", "-5"]}}}
+```
+
+`run` maps an **argument name** to a command, exactly as `read` maps one to a file: the
+command's captured output becomes that argument's value before the tool runs. An argument
+named twice — in `arguments`, in `read`, or in another `run` — is refused, for the same
+reason two sources for one value always are.
+
+Four of the five methods are used on the ordinary path (`create` → `wait_for_exit` →
+`output` → `release`) and `kill` is used on the cancelled one. **A created terminal is
+released on every path out of `_capture`**, including the one where the turn is torn out
+mid-command: that release runs under `asyncio.shield`, because a cancellation is already
+in flight and unshielded cleanup would be cancelled before it could send anything.
+
+A command that exits non-zero, or dies on a signal, means the tool is **not called** —
+the same asymmetry as a failed read, and for the same reason: its argument would have to
+be invented. `terminals.py` owns the tracking, the `outputByteLimit` default, and what
+happens to a terminal when the client disconnects.
+
 ## Gates are read twice, deliberately
 
 A client that never advertised `fs.readTextFile` is not a bug, ours or theirs. So the
@@ -115,10 +143,12 @@ Same rule as `isError`, one layer out. A client that answers `-32603` to
 client's own words in the tool call's content, and the remaining invocations still run.
 The turn ends `end_turn`; `on-tool-failure: stop` still stops it.
 
-Two asymmetries worth stating:
+Three asymmetries worth stating:
 
 * **A read failure means the tool never runs.** Its argument is missing, and calling it
   with a placeholder would be inventing input.
+* **A command that fails means the tool never runs**, for the same reason. Its terminal is
+  still released, and the failure names the exit status.
 * **A write is skipped when the tool failed**, and when the result carries no text
   content. Writing a tool's error message — or truncating a file to nothing because the
   tool answered with an image — is worse than not writing, and the update says which
@@ -127,6 +157,7 @@ Two asymmetries worth stating:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -147,6 +178,7 @@ from acp.helpers import (
 )
 from acp.schema import (
     AvailableCommand,
+    EnvVariable,
     PermissionOption,
     SessionConfigOptionBoolean,
     SessionConfigOptionSelect,
@@ -162,6 +194,7 @@ from python_acp.mcp_content import to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.paths import PathConstraintError, require_contained
+from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turns import Gate, TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
@@ -183,13 +216,17 @@ class _TurnCancelled(Exception):
     """
 
 
-class _FileCallFailed(Exception):
-    """A client's `fs/*` method did not answer.
+class _ClientCallFailed(Exception):
+    """A client method this invocation depended on did not answer usefully.
+
+    Covers both directions the client is asked to work in: an `fs/*` call that failed,
+    and a `terminal/*` command that could not be started or exited non-zero.
 
     Internal to this module, like `_TurnCancelled`: `_run` turns it into a failed tool
     call rather than letting it end the turn. Deliberately **not** a `RequestError` and
-    deliberately not raised past `_run` — a client that cannot read one file has not made
-    the turn unanswerable, and the remaining invocations still have work to do.
+    deliberately not raised past `_run` — a client that cannot read one file, or a command
+    that failed, has not made the turn unanswerable, and the remaining invocations still
+    have work to do.
     """
 
 
@@ -246,6 +283,32 @@ class FileWrite:
 
 
 @dataclass(frozen=True)
+class CommandRun:
+    """One command to run in a client terminal, into one tool argument.
+
+    The mirror of `FileRead`: a source for an argument that this process cannot produce
+    itself. `env` is a tuple of pairs rather than a dict so the record stays hashable and
+    frozen like every other parsed thing here.
+
+    `output_byte_limit` is not optional. It defaults to `terminals.DEFAULT_OUTPUT_BYTE_LIMIT`
+    and a client may name a smaller or larger one, but never *no* limit — see
+    `terminals.md` for what unbounded output does to the request this output ends up in.
+    """
+
+    argument: str
+    command: str
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    cwd: str | None = None
+    output_byte_limit: int = DEFAULT_OUTPUT_BYTE_LIMIT
+
+    @property
+    def display(self) -> str:
+        """The command as a client would read it back, for notes and refusals."""
+        return " ".join((self.command, *self.args))
+
+
+@dataclass(frozen=True)
 class Invocation:
     """One parsed tool call, before anything has run."""
 
@@ -254,6 +317,7 @@ class Invocation:
     server: str | None = None
     reads: tuple[FileRead, ...] = ()
     write: FileWrite | None = None
+    runs: tuple[CommandRun, ...] = ()
 
     @property
     def title(self) -> str:
@@ -410,8 +474,15 @@ class McpToolRouterExecutor:
     session_modes: SessionModeState | None = SESSION_MODES
     session_config_options: tuple[Any, ...] = SESSION_CONFIG_OPTIONS
 
-    def __init__(self, backends: McpBackendRegistry) -> None:
+    def __init__(
+        self, backends: McpBackendRegistry, terminals: TerminalRegistry | None = None
+    ) -> None:
         self._backends = backends
+        # Defaulted rather than required, unlike `backends`. A private registry still
+        # tracks and releases everything a turn creates; what it cannot do is let
+        # `session/close` reach a terminal from outside the turn, which is why `agent.py`
+        # passes the process-wide one. See `terminals.md`.
+        self._terminals = terminals if terminals is not None else TerminalRegistry()
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         backends = self._backends.backends(context.session_id)
@@ -576,6 +647,7 @@ class McpToolRouterExecutor:
             server=self._server(index, payload, backends),
             reads=reads,
             write=self._write(context, index, payload),
+            runs=self._runs(context, index, payload, arguments, reads),
         )
 
     @staticmethod
@@ -628,6 +700,83 @@ class McpToolRouterExecutor:
                 )
             )
         return tuple(reads)
+
+    @staticmethod
+    def _runs(
+        context: TurnContext,
+        index: int,
+        payload: dict[str, Any],
+        arguments: dict[str, Any],
+        reads: tuple[FileRead, ...],
+    ) -> tuple[CommandRun, ...]:
+        """Parse `run`. Same gate treatment as `_reads`, and the same reason.
+
+        `terminal` is **one** capability covering all five methods, so one `allows` here
+        decides the whole family — there is no per-method granularity to check.
+
+        The argument names already claimed by `arguments` and `read` are passed in rather
+        than re-derived, because "two sources for one value" has to mean *any* two
+        sources: a command and a file competing for one argument is the same refusal as a
+        file and a literal.
+        """
+        declared = payload.get("run")
+        if declared is None:
+            return ()
+        if not isinstance(declared, dict):
+            raise PromptConventionError(
+                f"Prompt block {index}: 'run' must be an object mapping an argument name "
+                "to a command."
+            )
+        if declared and not context.allows(Gate.TERMINAL):
+            raise UnsupportedByClientError(
+                f"Prompt block {index} asks to run a command, but this client did not "
+                "advertise clientCapabilities.terminal, and this agent runs commands only "
+                "through the client."
+            )
+        taken = set(arguments) | {read.argument for read in reads}
+        runs: list[CommandRun] = []
+        for argument, spec in declared.items():
+            if not isinstance(argument, str) or not argument:
+                raise PromptConventionError(
+                    f"Prompt block {index}: every key of 'run' must be a non-empty "
+                    "argument name."
+                )
+            if argument in taken:
+                raise PromptConventionError(
+                    f"Prompt block {index}: {argument!r} is named in 'run' and somewhere "
+                    "else too, which gives it two values; name it once."
+                )
+            taken.add(argument)
+            if not isinstance(spec, dict):
+                raise PromptConventionError(
+                    f"Prompt block {index}: 'run.{argument}' must be an object with a "
+                    "'command'."
+                )
+            command = spec.get("command")
+            if not isinstance(command, str) or not command:
+                raise PromptConventionError(
+                    f"Prompt block {index}: 'run.{argument}.command' must be a non-empty "
+                    "string."
+                )
+            limit = _bounded(index, spec.get("outputByteLimit"), f"run.{argument}.outputByteLimit")
+            runs.append(
+                CommandRun(
+                    argument=argument,
+                    command=command,
+                    args=_strings(index, spec.get("args"), f"run.{argument}.args"),
+                    env=_environment(index, spec.get("env"), f"run.{argument}.env"),
+                    # The session's own cwd when none is named: a command has to start
+                    # somewhere, and the client's process directory is not something this
+                    # side can see. A declared one is contained like every other path.
+                    cwd=(
+                        context.session.cwd
+                        if spec.get("cwd") is None
+                        else _contained(context, index, spec.get("cwd"), f"run.{argument}", "cwd")
+                    ),
+                    output_byte_limit=DEFAULT_OUTPUT_BYTE_LIMIT if limit is None else limit,
+                )
+            )
+        return tuple(runs)
 
     @staticmethod
     def _write(context: TurnContext, index: int, payload: dict[str, Any]) -> FileWrite | None:
@@ -733,12 +882,15 @@ class McpToolRouterExecutor:
             tracker.forget(key)
             return True
 
-        # Reading is asked for *after* permission and before `in_progress`: the client
-        # approving the call is what authorises pulling its files, and a failure here
-        # means the tool never runs, so `in_progress` would have been a lie.
+        # Reading and running are asked for *after* permission and before `in_progress`:
+        # the client approving the call is what authorises pulling its files and starting
+        # its processes, and a failure here means the tool never runs, so `in_progress`
+        # would have been a lie.
+        notes: list[str] = []
         try:
             arguments = await self._read_files(context, invocation)
-        except _FileCallFailed as exc:
+            arguments = await self._run_commands(context, invocation, arguments, notes)
+        except _ClientCallFailed as exc:
             await context.emit(
                 tracker.progress(key, status="failed", content=[tool_content(text_block(str(exc)))])
             )
@@ -754,7 +906,11 @@ class McpToolRouterExecutor:
         # `isError` is the MCP-sanctioned way for a tool to report its own failure on an
         # otherwise successful call. It becomes a status, never an exception.
         failed = bool(result["isError"])
-        content = list(to_tool_call_content(result) or ())
+        # The command notes come first because the commands did: a transcript that reads
+        # in the order things happened is the whole reason they are content and not a log
+        # line.
+        content = [tool_content(text_block(note)) for note in notes]
+        content.extend(to_tool_call_content(result) or ())
         if invocation.write is not None:
             note, wrote = await self._write_file(context, invocation.write, result, failed)
             failed = failed or not wrote
@@ -796,13 +952,13 @@ class McpToolRouterExecutor:
                 )
             except Exception as exc:  # noqa: BLE001 - see the module docstring
                 logger.info("fs/read_text_file for %s failed: %s", read.path, exc)
-                raise _FileCallFailed(
+                raise _ClientCallFailed(
                     f"Reading {read.path} through the client failed ({_why(exc)}), so "
                     f"{invocation.title} was not called."
                 ) from None
             content = getattr(response, "content", None)
             if not isinstance(content, str):
-                raise _FileCallFailed(
+                raise _ClientCallFailed(
                     f"The client answered fs/read_text_file for {read.path} without text "
                     f"content, so {invocation.title} was not called."
                 )
@@ -843,6 +999,106 @@ class McpToolRouterExecutor:
             logger.info("fs/write_text_file for %s failed: %s", write.path, exc)
             return f"Writing {write.path} through the client failed ({_why(exc)}).", False
         return f"Wrote {len(text)} characters to {write.path}.", True
+
+    # ------------------------------------------------------------------
+    # The client's terminals
+    # ------------------------------------------------------------------
+
+    async def _run_commands(
+        self,
+        context: TurnContext,
+        invocation: Invocation,
+        arguments: dict[str, Any],
+        notes: list[str],
+    ) -> dict[str, Any]:
+        """Fill this call's command-backed arguments by running them on the client.
+
+        `require` rather than `allows`, exactly as `_read_files` does and for the same
+        reason: `_runs` already refused the turn for a client with no `terminal`, so a
+        shut gate here is our bug. One gate covers all five methods.
+
+        `notes` is filled rather than returned so that what ran is reported even when the
+        *tool* then fails — the command really did run on someone's machine, and a
+        transcript that omitted it would be describing a different turn.
+        """
+        if not invocation.runs:
+            return arguments
+        context.require(Gate.TERMINAL)
+        arguments = dict(arguments)
+        for run in invocation.runs:
+            output, note = await self._capture(context, invocation, run)
+            arguments[run.argument] = output
+            notes.append(note)
+        return arguments
+
+    async def _capture(
+        self, context: TurnContext, invocation: Invocation, run: CommandRun
+    ) -> tuple[str, str]:
+        """Run one command to completion and return its output and a note about it.
+
+        The lifetime is the point of this method. A terminal exists on the *client* until
+        `terminal/release` arrives, so every exit from here releases: the ordinary one,
+        the failed one, and the cancelled one.
+
+        Cancellation is the case worth reading. `session/cancel` cancels the turn task
+        while `wait_for_terminal_exit` is pending, so the command is still running and
+        nobody is left to read its output — it is killed and released rather than left
+        burning the client's machine. That cleanup runs under `asyncio.shield` because the
+        cancellation is already in flight: an unshielded `await` here would be cancelled
+        at its first suspension point and the release would never reach the wire. The
+        `CancelledError` is re-raised, because a turn that swallowed it would report
+        `end_turn` for a turn the client stopped.
+        """
+        try:
+            terminal = await self._terminals.create(
+                context,
+                command=run.command,
+                args=run.args,
+                env=[EnvVariable(name=name, value=value) for name, value in run.env],
+                cwd=run.cwd,
+                output_byte_limit=run.output_byte_limit,
+            )
+        except Exception as exc:  # noqa: BLE001 - see the module docstring
+            logger.info("terminal/create for %s failed: %s", run.display, exc)
+            raise _ClientCallFailed(
+                f"Starting {run.display} through the client failed ({_why(exc)}), so "
+                f"{invocation.title} was not called."
+            ) from None
+
+        try:
+            try:
+                exit_status = await terminal.wait_for_exit()
+                captured = await terminal.output()
+            except asyncio.CancelledError:
+                await asyncio.shield(terminal.abandon())
+                raise
+            except Exception as exc:  # noqa: BLE001 - see the module docstring
+                logger.info("Reading terminal %s failed: %s", terminal.terminal_id, exc)
+                raise _ClientCallFailed(
+                    f"Running {run.display} through the client failed ({_why(exc)}), so "
+                    f"{invocation.title} was not called."
+                ) from None
+        finally:
+            # A no-op after `abandon`, and it never raises — see `Terminal.release`.
+            await terminal.release()
+
+        if exit_status.signal is not None or (exit_status.exit_code or 0) != 0:
+            # An argument built from a failed command's output would be inventing input,
+            # which is the same call the failed-read path makes.
+            raise _ClientCallFailed(
+                f"{run.display} {_exit_note(exit_status)}, so {invocation.title} was not "
+                "called."
+            )
+        note = (
+            f"Ran {run.display} in a client terminal: {len(captured.output)} characters "
+            f"into {run.argument!r}."
+        )
+        if captured.truncated:
+            note += (
+                f" The client truncated it to the last {run.output_byte_limit} bytes, so "
+                "the beginning of the output is not in that argument."
+            )
+        return captured.output, note
 
     async def _permitted(
         self,
@@ -1024,20 +1280,42 @@ def _why(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _exit_note(status: Any) -> str:
+    """How a command ended, in words, for a refusal a person has to read.
+
+    `exitCode` and `signal` are both optional in the schema — a process killed by a
+    signal has no exit code — so the three cases are named rather than formatted into one
+    template that would print `None` at somebody.
+    """
+    if status.signal is not None:
+        return f"was killed by {status.signal}"
+    if status.exit_code is None:
+        return "ended without an exit status"
+    return f"exited with status {status.exit_code}"
+
+
 def _files_note(invocation: Invocation) -> str:
-    """What a dry run says about the files it did not touch.
+    """What a dry run says about the files and commands it did not touch.
 
     A preview that named the tool and its arguments but stayed silent about the file it
-    was about to overwrite would be a preview of the wrong thing.
+    was about to overwrite — or the command it was about to run — would be a preview of
+    the wrong thing.
     """
     parts = [f"{read.path} -> {read.argument!r}" for read in invocation.reads]
     note = f" Would read {', '.join(parts)}." if parts else ""
+    commands = [f"{run.display} -> {run.argument!r}" for run in invocation.runs]
+    if commands:
+        # A preview that stayed quiet about the command it was about to run on the
+        # client's machine would be a preview of the wrong thing, exactly as with files.
+        note += f" Would run {', '.join(commands)}."
     if invocation.write is not None:
         note += f" Would write its output to {invocation.write.path}."
     return note
 
 
-def _contained(context: TurnContext, index: int, path: Any, label: str) -> str:
+def _contained(
+    context: TurnContext, index: int, path: Any, label: str, field: str = "path"
+) -> str:
     """One declared path, checked against the session's roots, resolved.
 
     `paths.py` owns the rule (`pyacp-3rw.4`); this only adapts its refusal into a prompt
@@ -1049,12 +1327,47 @@ def _contained(context: TurnContext, index: int, path: Any, label: str) -> str:
     """
     if not isinstance(path, str) or not path:
         raise PromptConventionError(
-            f"Prompt block {index}: '{label}.path' must be a non-empty string."
+            f"Prompt block {index}: '{label}.{field}' must be a non-empty string."
         )
     try:
-        return str(require_contained(path, context.session.roots, f"{label}.path"))
+        return str(require_contained(path, context.session.roots, f"{label}.{field}"))
     except PathConstraintError as exc:
         raise PromptConventionError(f"Prompt block {index}: {exc}") from None
+
+
+def _strings(index: int, value: Any, label: str) -> tuple[str, ...]:
+    """A command's arguments: absent, or a list of strings.
+
+    Not coerced. `["-n", 5]` would reach the client as a number in a field the schema
+    types as a string, and refusing here says which block and which field instead of
+    letting pydantic say neither.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}' must be a list of strings."
+        )
+    return tuple(value)
+
+
+def _environment(index: int, value: Any, label: str) -> tuple[tuple[str, str], ...]:
+    """A command's environment: absent, or an object of string to string.
+
+    An object rather than the schema's `[{name, value}]` list, because that is the shape a
+    client writing JSON by hand reaches for and duplicate names cannot happen in it.
+    `terminals.py` turns it back into `EnvVariable`s at the call.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or not all(
+        isinstance(name, str) and name and isinstance(item, str) for name, item in value.items()
+    ):
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}' must be an object mapping variable names to "
+            "string values."
+        )
+    return tuple(value.items())
 
 
 def _bounded(index: int, value: Any, label: str) -> int | None:

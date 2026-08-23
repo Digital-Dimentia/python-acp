@@ -97,9 +97,15 @@ for a client to be, and `require` would tell it that *we* were broken.
 | `context.allows(gate)` | deciding, **early**, what to do about a capability the client does not have | whatever the executor's own contract says: `turn_mcp_router.py` refuses the turn before anything runs |
 | `context.require(gate)` | the call site itself | `UngatedClientCallError` → `-32603`, because by then a shut gate means the earlier check was missing |
 
-[turn_mcp_router.py](turn_mcp_router.md) does both for `fs/*`: `allows` while parsing the
-prompt, `require` immediately before the client call. The first is the client's answer;
-the second is an assertion about us.
+[turn_mcp_router.py](turn_mcp_router.md) does both for `fs/*` and for `terminal/*`:
+`allows` while parsing the prompt, `require` immediately before the client call. The first
+is the client's answer; the second is an assertion about us.
+
+`terminal/*` puts the split under load, because the calls outlive the parse: a terminal
+created inside a turn has to be released from cleanup paths where a raised gate error
+would be useless. So [terminals.py](terminals.md) checks the gate **before** any state
+moves in `release`, where it cannot fire for a handle that exists, and swallows only the
+client call itself.
 
 ## Cancellation is not an error
 

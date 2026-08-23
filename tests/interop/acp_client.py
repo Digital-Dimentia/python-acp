@@ -16,6 +16,11 @@ It **does** serve `fs/read_text_file` and `fs/write_text_file`, and advertises t
 than only in-process. The files live in a temporary directory that is also the session's
 `cwd`, so containment is exercised on real paths.
 
+It also serves all five `terminal/*` methods with **real subprocesses** (`pyacp-8bv.3`).
+That is the only place `outputByteLimit` can be observed as it actually crosses the wire:
+an in-process test hands the client a Python keyword argument and would still pass if the
+field were never encoded at all.
+
 Usage:
 
     python tests/interop/acp_client.py <mcp-server-command...>
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -36,26 +42,38 @@ from typing import Any
 from acp import PROTOCOL_VERSION, RequestError, connect_to_agent, text_block
 from acp.schema import (
     ClientCapabilities,
+    CreateTerminalResponse,
     FileSystemCapabilities,
     Implementation,
     PlanCapabilities,
     ReadTextFileResponse,
+    TerminalOutputResponse,
+    WaitForTerminalExitResponse,
 )
 
 AGENT_ARGV = ["-m", "python_acp.cli", "--transport", "stdio"]
 
 
 class RefusingClient:
-    """Accepts updates and serves `fs/*`; refuses every other optional method."""
+    """Accepts updates and serves `fs/*` and `terminal/*`; refuses everything else."""
 
     def __init__(self) -> None:
         self.updates: list[str] = []
+        self.texts: list[str] = []
         self.permission_requests = 0
         self.reads: list[tuple[str, int | None, int | None]] = []
         self.writes: list[str] = []
+        self.terminal_limits: list[int | None] = []
+        self.released_terminals: list[str] = []
+        self.terminals: dict[str, Any] = {}
+        self.captured: dict[str, str] = {}
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self.updates.append(update.session_update)
+        for item in getattr(update, "content", None) or []:
+            text = getattr(getattr(item, "content", None), "text", None)
+            if isinstance(text, str):
+                self.texts.append(text)
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         self.permission_requests += 1
@@ -76,6 +94,60 @@ class RefusingClient:
     async def write_text_file(self, session_id, path, content, **kwargs):
         self.writes.append(path)
         Path(path).write_text(content)
+        return None
+
+    async def create_terminal(
+        self,
+        session_id,
+        command,
+        args=None,
+        env=None,
+        cwd=None,
+        output_byte_limit=None,
+        **kwargs,
+    ):
+        """Really start the process, and record the limit that arrived.
+
+        The recording is the assertion: `outputByteLimit` is an optional field the agent
+        promises never to omit, and this is the only vantage point from which "it was on
+        the wire" can be distinguished from "the agent meant to send it".
+        """
+        self.terminal_limits.append(output_byte_limit)
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *(args or []),
+            cwd=cwd,
+            env={**os.environ, **{v.name: v.value for v in env or []}},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        terminal_id = f"terminal-{len(self.terminal_limits)}"
+        self.terminals[terminal_id] = process
+        return CreateTerminalResponse(terminalId=terminal_id)
+
+    async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
+        process = self.terminals[terminal_id]
+        captured, _ = await process.communicate()
+        self.captured[terminal_id] = captured.decode(errors="replace")
+        return WaitForTerminalExitResponse(exitCode=process.returncode)
+
+    async def terminal_output(self, session_id, terminal_id, **kwargs):
+        return TerminalOutputResponse(
+            output=self.captured.get(terminal_id, ""), truncated=False
+        )
+
+    async def kill_terminal(self, session_id, terminal_id, **kwargs):
+        process = self.terminals.get(terminal_id)
+        if process is not None and process.returncode is None:
+            process.kill()
+        return None
+
+    async def release_terminal(self, session_id, terminal_id, **kwargs):
+        self.released_terminals.append(terminal_id)
+        process = self.terminals.pop(terminal_id, None)
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
         return None
 
     def on_connect(self, conn: Any) -> None:
@@ -121,6 +193,7 @@ async def main(argv: list[str]) -> int:
             client_capabilities=ClientCapabilities(
                 plan=PlanCapabilities(),
                 fs=FileSystemCapabilities(readTextFile=True, writeTextFile=True),
+                terminal=True,
             ),
             client_info=Implementation(name="python-acp-interop", version="0"),
         )
@@ -184,6 +257,33 @@ async def main(argv: list[str]) -> int:
             ],
         )
         report["outsideStopReason"] = outside.stop_reason
+
+        # A command in the client's own terminal, and back out through the tool. The
+        # agent starts no process of its own; every one of the five terminal methods is
+        # served here.
+        ran = await conn.prompt(
+            session_id=session.session_id,
+            prompt=[
+                text_block(
+                    json.dumps(
+                        {
+                            "tool": "echo",
+                            "run": {
+                                "text": {
+                                    "command": sys.executable,
+                                    "args": ["-c", "print('from a client terminal')"],
+                                }
+                            },
+                        }
+                    )
+                )
+            ],
+        )
+        report["terminalStopReason"] = ran.stop_reason
+        report["terminalLimits"] = client.terminal_limits
+        report["terminalsReleased"] = client.released_terminals
+        report["terminalsLeftOpen"] = sorted(client.terminals)
+        report["texts"] = client.texts
 
         refused = await conn.prompt(
             session_id=session.session_id, prompt=[text_block("not an invocation")]

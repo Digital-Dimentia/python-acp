@@ -83,6 +83,19 @@ one registry and hands it here;
 The MCP backend *is* shared — one subprocess bound at startup from `--mcp-command` — and
 stays so until the Phase 2 per-session backend registry.
 
+## A disconnect forgets terminals; it releases nothing
+
+When `run_agent` returns — which is the same event as the client hanging up —
+`serve_websocket` hands the connection's `Client` facade to
+`TerminalRegistry.forget_client`. That **drops tracking without releasing anything**, and
+the asymmetry with the session registry is deliberate on both sides: sessions survive a
+disconnect because another connection may resume them, and terminals cannot be released
+after one because `terminal/release` is a request and the connection that would carry it
+has just gone. The handles are freed so a long-lived server does not accumulate a set per
+connection; the terminals themselves are the departed client's to reap.
+[terminals.md](terminals.md) states the whole rule, including the criterion it declines to
+pretend to meet.
+
 `use_unstable_protocol` defaults to **True**, matching `transport_stdio.py`. With it off,
 `session/close`, `session/fork`, and `session/resume` answer `method_not_found` without
 the router ever calling the agent; the two transports must agree, or the same client gets

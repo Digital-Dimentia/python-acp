@@ -148,8 +148,13 @@ decides whether to cancel and retry.
 - **MCP backends.** A session's backends are keyed by session id in
   [mcp_registry.py](mcp_registry.md). The registry is the only thing that knows when a
   session ends, so it takes an `on_close` hook — that is the seam, and the only coupling.
-  `cli.py` wires it (`SessionRegistry(on_close=backends.close)`); a deployment that
-  forgot to would leak one subprocess per session.
+  `cli.py` wires it; a deployment that forgot to would leak one subprocess per session.
+- **Client terminals.** Same seam, same hook: [terminals.py](terminals.md) keys them by
+  session id and `cli.py` composes its `close` into the same `on_close`. A session closed
+  while a command is still running releases the terminal rather than leaving a process on
+  the client's machine that nothing can name. A *disconnect* is the case that seam cannot
+  serve — sessions survive one on purpose, and the terminals of the client that left
+  cannot be released at all.
 - **`stopReason`.** `cancel_turn()` delivers the cancellation; [agent.py](agent.md)
   reports it, answering `cancelled` both when the task ends cancelled and when
   `Session.cancellation` is set but the executor returned anyway. `cancel_turn` sets `Session.cancellation` **before** cancelling the

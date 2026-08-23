@@ -11,6 +11,7 @@ from python_acp.agent import PythonAcpAgent
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
+from python_acp.terminals import TerminalRegistry
 from python_acp.transport_stdio import run_stdio
 from python_acp.transport_ws import WebSocketAgentServer
 
@@ -96,11 +97,31 @@ async def _run(args: argparse.Namespace) -> None:
         # it closes. `on_close` is the seam between them (decision B6a) and wiring it
         # anywhere else would leave subprocesses behind.
         backends = McpBackendRegistry()
-        sessions = SessionRegistry(on_close=backends.close)
+        terminals = TerminalRegistry()
+
+        async def release_session(session_id: str) -> None:
+            """Everything bound to one session's lifetime, in the one hook there is.
+
+            `SessionRegistry` takes a single `on_close`, and both registries need it, so
+            the composition lives here for the same reason the wiring does: this is the
+            only place that constructs all three.
+
+            Terminals go first. They are requests over a live connection and the client
+            is waiting on `session/close`; MCP teardown is local subprocess work that
+            nobody is watching.
+            """
+            await terminals.close(session_id)
+            await backends.close(session_id)
+
+        sessions = SessionRegistry(on_close=release_session)
 
         try:
             if args.transport == "stdio":
-                await run_stdio(PythonAcpAgent(sessions, backends=backends))
+                # No disconnect hook here on purpose: over stdio the client going away
+                # *is* this process ending, so the shutdown path below is the same event.
+                await run_stdio(
+                    PythonAcpAgent(sessions, backends=backends, terminals=terminals)
+                )
                 return
 
             server = WebSocketAgentServer(
@@ -110,6 +131,7 @@ async def _run(args: argparse.Namespace) -> None:
                 debug=args.debug,
                 sessions=sessions,
                 backends=backends,
+                terminals=terminals,
             )
             await server.start()
             # Never print(): under --transport stdio that corrupts the wire, and one
@@ -117,7 +139,8 @@ async def _run(args: argparse.Namespace) -> None:
             logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
             await server.serve_forever()
         finally:
-            # Sessions the client never closed still own subprocesses.
+            # Sessions the client never closed still own subprocesses and, if a turn was
+            # cut short, terminals. `close_all` fires the hook above for each of them.
             await sessions.close_all()
 
 

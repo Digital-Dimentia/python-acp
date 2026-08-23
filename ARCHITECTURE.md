@@ -317,6 +317,60 @@ sequenceDiagram
 - **A client that errors on `fs/*` fails that call, not the turn** — the same rule as a
   tool reporting `isError`, one layer out.
 
+### Running a command in the client's terminal
+
+The same direction as the file calls, with one thing the file calls do not have: a
+**resource that outlives the request**. `terminal/create` answers with an id and the
+process keeps running on the client's machine until `terminal/release` arrives, so every
+path out of the turn has to give it back.
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant A as agent.py
+    participant X as turn_mcp_router.py
+    participant T as terminals.py
+    participant M as MCP server
+
+    C->>A: session/prompt (run: {arg: {command, args}})
+    A->>X: execute(context, prompt)
+    Note over X: context.allows(Gate.TERMINAL) — a client with no terminals is refused here
+    X->>C: session/request_permission
+    C-->>X: selected option
+    X->>T: create(context, command, outputByteLimit)
+    T->>C: terminal/create
+    C-->>T: terminalId
+    Note over T: tracked under this session, with the client that owns it
+    alt the command finishes
+        T->>C: terminal/wait_for_exit
+        C-->>T: exitCode
+        T->>C: terminal/output
+        C-->>T: output, truncated
+        T->>C: terminal/release
+        X->>M: tools/call (output substituted into an argument)
+        M-->>X: result
+        A-->>C: PromptResponse {stopReason: end_turn}
+    else session/cancel arrives first
+        T->>C: terminal/kill
+        T->>C: terminal/release
+        Note over T: under asyncio.shield — the cancellation is already in flight
+        A-->>C: PromptResponse {stopReason: cancelled}
+    end
+```
+
+- **The terminal is released on every path**: completion, a command that failed, a tool
+  that failed afterwards, cancellation, and `session/close` reaching a turn that is still
+  running. [terminals.md](src/python_acp/terminals.md) has the table of which test covers
+  which.
+- **`outputByteLimit` is never omitted.** Unbounded output is a failure mode with no error
+  message attached, and the captured bytes have to fit through the MCP request they end up
+  in.
+- **A disconnect releases nothing** — it *cannot*. The terminal is the client's and the
+  connection that would carry the release has gone, so the handles are dropped and the
+  terminals are the departed client's to reap.
+- **A command that exits non-zero means the tool is never called**, the same asymmetry as
+  a failed read: its argument would have to be invented.
+
 ## Module Documentation
 
 - [ACP agent module](src/python_acp/agent.md)
@@ -325,6 +379,7 @@ sequenceDiagram
 - [Deprecated WebSocket surface module](src/python_acp/legacy_ws.md)
 - [Path constraints module](src/python_acp/paths.md)
 - [Session registry module](src/python_acp/sessions.md)
+- [Client terminal registry module](src/python_acp/terminals.md)
 - [Turn executor seam module](src/python_acp/turns.md)
 - [MCP tool-router executor module](src/python_acp/turn_mcp_router.md)
 - [CLI module](src/python_acp/cli.md)

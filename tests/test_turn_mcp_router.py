@@ -39,6 +39,7 @@ from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.turn_mcp_router import (
     DECLINED_BLOCKS,
+    SESSION_CONFIG_OPTIONS,
     SESSION_MODES,
     PERMISSION_OPTIONS,
     McpToolRouterExecutor,
@@ -835,3 +836,82 @@ async def test_switching_mid_session_takes_effect_on_the_next_turn() -> None:
     assert [u.status for u in harness.of("tool_call_update")] == [
         "in_progress", "completed", "completed",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Config options (pyacp-fln.3)
+# ---------------------------------------------------------------------------
+
+
+def configured(harness: Harness, config_id: str, value: Any) -> None:
+    harness.session.config_options = tuple(
+        o.model_copy(deep=True) for o in SESSION_CONFIG_OPTIONS
+    )
+    harness.session.set_config_option(config_id, value)
+
+
+def test_one_option_of_each_variant_is_exposed() -> None:
+    """The SDK discriminates the request on `type`; an implementation that only ever saw
+    booleans would not have exercised the other branch."""
+    by_id = {o.id: o for o in SESSION_CONFIG_OPTIONS}
+
+    assert by_id["announce-tools"].type == "boolean"
+    assert by_id["on-tool-failure"].type == "select"
+    assert all(o.description for o in SESSION_CONFIG_OPTIONS)
+
+
+async def test_turning_off_the_announcement_skips_the_command_list() -> None:
+    """And skips the `tools/list` behind it, which is the point of the option."""
+    async with Harness("tools") as harness:
+        configured(harness, "announce-tools", False)
+        result = await harness.run(block(tool="echo"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("available_commands_update") == []
+    assert harness.of("tool_call")
+
+
+async def test_the_announcement_is_on_by_default() -> None:
+    async with Harness("tools") as harness:
+        configured(harness, "announce-tools", True)
+        await harness.run(block(tool="echo"))
+
+    assert len(harness.of("available_commands_update")) == 1
+
+
+async def test_stopping_on_failure_ends_the_turn_at_the_failed_call() -> None:
+    async with Harness("tools") as harness:
+        configured(harness, "on-tool-failure", "stop")
+        result = await harness.run(block(tool="boom"), block(tool="echo"))
+
+    assert result.stop_reason == "end_turn"
+    assert [u.status for u in harness.of("tool_call_update")] == ["in_progress", "failed"]
+
+
+async def test_stopping_leaves_the_remaining_plan_entries_pending() -> None:
+    """Which is what says *where* it stopped: ACP has no stopReason for "a tool failed",
+    and a refusal would claim nothing ran."""
+    async with Harness("tools", capabilities=accepts_plans()) as harness:
+        configured(harness, "on-tool-failure", "stop")
+        await harness.run(block(tool="boom"), block(tool="echo"))
+
+    assert [e.status for e in harness.of("plan")[-1].entries] == ["failed", "pending"]
+
+
+async def test_continuing_is_the_default() -> None:
+    async with Harness("tools") as harness:
+        configured(harness, "on-tool-failure", "continue")
+        await harness.run(block(tool="boom"), block(tool="echo"))
+
+    assert [u.status for u in harness.of("tool_call_update")] == [
+        "in_progress", "failed", "in_progress", "completed",
+    ]
+
+
+async def test_a_session_with_no_options_takes_the_defaults() -> None:
+    async with Harness("tools") as harness:
+        assert harness.session.config_options == ()
+        await harness.run(block(tool="boom"), block(tool="echo"))
+
+    assert len(harness.of("available_commands_update")) == 1
+    assert [u.status for u in harness.of("tool_call_update")][-1] == "completed"

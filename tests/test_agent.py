@@ -271,22 +271,25 @@ async def test_meta_keys_do_not_break_dispatch() -> None:
     assert result.protocol_version == PROTOCOL_VERSION
 
 
-# Methods with a body. Everything else still answers -32601, and moving a name here is
-# the same commit as implementing it.
-# Only the two Phase 5 methods are left unbuilt.
-IMPLEMENTED = set(ROUTED_REQUESTS) - {"session/set_config_option"}
+async def test_nothing_routed_answers_method_not_found_any_more() -> None:
+    """Every routed method now has a body — `pyacp-fln.3` was the last.
 
-
-@pytest.mark.parametrize("method", [m for m in ROUTED_REQUESTS if m not in IMPLEMENTED])
-async def test_unbuilt_methods_answer_method_not_found(method: str) -> None:
-    """Until its phase lands, a member's wire behaviour matches an absent one."""
+    This replaces the per-method "still unbuilt" test, which had nothing left to
+    parametrize over. A `-32601` from the agent would now mean a member was deleted.
+    """
     router = make_router()
+    unbuilt = []
 
-    with pytest.raises(RequestError) as excinfo:
-        await router(method, PARAMS[method], False)
+    for method, params in PARAMS.items():
+        try:
+            await router(method, params, method in router._notifications)
+        except RequestError as exc:
+            if exc.code == -32601:
+                unbuilt.append(method)
+        except Exception:  # noqa: BLE001 — any other failure is not this test's subject
+            pass
 
-    assert excinfo.value.code == -32601
-    assert excinfo.value.data == {"method": method}
+    assert unbuilt == []
 
 
 def test_unstable_methods_are_only_routed_with_the_flag() -> None:
@@ -491,9 +494,11 @@ async def test_new_session_registers_a_session_and_returns_its_id() -> None:
 
     assert result.session_id in registry
     assert registry.get(result.session_id).cwd == "/work"
-    # Modes come from the executor (pyacp-fln.2); config options still have no source.
+    # Both come from the executor (pyacp-fln.2, pyacp-fln.3).
     assert result.modes.current_mode_id == "execute"
-    assert result.config_options is None
+    assert [option.id for option in result.config_options] == [
+        "announce-tools", "on-tool-failure",
+    ]
 
 
 async def test_new_session_keeps_additional_directories() -> None:
@@ -1137,3 +1142,90 @@ async def test_a_fork_does_not_inherit_a_later_mode_change() -> None:
     await router("session/set_mode", {"sessionId": session_id, "modeId": "auto-approve"}, False)
 
     assert agent.sessions.get(forked.session_id).modes.current_mode_id == "execute"
+
+
+# ---------------------------------------------------------------------------
+# Config options (pyacp-fln.3)
+# ---------------------------------------------------------------------------
+
+
+async def _configurable():
+    return await _lifecycle_agent(executor=McpToolRouterExecutor(McpBackendRegistry()))
+
+
+async def test_a_boolean_option_is_set_and_announced() -> None:
+    agent, router, client, session_id = await _configurable()
+
+    result = await router(
+        "session/set_config_option",
+        {"type": "boolean", "sessionId": session_id, "configId": "announce-tools", "value": False},
+        False,
+    )
+
+    assert agent.sessions.get(session_id).config_option("announce-tools").current_value is False
+    # The response carries EVERY option, which is what the schema asks for and what a
+    # client re-rendering a settings panel wants. It arrives as a dict because this route
+    # is one of the three the SDK registers with `adapt_result=normalize_result`.
+    assert [o["id"] for o in result["configOptions"]] == ["announce-tools", "on-tool-failure"]
+    announced = [u for _s, u in client.updates if u.session_update == "config_option_update"]
+    assert [o.current_value for o in announced[0].config_options] == [False, "continue"]
+
+
+async def test_a_select_option_is_set_by_the_same_implementation() -> None:
+    """One method for both request shapes: the SDK discriminates on `type` and splats
+    either into the same parameters, so only `value` differs by the time it arrives."""
+    agent, router, _client, session_id = await _configurable()
+
+    await router(
+        "session/set_config_option",
+        {"type": "select", "sessionId": session_id, "configId": "on-tool-failure", "value": "stop"},
+        False,
+    )
+
+    assert agent.sessions.get(session_id).config_option("on-tool-failure").current_value == "stop"
+
+
+@pytest.mark.parametrize(
+    ("params", "because"),
+    [
+        ({"type": "boolean", "configId": "nope", "value": True}, "Unknown config option"),
+        ({"type": "boolean", "configId": "on-tool-failure", "value": True}, "is a select"),
+        ({"type": "select", "configId": "announce-tools", "value": "x"}, "is boolean"),
+        ({"type": "select", "configId": "on-tool-failure", "value": "sideways"}, "Unknown value"),
+    ],
+)
+async def test_an_invalid_option_or_value_is_refused(params: dict, because: str) -> None:
+    agent, router, client, session_id = await _configurable()
+
+    with pytest.raises(RequestError) as excinfo:
+        await router(
+            "session/set_config_option", {"sessionId": session_id, **params}, False
+        )
+
+    assert excinfo.value.code == -32602
+    assert because in excinfo.value.data["reason"]
+    assert client.updates == []
+
+
+async def test_each_session_gets_its_own_copy_of_the_declared_options() -> None:
+    executor = McpToolRouterExecutor(McpBackendRegistry())
+    agent, router, _client, first = await _lifecycle_agent(executor=executor)
+    second = (await router("session/new", {"cwd": "/work", "mcpServers": []}, False)).session_id
+
+    await router(
+        "session/set_config_option",
+        {"type": "boolean", "sessionId": first, "configId": "announce-tools", "value": False},
+        False,
+    )
+
+    assert agent.sessions.get(second).config_option("announce-tools").current_value is True
+    assert executor.session_config_options[0].current_value is True
+
+
+async def test_a_session_with_no_options_announces_nothing() -> None:
+    """`IdleTurnExecutor` exposes none, so there is nothing to set and nothing to say."""
+    agent, _router, client, session_id = await _lifecycle_agent(executor=IdleTurnExecutor())
+
+    await agent.announce_config_options(agent.sessions.get(session_id))
+
+    assert client.updates == []

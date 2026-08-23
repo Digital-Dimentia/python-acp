@@ -151,12 +151,16 @@ async def test_a_websocket_client_gets_the_same_capability_block_as_a_stdio_clie
     assert reply["result"]["authMethods"] == []
 
 
-async def test_unimplemented_acp_methods_answer_method_not_found() -> None:
-    """Proof the SDK router is doing the dispatching, not a hand-rolled branch."""
+async def test_an_unrouted_method_answers_method_not_found() -> None:
+    """Proof the SDK router is doing the dispatching, not a hand-rolled branch.
+
+    Every routed method is implemented, so the only `-32601` left comes from a name the
+    SDK does not route at all.
+    """
     async with bound_socket() as websocket:
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "session/set_config_option",
-             "params": {"type": "boolean", "sessionId": "s1", "configId": "c1", "value": True}}
+            {"jsonrpc": "2.0", "id": 2, "method": "session/delete",
+             "params": {"sessionId": "s1"}}
         )
 
     assert reply["error"]["code"] == -32601

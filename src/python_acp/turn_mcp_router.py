@@ -82,6 +82,9 @@ from acp.helpers import (
 from acp.schema import (
     AvailableCommand,
     PermissionOption,
+    SessionConfigOptionBoolean,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
     SessionMode,
     SessionModeState,
     PlanEntry,
@@ -173,6 +176,44 @@ SESSION_MODES = SessionModeState(
 )
 
 
+#: Config option ids.
+ANNOUNCE_TOOLS = "announce-tools"
+ON_TOOL_FAILURE = "on-tool-failure"
+
+#: What a client may change about how a turn runs. Same rule as the modes: only expose an
+#: option that changes what a turn *does*.
+#:
+#: One of each variant, deliberately — the SDK discriminates the request on `type`, and an
+#: implementation that only ever saw booleans would not have exercised the other branch.
+SESSION_CONFIG_OPTIONS: tuple[Any, ...] = (
+    SessionConfigOptionBoolean(
+        type="boolean",
+        id=ANNOUNCE_TOOLS,
+        name="Announce available tools",
+        description=(
+            "List the session's MCP tools at the start of every turn. Costs one "
+            "tools/list per server per turn; turn it off for a client that already knows."
+        ),
+        currentValue=True,
+    ),
+    SessionConfigOptionSelect(
+        type="select",
+        id=ON_TOOL_FAILURE,
+        name="On tool failure",
+        description="What to do when a tool reports isError.",
+        currentValue="continue",
+        options=[
+            SessionConfigSelectOption(
+                value="continue", name="Continue", description="Run the remaining calls."
+            ),
+            SessionConfigSelectOption(
+                value="stop", name="Stop", description="End the turn at the failed call."
+            ),
+        ],
+    ),
+)
+
+
 #: What a client is offered before a tool runs.
 #:
 #: The SDK's `default_permission_options()` plus one. It offers `allow_once`,
@@ -232,6 +273,7 @@ class McpToolRouterExecutor:
     #: so the advertisement cannot drift from what this class actually reads.
     supported_prompt_blocks: frozenset[str] = frozenset({"text"})
     session_modes: SessionModeState | None = SESSION_MODES
+    session_config_options: tuple[Any, ...] = SESSION_CONFIG_OPTIONS
 
     def __init__(self, backends: McpBackendRegistry) -> None:
         self._backends = backends
@@ -270,6 +312,15 @@ class McpToolRouterExecutor:
                 return TurnResult("cancelled")
             plan[index].status = "failed" if failed else "completed"
             await self._emit_plan(context, plan)
+            if failed and _option(context, ON_TOOL_FAILURE, "continue") == "stop":
+                # The turn ends here. The remaining plan entries stay `pending`, which is
+                # what says *where* it stopped — ACP has no stopReason for "a tool failed",
+                # and inventing a refusal would claim nothing ran.
+                logger.info(
+                    "Stopping turn for %s after a failed tool: on-tool-failure=stop",
+                    context.session_id,
+                )
+                return TurnResult.ended()
         return TurnResult.ended()
 
     # ------------------------------------------------------------------
@@ -299,6 +350,8 @@ class McpToolRouterExecutor:
         sub-millisecond, and caching it would need `notifications/tools/list_changed`
         handling to stay honest, which is `pyacp-eg1.1`'s neighbourhood.
         """
+        if not _option(context, ANNOUNCE_TOOLS, True):
+            return
         commands: list[AvailableCommand] = []
         for server, client in sorted(backends.items()):
             for tool in await client.list_tools():
@@ -606,6 +659,18 @@ def _requester(context: TurnContext):
         )
 
     return request
+
+
+def _option(context: TurnContext, config_id: str, default: Any) -> Any:
+    """One config option's current value, or `default` when the session has no such option.
+
+    A session created by an agent whose executor exposes none has an empty tuple, and a
+    missing option means the behaviour it would have changed stays at its default.
+    """
+    for option in context.session.config_options:
+        if option.id == config_id:
+            return option.current_value
+    return default
 
 
 def _mode(context: TurnContext) -> str:

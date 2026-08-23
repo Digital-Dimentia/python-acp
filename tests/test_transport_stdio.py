@@ -76,17 +76,18 @@ async def test_a_real_acp_client_initializes_over_the_subprocess() -> None:
     assert result.auth_methods == []
 
 
-async def test_unbuilt_methods_answer_method_not_found_over_the_wire() -> None:
+async def test_an_unrouted_method_answers_method_not_found_over_the_wire() -> None:
     """The -32601 must survive the round trip, not just the router.
 
-    `session/set_config_option` is the last member left unbuilt (`pyacp-fln.3`).
+    Every routed method is implemented now, so the only source of one is a name the SDK
+    does not route — `session/delete` has no `Agent` member in 0.12.1.
     """
     async with agent_process() as (conn, _proc):
         await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
 
         with pytest.raises(RequestError) as excinfo:
             await asyncio.wait_for(
-                conn.set_config_option(session_id="s1", config_id="c1", value=True), timeout=30
+                conn._conn.send_request("session/delete", {"sessionId": "s1"}), timeout=30
             )
 
     assert excinfo.value.code == -32601

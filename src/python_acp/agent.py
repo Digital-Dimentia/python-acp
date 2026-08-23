@@ -16,9 +16,8 @@ Two consequences of that arrangement are easy to get wrong:
   signature raises `TypeError` the first time a client attaches metadata.
 * **A method this class does not define is not an error we choose — it is
   `-32601` from the router**, because every agent route is registered
-  `optional=False`. That is why the not-yet-implemented methods below raise
-  `method_not_found` explicitly rather than being omitted: the wire behaviour is
-  identical today, and a later phase fills in a body instead of adding a member.
+  `optional=False`. Every routed method now has a body, so that no longer bites here —
+  but it is why a member must never be deleted to "decline" it.
 
 See `docs/acp-compliance-matrix.md` for the disposition of all 15 protocol members
 and for the capability block `initialize` is allowed to advertise.
@@ -35,6 +34,7 @@ from acp.interfaces import Client
 from acp.helpers import update_current_mode
 from acp.schema import (
     AuthenticateResponse,
+    ConfigOptionUpdate,
     CloseSessionResponse,
     ClientCapabilities,
     ForkSessionResponse,
@@ -78,10 +78,14 @@ _AGENT_NAME = "python-acp"
 class PythonAcpAgent:
     """`acp.interfaces.Agent` for this bridge.
 
-    All 15 protocol members are present. `initialize`, `cancel`, `ext_notification`,
-    and `on_connect` are live; the rest raise `method_not_found` until the phase that
-    owns each one fills the body in. Nothing is *declined* — see the compliance
-    matrix — so no member is left off the class.
+    All 15 protocol members are present **and implemented**. Nothing is declined and
+    nothing answers `method_not_found` from this class any more; the only `-32601` a
+    client can now get is the router's, for a name the SDK does not route at all, or
+    `ext_method`'s for an unknown extension.
+
+    `_not_implemented` used to live here, returning exactly what the router produces for
+    an absent attribute so that filling in a body was the only change each phase made. It
+    was deleted with its last caller (`pyacp-fln.3`).
     """
 
     def __init__(
@@ -251,13 +255,17 @@ class PythonAcpAgent:
         for a relative one — and stored tidied. See `paths.py` for why they are
         normalised but not resolved, and for the containment rule Phase 4.2 builds on.
 
-        `modes` come from the executor, which is the only thing that can act on one —
-        the same arrangement as `promptCapabilities`. `configOptions` are still absent
-        (`pyacp-fln.3`).
+        `modes` and `configOptions` both come from the executor, which is the only thing
+        that can act on either — the same arrangement as `promptCapabilities`.
         """
         stdio_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
         root, extra = normalize_roots(cwd, additional_directories)
-        session = self._sessions.create(root, additional_directories=extra, modes=self._modes())
+        session = self._sessions.create(
+            root,
+            additional_directories=extra,
+            modes=self._modes(),
+            config_options=self._config_options(),
+        )
         try:
             await self._backends.open(session.session_id, stdio_servers)
         except Exception:
@@ -442,7 +450,51 @@ class PythonAcpAgent:
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse | None:
-        raise self._not_implemented("session/set_config_option")
+        """Set one config option and hand back the whole set.
+
+        **One implementation for both request shapes.** The SDK discriminates
+        `SetSessionConfigOptionBooleanRequest` from `SetSessionConfigOptionSelectRequest`
+        on `type` and splats either into these same parameters, so the only difference
+        that reaches here is what `value` holds — and `Session.set_config_option` is what
+        knows which of the two the named option can take. Writing two methods would mean
+        writing that check twice.
+
+        The response carries **every** option, not just the changed one, because that is
+        what the schema asks for and because a client re-rendering a settings panel wants
+        the current state rather than a diff to apply.
+        """
+        session = self._sessions.get(session_id)
+        session.set_config_option(config_id, value)
+        await self.announce_config_options(session)
+        return SetSessionConfigOptionResponse(configOptions=list(session.config_options))
+
+    async def announce_config_options(self, session: Session) -> None:
+        """Emit `config_option_update` for a session's options.
+
+        One door, for the same reason as `announce_mode`: a second client on the same
+        session needs to stay in step, and an internally-originated change should look
+        identical on the wire to a client-driven one.
+        """
+        if not session.config_options:
+            return
+        await self.client.session_update(
+            session_id=session.session_id,
+            update=ConfigOptionUpdate(
+                sessionUpdate="config_option_update",
+                configOptions=list(session.config_options),
+            ),
+        )
+
+    def _config_options(self) -> tuple[Any, ...]:
+        """The config options a new session starts with — the executor's, deep-copied.
+
+        Copied for the same reason as the modes: `set_config_option` mutates
+        `current_value` in place, and the declaration is shared by every session.
+        """
+        return tuple(
+            option.model_copy(deep=True)
+            for option in getattr(self._executor, "session_config_options", ())
+        )
 
     # ------------------------------------------------------------------
     # Prompt turn — body arrives in Phase 3
@@ -561,12 +613,3 @@ class PythonAcpAgent:
             )
         return list(mcp_servers)
 
-    @staticmethod
-    def _not_implemented(method: str) -> RequestError:
-        """The error for a member that exists but has no body yet.
-
-        Deliberately identical to what the router produces for an absent attribute,
-        so filling in a body is the only change a later phase makes — the wire
-        behaviour before it does is already correct.
-        """
-        return RequestError.method_not_found(method)

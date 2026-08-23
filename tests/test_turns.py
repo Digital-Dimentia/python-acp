@@ -332,18 +332,19 @@ def test_every_disposition_says_who_and_why(variant) -> None:
     assert variant.owner
     assert len(variant.why) > 30
     if variant.disposition is Disposition.DEFERRED:
-        assert variant.owner.startswith("pyacp-")
+        assert variant.owner.startswith("pyacp-")  # pragma: no cover - none left
     if variant.disposition is Disposition.DECLINED:
         assert variant.owner == "never"
 
 
-def test_the_only_deferred_variant_is_the_last_phase_5_one() -> None:
-    """`CurrentModeUpdate` landed with `pyacp-fln.2`; nothing offers config options yet."""
+def test_nothing_is_deferred_any_more() -> None:
+    """Phase 5 finished the last two. Every remaining absence is a `DECLINED` with a
+    structural reason, not a "not yet"."""
     deferred = {
         v.name for v in SESSION_UPDATE_DISPOSITIONS if v.disposition is Disposition.DEFERRED
     }
 
-    assert deferred == {"ConfigOptionUpdate"}
+    assert deferred == set()
 
 
 def test_the_declined_variants_share_a_structural_reason() -> None:

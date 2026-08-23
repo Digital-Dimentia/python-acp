@@ -91,9 +91,9 @@ CONFORMANCE: tuple[Case, ...] = (
     Case(
         "set_config_option",
         "session/set_config_option",
-        "unimplemented",
-        {"type": "boolean", "configId": "c1", "sessionId": "s1", "value": True},
-        why="pyacp-fln.3. Nothing offers config options yet.",
+        "implemented",
+        {"type": "boolean", "configId": "announce-tools", "value": False},
+        needs_session=True,
     ),
     Case(
         "close_session", "session/close", "implemented", {}, unstable=True, needs_session=True
@@ -287,17 +287,15 @@ async def test_implemented_methods_do_not_answer_method_not_found(case: Case) ->
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case", cases("unimplemented"), ids=ident)
-async def test_unimplemented_methods_answer_method_not_found_with_the_method(case: Case) -> None:
-    """Asserted to return the *right* error, not merely to fail — and the `data.method`
-    is what distinguishes our not-implemented-yet from the router's absent-attribute."""
-    router = make_router()
+def test_nothing_is_left_unimplemented() -> None:
+    """`pyacp-fln.3` was the last one.
 
-    with pytest.raises(RequestError) as excinfo:
-        await router(case.wire, case.params, False)
-
-    assert excinfo.value.code == -32601
-    assert excinfo.value.data == {"method": case.wire}
+    Kept as an assertion rather than deleted with its parametrize list: this is where the
+    matrix's "nothing is declined" claim finally cashes, and a member regressing to
+    `-32601` should read as a failure rather than as a test that quietly generates no
+    cases.
+    """
+    assert cases("unimplemented") == []
 
 
 async def test_authenticate_refuses_with_auth_required() -> None:

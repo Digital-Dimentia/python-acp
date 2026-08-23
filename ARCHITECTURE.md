@@ -272,6 +272,7 @@ promise meets the behaviour.
 - [ACP v1 plan](docs/full-apc-plan.md) — phases, decisions D1-D6, and delivery sequencing.
 - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md) — per-method disposition for every
   `acp.interfaces.Agent` and `Client` member, and the `initialize` capability block it dictates.
+- [Interop](docs/interop.md) — the check that ACP v1 means something outside this repository, and the permission finding it produced.
 - [Module boundaries](docs/module-boundaries.md) — the target module layout and the fate of `ws_bridge.py`, which `pyacp-tzd.3` carried out.
 
 ## Notes

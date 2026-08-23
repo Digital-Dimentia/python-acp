@@ -41,6 +41,7 @@
 - Design docs (target state, not yet built):
   - [ACP v1 plan](docs/full-apc-plan.md)
   - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md)
+  - [Interop runbook](docs/interop.md)
   - [Module boundaries](docs/module-boundaries.md)
 
 ## Local setup

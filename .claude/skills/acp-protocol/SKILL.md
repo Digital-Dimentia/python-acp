@@ -1,151 +1,214 @@
 ---
 name: acp-protocol
-description: Use when changing python-acp's WebSocket request surface — adding or modifying an action, a JSON-RPC method, an error response, or an MCP passthrough. Covers the dual legacy-action / JSON-RPC dispatch in ws_bridge.py, the JSON-RPC error-code mapping, and the full checklist of files one new method must touch. Trigger on work involving ws_bridge.py, mcp_stdio.py, ACP protocol compliance, or the ACP v1 migration in docs/full-apc-plan.md.
+description: Use when changing python-acp's ACP surface — adding or modifying an Agent method, a capability literal, a session/update variant, an error response, or the deprecated action surface. Covers SDK-driven dispatch, the manifests that make advertisement match behaviour, the one error mapping, and the full checklist of files one change must touch. Trigger on work involving agent.py, capabilities.py, turns.py, errors.py, transport_ws.py, legacy_ws.py, ACP protocol compliance, or the ACP v1 plan in docs/full-apc-plan.md.
 ---
 
 # python-acp Wire Contract
 
-`ws_bridge.py` accepts **two different request shapes on the same socket**, and they
-return **different response envelopes**. This is not visible from any single function,
-and it is the most common thing to get wrong.
+**Dispatch is not ours.** `acp.agent.router.build_agent_router` maps JSON-RPC method
+names onto the attributes of `PythonAcpAgent`, and `acp.Connection` turns a returned
+model into a result and an `acp.RequestError` into an error object. Nothing in this
+repository parses a request id, builds an error envelope, or matches on a method name for
+an ACP method.
 
-## The two surfaces
+That single fact reshapes everything an agent needs to know here. What is left to get
+right is not plumbing but **promises**: what `initialize` advertises, what a capability
+literal is allowed to mean, and which error code a failure becomes.
 
-Dispatch is chosen in `ACPWebSocketBridge._dispatch` by which key is present:
+```
+ACP client ──stdio or WebSocket──▶ python-acp ──MCP──▶ server subprocess
+                (we are the agent)            (we are the client)
+```
 
-| Request key | Handler | Success envelope | Failure envelope |
-|---|---|---|---|
-| `"action"` | `_dispatch_legacy_action` | `{"ok": true, ...}` | `{"ok": false, "error": "<str>"}` |
-| `"method"` | `_dispatch_jsonrpc` | `{"jsonrpc": "2.0", "id": ..., "result": {...}}` | `{"jsonrpc": "2.0", "id": ..., "error": {"code": ..., "message": ...}}` |
+The `mcp-protocol` skill owns the right-hand arrow. This one owns the left.
 
-Neither key present, or a non-dict payload → JSON-RPC `-32600`.
+## The rule that governs everything else
 
-**`action` is the legacy surface.** Under decision D4 in `docs/full-apc-plan.md` it
-keeps working — with a deprecation warning — through the whole migration, and is
-removed only in Phase 7 (`pyacp-sld.3`), after Phase 8 proves JSON-RPC parity. D5 is
-the terminal JSON-RPC-only state. Do not add new capabilities to
-`_dispatch_legacy_action` unless the task explicitly says to keep parity. Add to
-`_dispatch_jsonrpc` first.
+**An advertisement is a promise, and a promise is testable.**
+
+Four manifests exist so that a claim cannot drift from the behaviour behind it, and each
+one is enforced by a test that fails when they disagree. If you are about to hand-write a
+literal that describes what this agent can do, you are almost certainly editing the wrong
+file.
+
+| Manifest | Lives in | Says |
+|---|---|---|
+| `AGENT_CAPABILITY_MANIFEST` | `capabilities.py` | Every leaf of `initialize`'s capability block, with the bead that owns each flip and why |
+| `SESSION_UPDATE_DISPOSITIONS` | `turns.py` | Every `session/update` variant: emitted, deferred, or declined — with a reason |
+| `CONFORMANCE` | `tests/test_conformance.py` | Every `acp.interfaces.Agent` member and its disposition |
+| `supported_prompt_blocks`, `session_modes`, `session_config_options` | the `TurnExecutor` | What the executor reads and offers. `promptCapabilities` is **derived** from the first; `session/new` advertises the other two |
+
+Read `src/python_acp/capabilities.md` before touching any of them.
+
+## Adding or changing an Agent method
+
+1. **Check the disposition first.** `docs/acp-compliance-matrix.md` states what every one
+   of the 15 `acp.interfaces.Agent` members is for and why. If your change contradicts a
+   row, amend the row in the same commit — the matrix is the contract, not a summary.
+2. **Never delete a member to decline it.** Every route is registered `optional=False`,
+   so an absent attribute is already `-32601` from the router. Declining means writing the
+   method and returning the honest error, which is why `authenticate` answers `-32000`.
+3. **Every method takes `**kwargs`.** The router splats the request's `_meta` keys in
+   alongside real parameters, so a closed signature raises `TypeError` the first time a
+   client attaches metadata.
+4. **Every request-serving method carries `@as_request_error`.** Not defensive:
+   `acp.Connection._run_request` catches a non-`RequestError` and answers a bare `-32603`,
+   destroying a backend code and turning a `ValueError` into an internal error. The
+   mapping has to happen on our side of that boundary. Notification handlers deliberately
+   do **not** carry it — there is no reply channel to put an error on.
+5. **Add a `CONFORMANCE` row.** `tests/test_conformance.py` walks the `Agent` Protocol and
+   the router's routes in both directions, so a member with no row is a failure rather
+   than a silence.
+6. **Docs.** See the checklist at the bottom.
+
+### Three unstable methods
+
+`session/close`, `session/fork`, and `session/resume` are registered `unstable=True`. With
+`use_unstable_protocol` off, the router answers `method_not_found` **without ever calling
+the agent** — so a correct implementation is invisible and only a negative test can tell.
+Both transports pass `True`.
+
+Because the flag is per connection, so is the advertisement:
+`build_agent_capabilities(unstable=...)` withholds those three capability rows when it is
+off. Advertising them there would be a promise the SDK itself refuses to keep.
 
 ## Error-code mapping
 
-Legacy actions signal failure by raising; JSON-RPC maps exception type to code.
-Preserve this mapping — tests assert on the codes:
+**`errors.py` owns this. Nothing else picks a code.** The same `to_request_error` serves
+`agent.py`, `transport_ws.py`, and the SDK-dispatched path, so the two client-facing
+surfaces cannot answer differently. Full detail in `src/python_acp/errors.md`.
 
-| Condition | Code | Raised as |
-|---|---|---|
-| Malformed JSON on the wire | `-32700` | `json.JSONDecodeError` caught in `_dispatch` |
-| Non-dict payload, missing/empty `method`, no `action` or `method` | `-32600` | returned directly |
-| Known shape, unhandled method | `-32601` | fallthrough at end of `_dispatch_jsonrpc` |
-| Bad or missing params | `-32602` | **raise `ValueError`** |
-| MCP backend failed, server sent a code | *the server's own code* | **raise `MCPProtocolError`** with `code=` |
-| MCP backend failed, no code available | `-32603` | **raise `MCPProtocolError`** with `code=None` |
+The rule: **a message is a concise sentence; structured detail goes in `data`.** That is
+what `acp.schema.Error` asks for and what the SDK's own `RequestError` constructors do.
 
-So inside `_dispatch_jsonrpc` you never build an error envelope for validation
-problems — you `raise ValueError("...")` and let `_dispatch` map it. Legacy handlers
-raise the same two exception types; `_dispatch` flattens both to `{"ok": false}`.
+| Raised | Becomes | Message | `data` |
+|---|---|---|---|
+| `RequestError` | itself, unchanged | — | — |
+| `MCPProtocolError` **with** a server code | that code | **the server's own** | `{source: "mcp", mcpCode, mcpData?}` |
+| `MCPProtocolError` with no code | `-32603` | `Internal error` | `{reason}` |
+| `ValueError` | `-32602` | `Invalid params` | `{reason}` |
+| anything else | `-32603` | `Internal error` | `{reason}` |
+| `asyncio.CancelledError` | **re-raised, never mapped** | — | — |
 
-### Backend codes are forwarded, not collapsed
+Two things follow that are easy to get wrong:
 
-`_mcp_error` does not flatten every backend failure to `-32603`. When the MCP server
-returned a JSON-RPC error, `MCPProtocolError.from_error_response` captures its `code`
-and `data`, and the bridge re-emits **that code** so a backend `-32601` (no such tool)
-stays distinguishable from a backend `-32602` (bad arguments).
+- **A forwarded backend error keeps the server's message.** It already wrote a concise
+  sentence, and replacing it destroys the only account of what failed. Forwarding makes
+  the code space ambiguous, so `data.source == "mcp"` is the discriminator — and **an
+  error we originate never sets that key.** Not "usually": never.
+- **Cancellation is not an error.** Returning a value from a cancelled coroutine tells
+  asyncio the cancellation did not take. `request_cancelled()` exists for whoever
+  *reports* one after letting the exception propagate. `REQUEST_CANCELLED = -32800` is an
+  **unverified reading** of `acp.schema.Error`'s literal union — it is LSP's
+  `RequestCancelled` and the ACP schema documents no meaning. `pyacp-tzd.5` owns
+  confirming it.
 
-That makes the code space ambiguous — the same integer can now come from the bridge or
-from the server — so a forwarded error always carries a `data` marker:
-
-```json
-{"jsonrpc": "2.0", "id": 1,
- "error": {"code": -32601, "message": "MCP error -32601: Unknown tool",
-           "data": {"source": "mcp", "mcpCode": -32601, "mcpData": {...}}}}
-```
-
-- `data.source == "mcp"` is the discriminator. **The bridge's own errors carry no
-  `data.source`.** Never emit `source: "mcp"` for an error the bridge originated.
-- `mcpData` is present only when the server supplied `data`.
-- Failures the client raises itself — timeout, transport death, a malformed result —
-  have no server code, so they take the `-32603` path with no `data` at all.
-- A malformed `error` member (not a dict, or a non-int `code`) degrades to the codeless
-  path rather than forwarding junk; `from_error_response` enforces that.
-
-A failed **tool call** is not a protocol error at all: `tools/call` reports tool-level
-failure via `isError` on an otherwise successful result. Do not translate it into a
-JSON-RPC error.
-
-## Notifications
-
-A JSON-RPC message with no `id` is a notification: return `None`, and `_handle_client`
-sends nothing. `notifications/initialized` already does this. The `-32601` fallthrough
-is guarded by `if request_id is None: return None` so unknown notifications stay silent
-rather than erroring.
+Subclass `ValueError` to get `-32602` for free. `UnknownSessionError`,
+`PathConstraintError`, and `UnknownBackendError` all do, and none of them needs a special
+case anywhere.
 
 ## Capability advertisement
 
-`initialize` returns a hand-built capability block. It is a **promise**, not a
-reflection of runtime state — `mcpCapabilities: {http: false, sse: false}` and the
-`false`/`None` entries under `agentCapabilities` are literals. If you implement one of
-those features, flip the literal in the same change; if you flip a literal, make sure
-the feature actually exists.
+`initialize`'s block is built from `AGENT_CAPABILITY_MANIFEST` and nothing else. **Do not
+hand-write one.**
 
-`_SUPPORTED_PROTOCOL_VERSION = 1` is the ACP version echoed to WebSocket clients. It is
-unrelated to the MCP protocol version `"2024-11-05"` hardcoded in
-`MCPStdioClient.initialize` — two different protocols, two different version fields.
+To turn a capability on, four things in one commit — any three without the fourth fails
+the suite:
 
-## Adding a method: the checklist
+1. build the feature;
+2. write a test that exercises it;
+3. change the manifest row's `advertised` value;
+4. add `path -> "module:test_name"` to `CAPABILITY_EVIDENCE` in
+   `tests/test_capabilities.py`.
 
-Every one of these is required. Docs are not optional here; see the
-`repo-docs-sync` skill for why.
+Two families are **derived** rather than written, because a literal fixed in the table
+would be a promise about a component the table cannot see:
 
-1. `src/python_acp/mcp_stdio.py` — add the `MCPStdioClient` method if it needs a new
-   MCP call. Validate the response shape and raise `MCPProtocolError` on anything
-   unexpected, matching `list_tools` / `list_prompts`.
-2. `src/python_acp/ws_bridge.py` — add the branch to `_dispatch_jsonrpc`. Add to
-   `_dispatch_legacy_action` only for parity with an existing action.
-3. `tests/fixtures/mock_mcp_server.py` — teach the mock server to answer the new MCP
-   method, or the test cannot exercise the path.
-4. `tests/test_mcp_stdio.py` — cover success **and** the error code. `asyncio_mode`
-   is `auto` in `pyproject.toml`, so `async def test_*` needs no decorator.
-5. `src/python_acp/ws_bridge.md` (and `mcp_stdio.md` if step 1 applied) — document it.
-6. `ARCHITECTURE.md` — update the sequence diagram if the request path changed shape.
-7. `README.md` — add the example payload under "WebSocket actions".
+- `promptCapabilities.image` / `.audio` / `.embeddedContext` come from the executor's
+  `supported_prompt_blocks`. What a content block *means* depends on the executor, which
+  D3 makes swappable.
+- The three unstable `sessionCapabilities` rows come from the connection's flag.
 
-## Conventions inside the dispatchers
+`authMethods` is `[]` by decision, not by default, and that decision is **bound to its
+premise**: a test asserts it together with the absence of any remote `mcpCapabilities`,
+so flipping `http`, `sse`, or `acp` fails until the auth question is reopened.
 
-- Argument coercion is uniform: `arguments = request.get("arguments") or {}`, then
-  `if not isinstance(arguments, dict): raise ValueError("'arguments' must be an object")`.
-- `read_resource` / `resources/read` accept **either** `name` or `uri`, preferring
-  `uri` on the JSON-RPC side and `name` on the legacy side. Keep both aliases.
-- Log at `debug` on both the request and response edges; the `logger` level is bound to
-  the `--debug` flag in `ACPWebSocketBridge.__init__`.
+`PROTOCOL_VERSION` is the **ACP** version, an integer. It is unrelated to the MCP
+`protocolVersion` *string* in `mcp_stdio.py`. Two protocols, two version fields.
 
-## Known constraints in the MCP backend
+## Emitting `session/update`
 
-Before extending the backend, know what is and is not there. The **`mcp-protocol`
-skill** is the authority on `mcp_stdio.py`; this list exists only so a wire-contract
-change does not assume a capability the backend lacks.
+`turns.SESSION_UPDATE_DISPOSITIONS` names all thirteen variants of the SDK's union and
+what this project does about each. A variant we do not send is either **deferred** with
+the bead that will bring it or **declined** with a structural reason; a test walks the
+SDK's union so a release that grows a variant forces a decision.
 
-Still missing (tracked in beads):
+- **`session/update` has no capability gate.** `ClientCapabilities` has no field for it
+  and every ACP client must accept it. Neither does `session/request_permission`. **Do not
+  invent gates for them.**
+- `clientCapabilities.plan` gates the `agent_plan_*` **variants**, not the call. A
+  plan-less client means suppressing those updates, never skipping `emit`.
+- `TurnContext.emit` supplies the session id itself and records into `Session.history` for
+  `session/load` replay. Do not call `client.session_update` directly from a turn.
 
-- `MCPStdioClient` binds **one** server, fixed at process start from `--mcp-command`,
-  shared by every WebSocket client. There is no per-session MCP registry.
-- No `notifications/cancelled` is sent when a request times out (`pyacp-ua1`), and the
-  `initialize` request declares no client capabilities (`pyacp-pb7`).
+Client-method gating lives on the seam, in method vocabulary: `context.require(Gate.X)`.
+Three shapes that are not interchangeable — `fs` is **two independent booleans**,
+`terminal` is **one boolean for all five** methods, and `plan` / `elicitation` are
+advertised by **presence** of an empty marker model (`is not None`, never `bool(model)`).
 
-Already there — do not "fix" these, and do not design around their absence:
+## The deprecated surface
 
-- A background `_read_loop` demultiplexes stdout into a `_pending` map of futures, so
-  responses are matched by `id` and nothing is dropped for arriving out of order.
-  Server-initiated requests and notifications reach `_handle_server_request` /
-  `_handle_notification`.
-- `request()` holds `_write_lock` across id allocation and the write **only**. It
-  awaits the reply outside the lock, so concurrent requests pipeline rather than
-  serialize.
-- `_drain_stderr` runs for the process lifetime and is load-bearing: stderr is piped,
-  so an undrained pipe would fill and deadlock every request on the client.
+`legacy_ws.py` holds the `{"action": ...}` API **and** the MCP passthrough still carried
+on JSON-RPC (`tools/*`, `prompts/*`, `resources/*`, `ping`,
+`notifications/initialized`). `transport_ws.py` intercepts both in `receive()` before the
+SDK sees them; stdio never had either.
+
+Decision **D4** keeps it working through the migration; **Phase 7** removes it
+(`pyacp-sld.3`), after Phase 8 proves parity. **Add nothing to it.** `LEGACY_METHODS` is a
+closed set that only shrinks.
+
+`initialize` is deliberately **not** in it: that is ACP, the agent serves it, and a
+WebSocket client gets the same negotiated answer a stdio client gets.
+
+Framing errors are the transport's, because the SDK's `Transport` moves already-decoded
+dicts: malformed JSON is `-32700` and a non-object payload is `-32600`, both answered in
+`transport_ws.py`. The `{"ok": false}` envelope has no code field, so a mapped error is
+flattened back to its message for that shape only.
+
+## Two SDK behaviours that will surprise you
+
+- **`salvage_on_error` and `skip_invalid_items`.** A junk `protocolVersion` becomes the
+  default instead of `-32602`, and a malformed entry in `session/new`'s `mcpServers` is
+  **silently dropped** before the agent sees it. Both are pinned by tests so they are
+  known rather than rediscovered. You cannot refuse what never arrives.
+- **`normalize_result`.** Five routes are registered with it — `authenticate`,
+  `session/load`, `session/close`, `session/set_mode`, `session/set_config_option` — so
+  their responses arrive as plain **dicts** rather than models when a test drives the
+  router directly. Assert `result["configOptions"]`, not `result.config_options`.
+
+## Adding a method: the docs checklist
+
+Every one of these is required. See the `repo-docs-sync` skill for why.
+
+1. `src/python_acp/agent.py` — the member, with `**kwargs` and `@as_request_error`.
+2. The manifest that owns any literal you changed (`capabilities.py`, `turns.py`).
+3. `tests/test_conformance.py` — the `CONFORMANCE` row.
+4. `tests/test_capabilities.py` — a `CAPABILITY_EVIDENCE` entry, if a literal flipped.
+5. `tests/fixtures/mock_mcp_server.py` — teach the fixture, if a new MCP call is involved.
+6. The co-located `.md` beside every module you touched.
+7. `ARCHITECTURE.md` — update the sequence diagram if the request path changed *shape*.
+8. `README.md` — the client-facing surface, if a client would notice.
+9. `docs/acp-compliance-matrix.md` — if a disposition changed.
 
 ## Verify
 
 ```bash
 make lint && make test
 ```
+
+`asyncio_mode = "auto"`, so `async def test_*` needs no decorator. `make build` needs
+`PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org"` behind the TLS-intercepting proxy.
+
+The interop suite (`tests/test_interop.py`) drives a client that imports nothing from
+`python_acp`. It is the only thing that can prove the wire is sufficient, and it has
+already caught one wrong decision — see `docs/interop.md`.

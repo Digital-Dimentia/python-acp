@@ -102,6 +102,7 @@ pre-empt that matrix; it only places boundaries.
 | `transport_ws.py` | Binding the agent to a WebSocket. Server lifecycle, a `Transport`-shaped message adapter over the `websockets` library, and the framing errors the SDK cannot express. **One `AgentSideConnection` and one `PythonAcpAgent` per socket.** | Dispatch, error codes, capability blocks — all of which moved to the SDK router, `errors.py`, and `capabilities.py` | `WebSocketMessageTransport`, `WebSocketAgentServer`, `serve_websocket(...)` | `pyacp-tzd.3` ✔ |
 | `legacy_ws.py` | The deprecated `{"action": ...}` surface and its `{"ok": bool}` envelope, **and the MCP passthrough still carried on JSON-RPC** (`tools/*`, `prompts/*`, `resources/*`, `ping`, `notifications/initialized`), plus the deprecation warning, for exactly as long as D4 keeps it alive | Anything the ACP surface needs; `initialize`, which is ACP and belongs to the agent | `is_legacy(message)`, `LEGACY_METHODS`, `LegacyActionHandler` | `pyacp-tzd.3` ✔; warning by `pyacp-sld.1`; **deleted by `pyacp-sld.3`** |
 | `paths.py` | The absolute-path rule ACP requires, and the containment rule it does not: normalising a session's declared roots, and deciding whether a candidate path lies inside them with symlinks followed | Reading or writing anything; deciding *when* to check — that is the caller's | `normalize_roots`, `is_contained`, `require_contained`, `PathConstraintError` | `pyacp-3rw.4` ✔; first consumer `pyacp-8bv.2` |
+| `mcp_content.py` | Translating MCP result content into ACP content blocks, in one table: the five MCP types, annotations, and the placeholder that stands in for anything else | Deciding *when* content is sent, or what a tool call means | `to_content_block`, `to_tool_call_content`, `MAPPED_TYPES` | `pyacp-eg1.1` ✔ |
 | `errors.py` | Translating our exception types (`MCPProtocolError`, `ValueError`, cancellation) into `acp.RequestError`, one mapping in one place | Defining new error codes the SDK already defines | `to_request_error(exc)` | `pyacp-tzd.6` |
 
 `__init__.py` stays exempt from the doc rule and stays minimal.
@@ -305,6 +306,17 @@ arguments does the thing the project ships, rather than nothing. `IdleTurnExecut
 nothing was acceptable while there was no executor; keeping it as the default after
 `pyacp-hnk.2` would mean the shipped behaviour was reachable only by wiring it up
 correctly.
+
+### B6e. `mcp_content.py` is its own module (`pyacp-eg1.1`)
+
+The bead sits under `turn_mcp_router.py` and `mcp_stdio.py` in this table, and the mapping
+could have lived in either. It gets a module because it is what its own description calls
+it — "the translation layer between the two protocols" — and because it has more than one
+future caller: any executor that surfaces MCP output needs the same table, and
+`mcp_stdio.py` must stay a wire client that knows nothing about ACP.
+
+Small, like `errors.py`, and for the same reason: the alternative is the mapping living
+wherever it was first needed.
 
 ### B7. `errors.py` exists even though it is small
 

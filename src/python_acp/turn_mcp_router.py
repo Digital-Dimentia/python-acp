@@ -81,13 +81,13 @@ from acp.helpers import (
 )
 from acp.schema import (
     AvailableCommand,
-    ContentToolCallContent,
     PermissionOption,
     PlanEntry,
     RequestPermissionRequest,
     RequestPermissionResponse,
 )
 
+from python_acp.mcp_content import to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.turns import Gate, TurnContext, TurnResult
@@ -423,7 +423,7 @@ class McpToolRouterExecutor:
             tracker.progress(
                 key,
                 status="failed" if failed else "completed",
-                content=_as_tool_content(result),
+                content=to_tool_call_content(result),
                 raw_output=result,
             )
         )
@@ -532,21 +532,6 @@ class McpToolRouterExecutor:
         logger.info("Refusing prompt for session %s: %s", context.session_id, exc)
         await context.emit(update_agent_message_text(f"{exc} {CONVENTION}"))
         return TurnResult("refusal")
-
-
-def _as_tool_content(result: dict[str, Any]) -> list[ContentToolCallContent] | None:
-    """Carry the tool's own output through as ACP tool-call content.
-
-    Text only for now: `pyacp-eg1.1` owns the richer mapping (images, embedded resources,
-    annotations). A block this does not understand is **skipped rather than guessed at**,
-    because a wrong `type` on the wire is harder to notice than a missing block.
-    """
-    blocks = [
-        tool_content(text_block(block["text"]))
-        for block in result.get("content") or []
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
-    ]
-    return blocks or None
 
 
 #: Option id to kind, for reading an answer back. Built from `PERMISSION_OPTIONS` so the

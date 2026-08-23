@@ -18,6 +18,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
 - MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
+- MCP content mapping (`mcp_content.py`): the seam between MCP's content model and ACP's. Unmappable content becomes a visible placeholder rather than a gap.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
@@ -243,6 +244,7 @@ there is no legacy surface on stdio, and never was.
 - [Turn executor seam module](src/python_acp/turns.md)
 - [MCP tool-router executor module](src/python_acp/turn_mcp_router.md)
 - [CLI module](src/python_acp/cli.md)
+- [MCP content mapping module](src/python_acp/mcp_content.md)
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)

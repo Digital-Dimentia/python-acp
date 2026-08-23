@@ -704,3 +704,36 @@ async def test_a_fork_does_not_inherit_a_decision_it_can_change() -> None:
         forked.remembered_permissions["tools/echo"] = False
 
     assert harness.session.remembered_permissions == {"tools/echo": True}
+
+
+# ---------------------------------------------------------------------------
+# Result content mapping, against the real server (pyacp-eg1.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_every_mcp_content_type_reaches_the_client_as_an_acp_block() -> None:
+    """Against the fixture server rather than a hand-built dict.
+
+    A mapping that works on dicts we wrote and not on what a server actually sends would
+    pass every unit test in `tests/test_mcp_content.py`.
+    """
+    async with Harness("tools") as harness:
+        result = await harness.run(block(tool="every-content"))
+
+    assert result.stop_reason == "end_turn"
+    content = [c.content for c in harness.of("tool_call_update")[-1].content]
+    assert [c.type for c in content] == [
+        "text", "image", "audio", "resource", "resource", "resource_link", "text", "text",
+    ]
+    # The two trailing text blocks are the placeholders for the unmappable pair.
+    assert all(c.text.startswith("[python-acp could not render") for c in content[-2:])
+    assert content[0].annotations.audience == ["user"]
+
+
+async def test_the_servers_original_result_is_still_there_verbatim() -> None:
+    """What makes the placeholder cheap: nothing is lost, only unrendered."""
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="every-content"))
+
+    raw = harness.of("tool_call_update")[-1].raw_output
+    assert [b["type"] for b in raw["content"]][-2:] == ["chart", "image"]

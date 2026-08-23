@@ -26,12 +26,24 @@ checks the AST rather than the text, because the file legitimately *names*
 `python_acp.cli` in the argv it spawns.
 
 The run covers `initialize` → `session/new` with its own MCP server → a prompt turn that
-really runs a tool → a refused prompt → `session/list` → `session/close` → clean exit,
-and reports one JSON object so a failure is diagnosable from the transcript rather than
-from an exit code.
+really runs a tool → **a file round trip through `fs/read_text_file` and
+`fs/write_text_file`** → a prompt refused for naming a path outside the session's roots →
+a refused prompt → `session/list` → `session/close` → clean exit, and reports one JSON
+object so a failure is diagnosable from the transcript rather than from an exit code.
 
 **It deliberately answers `session/request_permission` with `-32601`**, copying the SDK's
 own example client. See below for why that matters.
+
+**It does serve `fs/*`, and advertises them** (`pyacp-8bv.2`). The session's `cwd` is a
+temporary directory the client creates, so containment is exercised on real paths. The
+client is the only vantage point from which the *resolved* path the agent sends can be
+observed at all — an in-process test sees the string the agent chose, not the one that
+crossed the wire — which is why `line`, `limit`, and the resolved path are asserted from
+the client's own record:
+
+```json
+"reads": [["/private/var/.../in.txt", 2, 1]], "written": "two\n"
+```
 
 ## The finding: refusing a permission request is normal
 

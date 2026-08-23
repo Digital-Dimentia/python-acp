@@ -84,6 +84,23 @@ A client that declared nothing — or a turn running before `initialize` — may
 `UngatedClientCallError` is a `RuntimeError`, so [errors.py](errors.md) maps it to
 `-32603`. That code is the honest one: this is our bug, not a bad parameter.
 
+### `allows` asks the client's question; `require` asserts ours
+
+They read the same gate and they are **not** interchangeable.
+
+`-32603` is the right answer to a programming error and the wrong answer to a client that
+simply did not advertise a capability — declaring no `fs` is a perfectly conforming thing
+for a client to be, and `require` would tell it that *we* were broken.
+
+| | Used for | Answers |
+|---|---|---|
+| `context.allows(gate)` | deciding, **early**, what to do about a capability the client does not have | whatever the executor's own contract says: `turn_mcp_router.py` refuses the turn before anything runs |
+| `context.require(gate)` | the call site itself | `UngatedClientCallError` → `-32603`, because by then a shut gate means the earlier check was missing |
+
+[turn_mcp_router.py](turn_mcp_router.md) does both for `fs/*`: `allows` while parsing the
+prompt, `require` immediately before the client call. The first is the client's answer;
+the second is an assertion about us.
+
 ## Cancellation is not an error
 
 `session/cancel` cancels the turn's task, and an executor should let
@@ -165,7 +182,7 @@ a structural cause rather than left unexplained.
 | `stopReason` | Disposition | What reaches it |
 |---|---|---|
 | `end_turn` | **emitted** | Every invocation the prompt named has run — including one whose tool reported `isError`, which fails the *call*, not the turn |
-| `refusal` | **emitted** | The prompt was valid ACP but named nothing runnable, so nothing ran; an `agent_message_chunk` says why |
+| `refusal` | **emitted** | The prompt was valid ACP but named nothing this agent will run, so nothing ran; an `agent_message_chunk` says why. Two sources: a prompt that missed the invocation convention, and (`pyacp-8bv.2`) one that correctly asked for a client method the client never advertised |
 | `cancelled` | **emitted** | Two routes — see below |
 | `max_tokens` | **declined** | A token budget is a model's, and decision D1 puts no model here. Same root as the declined `UsageUpdate` variant |
 | `max_turn_requests` | **declined** | A cap on requests made *of a model* inside one turn. This executor makes none: the step count is the number of invocations the client itself named, so there is no agent-initiated loop to bound |

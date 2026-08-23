@@ -3,9 +3,9 @@
 ACP requires `cwd` and every entry in `additionalDirectories` to be **absolute**. That is
 one of two rules this module owns. The other is the one the spec does not write down: a
 session declares a set of roots, and *containment* is what makes that declaration mean
-anything. Phase 4.2's `fs/read_text_file` and `fs/write_text_file` are the first callers,
-and `pyacp-3rw.4` settles the rule here rather than there so it is one rule rather than
-one per call site.
+anything. `turn_mcp_router.py`'s `fs/read_text_file` and `fs/write_text_file` calls are
+the first callers, and `pyacp-3rw.4` settles the rule here rather than there so it is one
+rule rather than one per call site.
 
 ## Two different operations, deliberately not merged
 
@@ -28,8 +28,13 @@ handling alone is not enough.
 **It is a check, not a lock.** Resolution happens at check time; a path that passes can
 become a symlink out of the tree a microsecond later. Closing that needs the file
 descriptor that was actually opened (`openat`/`O_NOFOLLOW`), which belongs with the code
-doing the opening — Phase 4.2 — not here. Recorded so nobody reads containment as
-stronger than it is.
+doing the opening. Recorded so nobody reads containment as stronger than it is.
+
+That code turned out not to exist on this side of the wire. Phase 4.2 (`pyacp-8bv.2`) was
+where the fix was expected to land, and it landed as calls to the **client's** `fs/*`
+methods — this process opens nothing, so `O_NOFOLLOW` has nothing to attach to. The
+caller sends the resolved path so the client need not re-walk links already walked here;
+the rest belongs to the client's implementation. See `turn_mcp_router.md`.
 
 **Existence is not required.** ACP asks for an absolute path, not an extant one, and a
 client may legitimately name a directory it is about to create. `resolve(strict=False)`

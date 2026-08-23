@@ -11,6 +11,7 @@ codes against, and every refusal it can produce is part of that contract.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -24,10 +25,12 @@ from acp.schema import (
     ClientCapabilities,
     EmbeddedResourceContentBlock,
     EnvVariable,
+    FileSystemCapabilities,
     ImageContentBlock,
     McpServerStdio,
     DeniedOutcome,
     PlanCapabilities,
+    ReadTextFileResponse,
     RequestPermissionResponse,
     ResourceContentBlock,
     TextContentBlock,
@@ -38,6 +41,7 @@ from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.turn_mcp_router import (
+    CONVENTION,
     DECLINED_BLOCKS,
     SESSION_CONFIG_OPTIONS,
     SESSION_MODES,
@@ -88,15 +92,65 @@ def block(**payload: Any) -> TextContentBlock:
     return TextContentBlock(type="text", text=json.dumps(payload))
 
 
+class FilesystemClient(RecordingClient):
+    """A client whose `fs/*` methods really touch a directory.
+
+    Real files, for the same reason the MCP backend is a real subprocess: the whole point
+    of routing a read through the client is that the bytes come from somewhere this
+    process never opened, and a stub returning a canned string would prove nothing about
+    `line`, `limit`, or which path was actually asked for.
+    """
+
+    def __init__(
+        self,
+        *answers: str,
+        read_error: Exception | None = None,
+        write_error: Exception | None = None,
+    ) -> None:
+        super().__init__(*answers)
+        self.read_error = read_error
+        self.write_error = write_error
+        self.reads: list[tuple[str, int | None, int | None]] = []
+        self.writes: list[tuple[str, str]] = []
+
+    async def read_text_file(
+        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kw
+    ) -> ReadTextFileResponse:
+        self.reads.append((path, line, limit))
+        if self.read_error is not None:
+            raise self.read_error
+        lines = Path(path).read_text().splitlines(keepends=True)
+        start = line - 1 if line else 0
+        window = lines[start:] if limit is None else lines[start : start + limit]
+        return ReadTextFileResponse(content="".join(window))
+
+    async def write_text_file(self, session_id: str, path: str, content: str, **kw) -> None:
+        self.writes.append((path, content))
+        if self.write_error is not None:
+            raise self.write_error
+        Path(path).write_text(content)
+        return None
+
+
+def has_fs(*, read: bool = True, write: bool = True) -> ClientCapabilities:
+    return ClientCapabilities(fs=FileSystemCapabilities(readTextFile=read, writeTextFile=write))
+
+
 class Harness:
     """A session with `server_names` MCP servers open, and an executor over them."""
 
-    def __init__(self, *server_names: str, capabilities: Any = None, client: Any = None) -> None:
+    def __init__(
+        self,
+        *server_names: str,
+        capabilities: Any = None,
+        client: Any = None,
+        cwd: str = "/work",
+    ) -> None:
         self.server_names = server_names
         self.capabilities = capabilities
         self.backends = McpBackendRegistry()
         self.client = client or RecordingClient()
-        self.session = SessionRegistry().create("/work")
+        self.session = SessionRegistry().create(cwd)
 
     async def __aenter__(self) -> Harness:
         await self.backends.open(self.session.session_id, [spec(n) for n in self.server_names])
@@ -915,3 +969,503 @@ async def test_a_session_with_no_options_takes_the_defaults() -> None:
 
     assert len(harness.of("available_commands_update")) == 1
     assert [u.status for u in harness.of("tool_call_update")][-1] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# The client's filesystem (pyacp-8bv.2)
+# ---------------------------------------------------------------------------
+
+
+def fs_harness(tmp_path: Path, *, capabilities: Any = None, client: Any = None) -> Harness:
+    """A session rooted at `tmp_path`, so containment has real directories to enforce."""
+    return Harness(
+        "tools",
+        capabilities=has_fs() if capabilities is None else capabilities,
+        client=client if client is not None else FilesystemClient(),
+        cwd=str(tmp_path),
+    )
+
+
+async def test_a_file_is_read_through_the_client_into_a_tool_argument(tmp_path: Path) -> None:
+    """The bytes reach the tool without this process ever opening the file."""
+    source = tmp_path / "in.txt"
+    source.write_text("from the client's disk")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.reads == [(str(source.resolve()), None, None)]
+    assert harness.of("tool_call_update")[-1].content[0].content.text == "from the client's disk"
+
+
+async def test_line_and_limit_ask_for_a_window_rather_than_the_whole_file(
+    tmp_path: Path,
+) -> None:
+    """Supporting them is the difference between a window and always paying for the file."""
+    source = tmp_path / "in.txt"
+    source.write_text("one\ntwo\nthree\nfour\nfive\n")
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            block(tool="echo", read={"text": {"path": str(source), "line": 2, "limit": 2}})
+        )
+
+    assert harness.client.reads == [(str(source.resolve()), 2, 2)]
+    assert harness.of("tool_call_update")[-1].content[0].content.text == "two\nthree\n"
+
+
+async def test_the_resolved_arguments_are_republished_as_raw_input(tmp_path: Path) -> None:
+    """`pending` shows what the client asked for; `in_progress` shows what actually went to
+    the tool, which is the only place the file's content is visible."""
+    source = tmp_path / "in.txt"
+    source.write_text("substituted")
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert harness.of("tool_call")[0].raw_input == {}
+    assert harness.of("tool_call_update")[0].raw_input == {"text": "substituted"}
+
+
+async def test_a_tools_output_is_written_back_through_the_client(tmp_path: Path) -> None:
+    destination = tmp_path / "out.txt"
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(tool="echo", arguments={"text": "written"}, write={"path": str(destination)})
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.writes == [(str(destination.resolve()), "written")]
+    assert destination.read_text() == "written"
+    assert "Wrote 7 characters" in harness.of("tool_call_update")[-1].content[-1].content.text
+
+
+async def test_a_file_round_trips_through_a_tool_in_one_invocation(tmp_path: Path) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("round trip")
+    destination = tmp_path / "out.txt"
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                read={"text": {"path": str(source)}},
+                write={"path": str(destination)},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert destination.read_text() == "round trip"
+
+
+async def test_the_client_is_asked_for_the_resolved_path_not_the_one_it_wrote(
+    tmp_path: Path,
+) -> None:
+    """`require_contained` hands back the resolved path deliberately: asking the client to
+    re-walk a symlink would be asking it to open something this session never checked."""
+    real = tmp_path / "real.txt"
+    real.write_text("behind a link")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(link)}}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.reads == [(str(real.resolve()), None, None)]
+
+
+async def test_a_link_that_points_outside_the_roots_is_refused(tmp_path: Path) -> None:
+    """The case a lexical check passes and this one does not."""
+    outside = tmp_path.parent / "outside-8bv2.txt"
+    outside.write_text("secret")
+    inside = tmp_path / "inside"
+    inside.mkdir()
+    link = inside / "link.txt"
+    link.symlink_to(outside)
+
+    async with Harness(
+        "tools", capabilities=has_fs(), client=FilesystemClient(), cwd=str(inside)
+    ) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(link)}}))
+
+    assert result.stop_reason == "refusal"
+    assert "outside this session's directories" in harness.refusal()
+    assert harness.client.reads == []
+
+
+async def test_a_path_outside_the_roots_refuses_the_whole_turn(tmp_path: Path) -> None:
+    """Validate-then-run: a valid first block runs nothing when the second names a path
+    this session may not touch."""
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(tool="echo", arguments={"text": "would have run"}),
+            block(tool="echo", write={"path": "/etc/python-acp-should-never-write"}),
+        )
+
+    assert result.stop_reason == "refusal"
+    assert harness.of("tool_call") == []
+    assert harness.client.writes == []
+
+
+async def test_a_relative_path_is_refused(tmp_path: Path) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": "notes.txt"}}))
+
+    assert result.stop_reason == "refusal"
+    assert "must be an absolute path" in harness.refusal()
+
+
+# ---------------------------------------------------------------------------
+# The gate: a client with no filesystem is not a bug
+# ---------------------------------------------------------------------------
+
+
+async def test_reading_without_the_capability_is_a_refusal_not_an_internal_error(
+    tmp_path: Path,
+) -> None:
+    """`UngatedClientCallError` means *we* reached for something unadvertised and maps to
+    `-32603`. A client that simply has no filesystem has done nothing wrong, so it gets a
+    refusal — and no convention footer, because the convention was followed."""
+    source = tmp_path / "in.txt"
+    source.write_text("unreachable")
+
+    async with fs_harness(tmp_path, capabilities=ClientCapabilities()) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert result.stop_reason == "refusal"
+    assert "fs.readTextFile" in harness.refusal()
+    assert CONVENTION not in harness.refusal()
+    assert harness.client.reads == []
+    assert harness.of("tool_call") == []
+
+
+async def test_a_read_grant_does_not_satisfy_a_write(tmp_path: Path) -> None:
+    """The two `fs` booleans are independent, and this is the asymmetry that proves it."""
+    async with fs_harness(tmp_path, capabilities=has_fs(read=True, write=False)) as harness:
+        result = await harness.run(
+            block(tool="echo", arguments={"text": "hi"}, write={"path": str(tmp_path / "o.txt")})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "fs.writeTextFile" in harness.refusal()
+    assert harness.client.writes == []
+
+
+async def test_a_write_grant_does_not_satisfy_a_read(tmp_path: Path) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("nope")
+
+    async with fs_harness(tmp_path, capabilities=has_fs(read=False, write=True)) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert result.stop_reason == "refusal"
+    assert "fs.readTextFile" in harness.refusal()
+
+
+async def test_a_prompt_that_asks_for_no_files_is_unaffected_by_a_missing_capability(
+    tmp_path: Path,
+) -> None:
+    """The gate is only reached by an invocation that names a file."""
+    async with fs_harness(tmp_path, capabilities=ClientCapabilities()) as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}))
+
+    assert result.stop_reason == "end_turn"
+
+
+async def test_an_empty_read_object_needs_no_capability(tmp_path: Path) -> None:
+    """`"read": {}` names no file, so refusing it would refuse a request never made."""
+    async with fs_harness(tmp_path, capabilities=ClientCapabilities()) as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}, read={}))
+
+    assert result.stop_reason == "end_turn"
+
+
+def test_the_gate_is_still_an_assertion_at_the_call_site() -> None:
+    """Parsing refuses first, so reaching the call with a shut gate is our conformance bug.
+
+    Asserted as a *design* fact rather than through the wire: there is no prompt that can
+    produce it, which is the point.
+    """
+    source = inspect.getsource(McpToolRouterExecutor)
+
+    assert "context.require(Gate.READ_TEXT_FILE)" in source
+    assert "context.require(Gate.WRITE_TEXT_FILE)" in source
+
+
+# ---------------------------------------------------------------------------
+# A client that errors on the call does not crash the turn
+# ---------------------------------------------------------------------------
+
+
+async def test_a_client_that_errors_on_the_read_fails_the_call_not_the_turn(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "gone.txt"
+    source.write_text("x")
+    client = FilesystemClient(read_error=RequestError(-32603, "no such file"))
+
+    async with fs_harness(tmp_path, client=client) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert "-32603: no such file" in last.content[0].content.text
+    # The tool was never called: its argument never arrived.
+    assert [u.status for u in harness.tool_calls()] == ["pending", "failed"]
+
+
+async def test_a_read_failure_does_not_stop_the_calls_after_it(tmp_path: Path) -> None:
+    source = tmp_path / "gone.txt"
+    source.write_text("x")
+    client = FilesystemClient(read_error=RuntimeError("the connection dropped"))
+
+    async with fs_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            block(tool="echo", read={"text": {"path": str(source)}}),
+            block(tool="echo", arguments={"text": "still ran"}),
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert [u.status for u in harness.of("tool_call_update")] == [
+        "failed", "in_progress", "completed",
+    ]
+    assert "RuntimeError: the connection dropped" in harness.of("tool_call_update")[0].content[
+        0
+    ].content.text
+
+
+async def test_a_read_failure_still_stops_the_turn_under_on_tool_failure_stop(
+    tmp_path: Path,
+) -> None:
+    """A failed file call is a failed call, so the option that stops on one stops on this."""
+    source = tmp_path / "gone.txt"
+    source.write_text("x")
+
+    async with fs_harness(
+        tmp_path, client=FilesystemClient(read_error=RuntimeError("nope"))
+    ) as harness:
+        configured(harness, "on-tool-failure", "stop")
+        result = await harness.run(
+            block(tool="echo", read={"text": {"path": str(source)}}), block(tool="echo")
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert len(harness.of("tool_call")) == 1
+
+
+async def test_a_client_that_errors_on_the_write_marks_the_call_failed(tmp_path: Path) -> None:
+    """The tool ran and its output is still in the update; only the write did not happen."""
+    client = FilesystemClient(write_error=RequestError(-32603, "read-only filesystem"))
+
+    async with fs_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                arguments={"text": "produced"},
+                write={"path": str(tmp_path / "out.txt")},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert last.content[0].content.text == "produced"
+    assert "-32603: read-only filesystem" in last.content[-1].content.text
+
+
+async def test_a_client_that_answers_a_read_without_text_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    class Nonsense(FilesystemClient):
+        async def read_text_file(self, session_id, path, line=None, limit=None, **kw):
+            return ReadTextFileResponse.model_construct(content=None)
+
+    source = tmp_path / "in.txt"
+    source.write_text("x")
+
+    async with fs_harness(tmp_path, client=Nonsense()) as harness:
+        result = await harness.run(block(tool="echo", read={"text": {"path": str(source)}}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call_update")[-1].status == "failed"
+    assert "without text content" in harness.of("tool_call_update")[-1].content[0].content.text
+
+
+# ---------------------------------------------------------------------------
+# When a write is skipped on purpose
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_tool_is_not_written_to_the_file(tmp_path: Path) -> None:
+    """Writing a tool's error message into the file the client asked us to fill is worse
+    than not writing."""
+    destination = tmp_path / "out.txt"
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="boom", write={"path": str(destination)}))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.writes == []
+    assert not destination.exists()
+    assert "was not written: the tool failed" in harness.of("tool_call_update")[-1].content[
+        -1
+    ].content.text
+
+
+async def test_a_tool_with_no_text_output_is_not_written(tmp_path: Path) -> None:
+    """Truncating a file to nothing because the tool answered with a picture is a
+    destructive surprise, so it is refused and said out loud."""
+    destination = tmp_path / "out.txt"
+    destination.write_text("do not lose me")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(block(tool="picture", write={"path": str(destination)}))
+
+    assert result.stop_reason == "end_turn"
+    assert destination.read_text() == "do not lose me"
+    assert harness.of("tool_call_update")[-1].status == "failed"
+    assert "no text content" in harness.of("tool_call_update")[-1].content[-1].content.text
+
+
+async def test_a_denied_call_touches_no_files(tmp_path: Path) -> None:
+    """Permission is asked before the read: the client approving the call is what
+    authorises pulling its files."""
+    source = tmp_path / "in.txt"
+    source.write_text("private")
+
+    async with fs_harness(tmp_path, client=FilesystemClient("reject")) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                read={"text": {"path": str(source)}},
+                write={"path": str(tmp_path / "out.txt")},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.reads == [] and harness.client.writes == []
+
+
+async def test_a_dry_run_names_the_files_it_would_touch_and_touches_none(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("preview")
+    destination = tmp_path / "out.txt"
+
+    async with fs_harness(tmp_path) as harness:
+        in_mode(harness, "dry-run")
+        result = await harness.run(
+            block(
+                tool="echo",
+                read={"text": {"path": str(source)}},
+                write={"path": str(destination)},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    said = harness.of("tool_call_update")[-1].content[0].content.text
+    assert str(source.resolve()) in said and str(destination.resolve()) in said
+    assert harness.client.reads == [] and harness.client.writes == []
+    assert not destination.exists()
+
+
+async def test_the_files_a_call_touches_are_reported_as_locations(tmp_path: Path) -> None:
+    """`ToolCall.locations` is the schema's own field for this, and it is what lets a
+    client show — or follow — which files a call is about."""
+    source = tmp_path / "in.txt"
+    source.write_text("x")
+    destination = tmp_path / "out.txt"
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            block(
+                tool="echo",
+                read={"text": {"path": str(source), "line": 3}},
+                write={"path": str(destination)},
+            )
+        )
+
+    locations = harness.of("tool_call")[0].locations
+    assert [(loc.path, loc.line) for loc in locations] == [
+        (str(source.resolve()), 3),
+        (str(destination.resolve()), None),
+    ]
+
+
+async def test_a_call_that_touches_no_files_reports_no_locations() -> None:
+    """`None`, not `[]`: an empty list would claim a call has locations and they are none."""
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="echo"))
+
+    assert harness.of("tool_call")[0].locations is None
+
+
+# ---------------------------------------------------------------------------
+# Every way to get `read` and `write` wrong
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("payload", "because"),
+    [
+        ({"tool": "echo", "read": []}, "'read' must be an object"),
+        ({"tool": "echo", "read": {"text": "/abs/x"}}, "must be an object with a 'path'"),
+        ({"tool": "echo", "read": {"text": {}}}, "'read.text.path' must be a non-empty string"),
+        ({"tool": "echo", "read": {"text": {"path": ""}}}, "non-empty string"),
+        ({"tool": "echo", "read": {"": {"path": "/abs/x"}}}, "non-empty argument name"),
+        ({"tool": "echo", "write": "/abs/x"}, "'write' must be an object with a 'path'"),
+        ({"tool": "echo", "write": {}}, "'write.path' must be a non-empty string"),
+    ],
+    ids=["read-list", "spec-string", "no-path", "empty-path", "empty-argument", "write-string", "write-no-path"],
+)
+async def test_every_malformed_file_clause_names_what_is_wrong(
+    tmp_path: Path, payload: dict[str, Any], because: str
+) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(TextContentBlock(type="text", text=json.dumps(payload)))
+
+    assert result.stop_reason == "refusal"
+    assert because in harness.refusal()
+
+
+@pytest.mark.parametrize("bad", [-1, "2", True, 1.5], ids=["negative", "string", "bool", "float"])
+async def test_line_must_be_a_non_negative_integer(tmp_path: Path, bad: Any) -> None:
+    """`bool` is in the list because it is an `int` in Python and `{"line": true}` is not
+    a line number."""
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(tool="echo", read={"text": {"path": str(tmp_path / "x"), "line": bad}})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "'read.text.line' must be a non-negative integer" in harness.refusal()
+
+
+async def test_limit_is_bounded_the_same_way(tmp_path: Path) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(tool="echo", read={"text": {"path": str(tmp_path / "x"), "limit": -3}})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "'read.text.limit' must be a non-negative integer" in harness.refusal()
+
+
+async def test_an_argument_named_in_both_arguments_and_read_is_refused(tmp_path: Path) -> None:
+    """Two sources for one value is exactly the guess `server` already refuses to make."""
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                arguments={"text": "inline"},
+                read={"text": {"path": str(tmp_path / "in.txt")}},
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "named in both 'arguments' and 'read'" in harness.refusal()

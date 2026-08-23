@@ -115,3 +115,26 @@ def test_a_foreign_client_gets_a_refusal_it_can_read(report: dict) -> None:
 
 def test_the_agent_exits_cleanly_when_the_foreign_client_hangs_up(report: dict) -> None:
     assert report["agentExitCode"] == 0
+
+
+def test_a_foreign_client_serves_the_file_round_trip(report: dict) -> None:
+    """`pyacp-8bv.2` over a real pipe: the agent opened neither file.
+
+    The client is the only place that can see what actually arrived on the wire, so the
+    recorded read is what proves `line` and `limit` were sent and that the path was the
+    **resolved** one — a client asked to re-walk a symlink would be opening something the
+    containment check never saw.
+    """
+    assert report["fileStopReason"] == "end_turn"
+    (path, line, limit) = report["reads"][0]
+    assert (line, limit) == (2, 1)
+    assert path == str(Path(path).resolve()) and path.endswith("/in.txt")
+    # The tool echoed only the requested window back, and the client wrote it.
+    assert report["written"] == "two\n"
+    assert report["writes"] == [path.replace("in.txt", "out.txt")]
+
+
+def test_a_foreign_client_is_never_asked_to_open_a_path_outside_the_roots(report: dict) -> None:
+    """Refused before the call, not after: the read count does not grow."""
+    assert report["outsideStopReason"] == "refusal"
+    assert len(report["reads"]) == 1

@@ -159,6 +159,8 @@ block must be a JSON object naming an MCP tool:
 | `tool` | yes | The MCP tool name |
 | `arguments` | no, defaults to `{}` | Passed to `tools/call` unchanged |
 | `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
+| `read` | no | `{"<argument>": {"path": "/abs", "line": 1, "limit": 40}}` — files to read into arguments |
+| `write` | no | `{"path": "/abs/out.txt"}` — where the tool's text output goes |
 
 Each text block is one call, run in order, and returns `stopReason: "end_turn"`. The turn
 streams, in this order:
@@ -196,6 +198,37 @@ A prompt that is not an invocation — prose, malformed JSON, an empty prompt �
 with `stopReason: "refusal"` and an `agent_message_chunk` explaining the convention. It is
 not an error, and **nothing runs**: the whole prompt is parsed before the first tool, so a
 malformed third block does not leave two side effects behind.
+
+### Reading and writing files
+
+`read` and `write` go through **your** client, never through this process:
+`fs/read_text_file` and `fs/write_text_file` are ACP *client* methods, and this agent
+calls them so you stay in control of what is read and written.
+
+```json
+{"tool": "summarise",
+ "read": {"document": {"path": "/abs/notes.md", "line": 1, "limit": 40}},
+ "write": {"path": "/abs/summary.md"}}
+```
+
+- **Gated on what you advertised at `initialize`.** `clientCapabilities.fs.readTextFile`
+  and `.writeTextFile` are two independent booleans — a read grant does not permit a
+  write. A prompt asking for something you did not advertise is answered with
+  `stopReason: "refusal"` naming the missing capability, before anything runs. There is
+  **no direct-filesystem fallback**; a client that offers no `fs` gets a refusal, not a
+  file opened behind its back.
+- **Both paths must be absolute and inside the session's `cwd` or `additionalDirectories`**,
+  with symlinks followed on both sides. Anything else is refused, and the resolved path is
+  what your client is asked for.
+- `line` is 1-based and `limit` is a line count; both are optional, and omitting them
+  reads the whole file.
+- **The write is skipped, and says so, when the tool failed or returned no text** — an
+  error message is not the document you asked for, and an empty file is a truncation.
+- **A client that errors on `fs/*` fails that one call, not the turn.** Its
+  `tool_call_update` carries your own code and message, and the remaining calls still run.
+
+`ToolCall.locations` carries the resolved paths, so a client can show or follow which
+files a call is about.
 
 ### Session modes
 

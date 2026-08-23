@@ -273,6 +273,50 @@ sequenceDiagram
   `stopReason` with **no task cancellation at all**; the executor returns it. See
   [turns.md](src/python_acp/turns.md).
 
+### Reading and writing files through the client
+
+A turn's third direction. The first two are inbound requests and outbound
+`session/update` notifications; this one is the agent making a **request of the client**
+and waiting for the answer, on the same connection, while `session/prompt` is still open.
+`fs/read_text_file` and `fs/write_text_file` are `acp.interfaces.Client` methods — the
+agent calls them and never serves them — so no file is opened in this process.
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant A as agent.py
+    participant X as turn_mcp_router.py
+    participant F as paths.py
+    participant M as MCP server
+
+    C->>A: session/prompt (read: ..., write: ...)
+    A->>X: execute(context, prompt)
+    X->>F: require_contained(path, session.roots)
+    F-->>X: resolved path, or refuse the turn
+    Note over X: context.allows(Gate.READ_TEXT_FILE) — a client with no fs is refused here, before anything runs
+    X->>C: session/request_permission
+    C-->>X: selected option
+    X->>C: fs/read_text_file {path, line, limit}
+    C-->>X: content
+    X->>M: tools/call (content substituted into an argument)
+    M-->>X: result
+    X->>C: fs/write_text_file {path, content}
+    C-->>X: ok
+    X-)C: session/update tool_call_update (completed)
+    A-->>C: PromptResponse {stopReason: end_turn}
+```
+
+- **Containment is checked before the turn runs anything**, and the **resolved** path is
+  what goes on the wire — the client is not asked to re-walk a symlink this side already
+  followed. [paths.md](src/python_acp/paths.md) owns the rule.
+- **The gate is read twice.** `allows` at parse time, where a client with no `fs` gets a
+  `refusal`; `require` at the call, where a shut gate would mean *our* check was missing
+  and `-32603` is the honest answer.
+- **Permission comes first.** The client approving the call is what authorises pulling its
+  files, so a denied call touches none.
+- **A client that errors on `fs/*` fails that call, not the turn** — the same rule as a
+  tool reporting `isError`, one layer out.
+
 ## Module Documentation
 
 - [ACP agent module](src/python_acp/agent.md)

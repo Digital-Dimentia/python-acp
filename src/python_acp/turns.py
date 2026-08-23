@@ -53,6 +53,19 @@ Three shapes of gate, and they are not interchangeable:
 `session/update` and `session/request_permission` have **no gate at all**. Do not invent
 one for them.
 
+## `allows` asks the client's question; `require` asserts ours
+
+`require` raises `UngatedClientCallError`, which is a `RuntimeError` and therefore
+`-32603` — *we* reached for a method we never checked for. That is the right answer to a
+programming error and the **wrong** answer to a client that simply did not advertise a
+capability, which is a perfectly conforming thing for a client to be.
+
+So an executor decides what to do about an absent capability with `allows`, early, in
+whatever vocabulary its own contract has — `turn_mcp_router.py` refuses the turn with
+`TurnResult.refused()` before anything runs — and keeps `require` for the call site, where
+by then a shut gate really would mean the earlier check was missing. Both readings of the
+same gate, and they are not interchangeable.
+
 ## Cancellation is not an error
 
 `session/cancel` cancels the turn's task, and an executor should let
@@ -262,8 +275,13 @@ STOP_REASON_DISPOSITIONS: tuple[StopReasonUse, ...] = (
         Disposition.EMITTED,
         "pyacp-hnk.2",
         "The prompt was well-formed ACP but named nothing this agent can run, so nothing "
-        "ran at all. It comes with an `agent_message_chunk` naming the convention; a "
-        "JSON-RPC error would be wrong, because the request itself was valid.",
+        "ran at all. It comes with an `agent_message_chunk` explaining why; a JSON-RPC "
+        "error would be wrong, because the request itself was valid. `pyacp-8bv.2` added "
+        "a second source with the same shape: a prompt that correctly asks for a client "
+        "method the client never advertised — an `fs/*` call without "
+        "`clientCapabilities.fs` — is refused rather than raising "
+        "`UngatedClientCallError`, which would report our conformance bug for the "
+        "client's ordinary absence of a capability.",
     ),
     StopReasonUse(
         "cancelled",

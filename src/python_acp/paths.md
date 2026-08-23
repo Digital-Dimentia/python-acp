@@ -50,16 +50,25 @@ Two smaller rules that are easy to get wrong and are pinned by tests:
 **It is a check, not a lock.** Resolution happens at check time; a path that passes can
 become a symlink out of the tree a microsecond later. Closing that needs the file
 descriptor actually opened (`openat`, `O_NOFOLLOW`), which belongs with the code doing
-the opening — Phase 4.2 — not here. Recorded so nobody reads containment as stronger
-than it is.
+the opening. Recorded so nobody reads containment as stronger than it is.
+
+> **Phase 4.2 arrived and could not close it.** This section used to say the fix belonged
+> there. `pyacp-8bv.2` landed the first callers and found the premise wrong:
+> [turn_mcp_router.py](turn_mcp_router.md) reads and writes through the **client's**
+> `fs/read_text_file` / `fs/write_text_file`, so nothing on this side of the wire ever
+> opens a file and `O_NOFOLLOW` has nothing to attach to. What the caller *can* do — and
+> does — is send the **resolved** path, so the client is not asked to re-walk links this
+> check already walked. Closing the window properly is the client's `fs/*` implementation;
+> no ACP agent can do it on the client's behalf.
 
 **Existence is not required.** ACP asks for an absolute path, not an extant one, and a
 client may legitimately name a directory it is about to create. `resolve(strict=False)`
 handles a missing path lexically.
 
-## For Phase 4.2
+## The first callers (Phase 4.2, landed)
 
-`fs/read_text_file` and `fs/write_text_file` are the first callers. The call is:
+`fs/read_text_file` and `fs/write_text_file` in
+[turn_mcp_router.py](turn_mcp_router.md). The call is:
 
 ```python
 from python_acp.paths import require_contained
@@ -70,6 +79,13 @@ resolved = require_contained(path, session.roots, "fs/read_text_file path")
 `session.roots` is `(cwd, *additional_directories)` — see [sessions.py](sessions.md).
 `require_contained` hands back the **resolved** path deliberately: a caller that
 re-derived it from the original string would be opening something the check never saw.
+
+A `PathConstraintError` raised from inside a turn does **not** become `-32602` there. The
+router catches it and answers `stopReason: "refusal"`, because the path arrived inside a
+text block of an otherwise well-formed `session/prompt` and every other parse failure in
+that convention refuses the same way. The reason travels verbatim into the refusal
+message, so nothing is lost; the `-32602` mapping still applies anywhere the exception is
+allowed to escape.
 
 ## Main symbols
 
@@ -96,3 +112,5 @@ behaviour is exactly what is under test.
 - [sessions.py docs](sessions.md) — `Session.roots`, the declaration this checks against
 - [agent.py docs](agent.md) — the edge where the absolute rule is enforced
 - [errors.py docs](errors.md) — why `PathConstraintError` is a `ValueError`
+- [turn_mcp_router.py docs](turn_mcp_router.md) — the caller, and why it refuses rather
+  than errors

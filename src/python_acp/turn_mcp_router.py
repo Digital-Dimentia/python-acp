@@ -25,6 +25,8 @@ module a client codes against:
 * `server` — the MCP server name from `session/new`'s `mcpServers`. Optional **only**
   when the session opened exactly one server; required when it opened several, because
   guessing which of two servers a client meant is the kind of help nobody wants.
+* `read` and `write` — optional, and both go through the *client's* filesystem methods.
+  See "Files move through the client" below.
 
 Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
 are arbitrary and may contain a slash, so a separator would be ambiguous exactly where
@@ -58,6 +60,69 @@ tool did not. Collapsing that into a `stopReason` would lose which tool failed a
 
 A *protocol* failure is different: `MCPProtocolError` propagates and `errors.py` maps it,
 backend code intact.
+
+## Files move through the client, never through this process
+
+`fs/read_text_file` and `fs/write_text_file` are **client** methods — an ACP agent calls
+them, it does not serve them. This executor never opens a file itself, so the client stays
+in control of what is read and written. Two optional keys extend the invocation:
+
+```json
+{"tool": "echo",
+ "read": {"text": {"path": "/abs/in.md", "line": 1, "limit": 40}},
+ "write": {"path": "/abs/out.md"}}
+```
+
+* `read` maps an **argument name** to a file. The file's content becomes that argument's
+  value before the tool runs. `line` (1-based) and `limit` are passed straight through, so
+  a client asks for a window rather than always paying for a whole file. An argument named
+  in both `read` and `arguments` is refused rather than silently overridden — two sources
+  for one value is exactly the kind of guess `server` already refuses to make.
+* `write` names where the tool's **text** output goes, after it runs.
+
+Both paths must be absolute and inside the session's declared roots. `paths.py` owns that
+rule (`pyacp-3rw.4`), and the **resolved** path it returns is what goes on the wire: the
+string the client wrote may traverse a symlink the check never followed.
+
+**That containment check is still a check and not a lock, and here it cannot become one.**
+`paths.md` records the TOCTOU window and says closing it needs `openat`/`O_NOFOLLOW` "with
+the code doing the opening — Phase 4.2". This *is* Phase 4.2, and it does not open
+anything: the client does. The lever does not exist on this side of the wire. Sending the
+resolved path narrows the window — the client is not asked to re-walk the links we already
+walked — and that is the whole of what this module can do about it.
+
+## Gates are read twice, deliberately
+
+A client that never advertised `fs.readTextFile` is not a bug, ours or theirs. So the
+gate is checked at **parse** time with `context.allows(...)`, and a prompt asking for a
+file operation the client cannot do is **refused before anything runs** — the same answer,
+and for the same reason, as a prompt naming a server the session never opened.
+
+`context.require(...)` is then used at the call site as an assertion, because by that point
+an unadvertised gate really would be our conformance bug: parsing should have refused the
+turn. That is exactly what `UngatedClientCallError` -> `-32603` means, and routing the
+ordinary "this client has no filesystem" case through it would have told the client that
+*we* were broken.
+
+Checking at parse time rather than at the call also keeps validate-then-run honest in the
+one place it matters most: discovering after a tool ran that its output has nowhere to go
+would leave the side effect and lose the result.
+
+## A file operation that fails is a failed call, not a failed turn
+
+Same rule as `isError`, one layer out. A client that answers `-32603` to
+`fs/read_text_file` — or raises anything else — marks that invocation `failed` with the
+client's own words in the tool call's content, and the remaining invocations still run.
+The turn ends `end_turn`; `on-tool-failure: stop` still stops it.
+
+Two asymmetries worth stating:
+
+* **A read failure means the tool never runs.** Its argument is missing, and calling it
+  with a placeholder would be inventing input.
+* **A write is skipped when the tool failed**, and when the result carries no text
+  content. Writing a tool's error message — or truncating a file to nothing because the
+  tool answered with an image — is worse than not writing, and the update says which
+  happened.
 """
 
 from __future__ import annotations
@@ -71,6 +136,7 @@ from acp.contrib.permissions import PermissionBroker, default_permission_options
 from acp.contrib.tool_calls import ToolCallTracker
 from acp.exceptions import RequestError
 from acp.helpers import (
+    ToolCallLocation,
     plan_entry,
     text_block,
     tool_content,
@@ -95,6 +161,7 @@ from acp.schema import (
 from python_acp.mcp_content import to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.paths import PathConstraintError, require_contained
 from python_acp.turns import Gate, TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
@@ -116,13 +183,66 @@ class _TurnCancelled(Exception):
     """
 
 
-class PromptConventionError(ValueError):
-    """A prompt block that is not an invocation.
+class _FileCallFailed(Exception):
+    """A client's `fs/*` method did not answer.
 
-    Never reaches the wire as an error: `execute` catches it and refuses the turn with an
-    explanation instead. It is a `ValueError` anyway so that a future caller which lets it
-    escape gets `-32602` rather than `-32603` — the prompt is a parameter.
+    Internal to this module, like `_TurnCancelled`: `_run` turns it into a failed tool
+    call rather than letting it end the turn. Deliberately **not** a `RequestError` and
+    deliberately not raised past `_run` — a client that cannot read one file has not made
+    the turn unanswerable, and the remaining invocations still have work to do.
     """
+
+
+class PromptConventionError(ValueError):
+    """A prompt this executor will not run, refused before anything runs.
+
+    Usually a block that is not an invocation. Never reaches the wire as an error:
+    `execute` catches it and refuses the turn with an explanation instead. It is a
+    `ValueError` anyway so that a future caller which lets it escape gets `-32602` rather
+    than `-32603` — the prompt is a parameter.
+    """
+
+    #: Whether the refusal message should append `CONVENTION`. True for a prompt that got
+    #: the convention wrong; false when the prompt was written correctly and the answer is
+    #: still no, where restating the convention would only misdirect.
+    explains_convention: bool = True
+
+
+class UnsupportedByClientError(PromptConventionError):
+    """The prompt asks for a client method this client never advertised.
+
+    A refusal rather than an `UngatedClientCallError`: that exception maps to `-32603` and
+    means *we* reached for something we never checked, which would be the wrong story to
+    tell a client whose only sin is having no filesystem. The prompt was well-formed; this
+    agent simply cannot carry it out here.
+
+    It is a `PromptConventionError` so `execute` refuses it on the same path, and it
+    suppresses the convention footer because the convention was followed.
+    """
+
+    explains_convention = False
+
+
+@dataclass(frozen=True)
+class FileRead:
+    """One file to read through the client, into one tool argument.
+
+    `path` is the **resolved** path `require_contained` handed back, not the string the
+    client wrote: re-deriving from the original would hand the client a path this session
+    never checked.
+    """
+
+    argument: str
+    path: str
+    line: int | None = None
+    limit: int | None = None
+
+
+@dataclass(frozen=True)
+class FileWrite:
+    """Where a tool's text output goes, written through the client. Resolved, as above."""
+
+    path: str
 
 
 @dataclass(frozen=True)
@@ -132,6 +252,8 @@ class Invocation:
     tool: str
     arguments: dict[str, Any]
     server: str | None = None
+    reads: tuple[FileRead, ...] = ()
+    write: FileWrite | None = None
 
     @property
     def title(self) -> str:
@@ -143,6 +265,19 @@ class Invocation:
         from an unqualified name.
         """
         return f"{self.server}/{self.tool}" if self.server else self.tool
+
+    @property
+    def locations(self) -> list[ToolCallLocation] | None:
+        """The files this call touches, for `ToolCall.locations`.
+
+        The schema has a field for exactly this and it is what lets a client show — or
+        follow — which files a tool call is about. `None` rather than `[]` when there are
+        none, so a call that touches nothing does not claim an empty list of locations.
+        """
+        found = [ToolCallLocation(path=read.path, line=read.line) for read in self.reads]
+        if self.write is not None:
+            found.append(ToolCallLocation(path=self.write.path))
+        return found or None
 
 
 #: Mode ids, so a branch reads as a name rather than a string literal.
@@ -284,7 +419,7 @@ class McpToolRouterExecutor:
         await self._announce_tools(context, backends)
 
         try:
-            invocations = self._parse(prompt, backends)
+            invocations = self._parse(context, prompt, backends)
         except PromptConventionError as exc:
             return await self._refuse(context, exc)
 
@@ -384,15 +519,21 @@ class McpToolRouterExecutor:
     # ------------------------------------------------------------------
 
     def _parse(
-        self, prompt: list[Any], backends: dict[str, MCPStdioClient] | Any
+        self,
+        context: TurnContext,
+        prompt: list[Any],
+        backends: dict[str, MCPStdioClient] | Any,
     ) -> list[Invocation]:
         if not prompt:
             raise PromptConventionError("The prompt is empty, so it names no tool to run.")
         return [
-            self._parse_block(index, block, backends) for index, block in enumerate(prompt)
+            self._parse_block(context, index, block, backends)
+            for index, block in enumerate(prompt)
         ]
 
-    def _parse_block(self, index: int, block: Any, backends: Any) -> Invocation:
+    def _parse_block(
+        self, context: TurnContext, index: int, block: Any, backends: Any
+    ) -> Invocation:
         kind = getattr(block, "type", None)
         if kind in DECLINED_BLOCKS:
             raise PromptConventionError(
@@ -428,7 +569,83 @@ class McpToolRouterExecutor:
             raise PromptConventionError(
                 f"Prompt block {index}: 'arguments' must be an object."
             )
-        return Invocation(tool=tool, arguments=arguments, server=self._server(index, payload, backends))
+        reads = self._reads(context, index, payload, arguments)
+        return Invocation(
+            tool=tool,
+            arguments=arguments,
+            server=self._server(index, payload, backends),
+            reads=reads,
+            write=self._write(context, index, payload),
+        )
+
+    @staticmethod
+    def _reads(
+        context: TurnContext, index: int, payload: dict[str, Any], arguments: dict[str, Any]
+    ) -> tuple[FileRead, ...]:
+        """Parse `read`, refusing before anything runs rather than at the call.
+
+        The gate is read with `allows` here — a client with no `fs.readTextFile` is not a
+        bug, so it gets a refusal, not the `-32603` that `require` would produce. See the
+        module docstring.
+        """
+        declared = payload.get("read")
+        if declared is None:
+            return ()
+        if not isinstance(declared, dict):
+            raise PromptConventionError(
+                f"Prompt block {index}: 'read' must be an object mapping an argument name "
+                "to a file."
+            )
+        if declared and not context.allows(Gate.READ_TEXT_FILE):
+            raise UnsupportedByClientError(
+                f"Prompt block {index} asks to read a file, but this client did not "
+                "advertise clientCapabilities.fs.readTextFile, and this agent reads files "
+                "only through the client."
+            )
+        reads: list[FileRead] = []
+        for argument, spec in declared.items():
+            if not isinstance(argument, str) or not argument:
+                raise PromptConventionError(
+                    f"Prompt block {index}: every key of 'read' must be a non-empty "
+                    "argument name."
+                )
+            if argument in arguments:
+                raise PromptConventionError(
+                    f"Prompt block {index}: {argument!r} is named in both 'arguments' and "
+                    "'read', which gives it two values; name it in one of them."
+                )
+            if not isinstance(spec, dict):
+                raise PromptConventionError(
+                    f"Prompt block {index}: 'read.{argument}' must be an object with a "
+                    "'path'."
+                )
+            reads.append(
+                FileRead(
+                    argument=argument,
+                    path=_contained(context, index, spec.get("path"), f"read.{argument}"),
+                    line=_bounded(index, spec.get("line"), f"read.{argument}.line"),
+                    limit=_bounded(index, spec.get("limit"), f"read.{argument}.limit"),
+                )
+            )
+        return tuple(reads)
+
+    @staticmethod
+    def _write(context: TurnContext, index: int, payload: dict[str, Any]) -> FileWrite | None:
+        """Parse `write`. Same gate treatment as `_reads`, and the same reason."""
+        declared = payload.get("write")
+        if declared is None:
+            return None
+        if not isinstance(declared, dict):
+            raise PromptConventionError(
+                f"Prompt block {index}: 'write' must be an object with a 'path'."
+            )
+        if not context.allows(Gate.WRITE_TEXT_FILE):
+            raise UnsupportedByClientError(
+                f"Prompt block {index} asks to write a file, but this client did not "
+                "advertise clientCapabilities.fs.writeTextFile, and this agent writes "
+                "files only through the client."
+            )
+        return FileWrite(path=_contained(context, index, declared.get("path"), "write"))
 
     @staticmethod
     def _server(index: int, payload: dict[str, Any], backends: Any) -> str | None:
@@ -484,6 +701,7 @@ class McpToolRouterExecutor:
                 kind="other",
                 status="pending",
                 raw_input=invocation.arguments,
+                locations=invocation.locations,
             )
         )
         if _mode(context) == DRY_RUN:
@@ -493,7 +711,10 @@ class McpToolRouterExecutor:
                     status="completed",
                     content=[
                         tool_content(
-                            text_block(f"[dry-run] {invocation.title} was not executed.")
+                            text_block(
+                                f"[dry-run] {invocation.title} was not executed."
+                                f"{_files_note(invocation)}"
+                            )
                         )
                     ],
                 )
@@ -512,25 +733,116 @@ class McpToolRouterExecutor:
             tracker.forget(key)
             return True
 
-        await context.emit(tracker.progress(key, status="in_progress"))
+        # Reading is asked for *after* permission and before `in_progress`: the client
+        # approving the call is what authorises pulling its files, and a failure here
+        # means the tool never runs, so `in_progress` would have been a lie.
+        try:
+            arguments = await self._read_files(context, invocation)
+        except _FileCallFailed as exc:
+            await context.emit(
+                tracker.progress(key, status="failed", content=[tool_content(text_block(str(exc)))])
+            )
+            tracker.forget(key)
+            return True
+
+        await context.emit(tracker.progress(key, status="in_progress", raw_input=arguments))
 
         client = backends[invocation.server]
         logger.debug("Calling %s for session %s", invocation.title, context.session_id)
-        result = await client.call_tool(invocation.tool, invocation.arguments)
+        result = await client.call_tool(invocation.tool, arguments)
 
         # `isError` is the MCP-sanctioned way for a tool to report its own failure on an
         # otherwise successful call. It becomes a status, never an exception.
         failed = bool(result["isError"])
+        content = list(to_tool_call_content(result) or ())
+        if invocation.write is not None:
+            note, wrote = await self._write_file(context, invocation.write, result, failed)
+            failed = failed or not wrote
+            content.append(tool_content(text_block(note)))
         await context.emit(
             tracker.progress(
                 key,
                 status="failed" if failed else "completed",
-                content=to_tool_call_content(result),
+                content=content or None,
                 raw_output=result,
             )
         )
         tracker.forget(key)
         return failed
+
+    # ------------------------------------------------------------------
+    # The client's filesystem
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _read_files(context: TurnContext, invocation: Invocation) -> dict[str, Any]:
+        """Fill this call's file-backed arguments from the client.
+
+        `require` rather than `allows` here on purpose: `_reads` already refused the turn
+        for a client without the capability, so reaching this line with the gate shut is
+        *our* bug and `-32603` is the honest answer. See the module docstring.
+        """
+        if not invocation.reads:
+            return invocation.arguments
+        context.require(Gate.READ_TEXT_FILE)
+        arguments = dict(invocation.arguments)
+        for read in invocation.reads:
+            try:
+                response = await context.client.read_text_file(
+                    session_id=context.session_id,
+                    path=read.path,
+                    line=read.line,
+                    limit=read.limit,
+                )
+            except Exception as exc:  # noqa: BLE001 - see the module docstring
+                logger.info("fs/read_text_file for %s failed: %s", read.path, exc)
+                raise _FileCallFailed(
+                    f"Reading {read.path} through the client failed ({_why(exc)}), so "
+                    f"{invocation.title} was not called."
+                ) from None
+            content = getattr(response, "content", None)
+            if not isinstance(content, str):
+                raise _FileCallFailed(
+                    f"The client answered fs/read_text_file for {read.path} without text "
+                    f"content, so {invocation.title} was not called."
+                )
+            arguments[read.argument] = content
+        return arguments
+
+    @staticmethod
+    async def _write_file(
+        context: TurnContext, write: FileWrite, result: dict[str, Any], failed: bool
+    ) -> tuple[str, bool]:
+        """Send the tool's text output to the client. Returns the note and whether it went.
+
+        Skipped rather than attempted in two cases, both of which would otherwise damage a
+        file the client asked us to fill: a tool that reported `isError` (its output is a
+        diagnostic, not a document) and a result with no text content at all (writing "" is
+        a truncation, not a write).
+        """
+        context.require(Gate.WRITE_TEXT_FILE)
+        if failed:
+            return f"{write.path} was not written: the tool failed.", False
+        text = "\n".join(
+            block["text"]
+            for block in result.get("content") or ()
+            if isinstance(block, dict) and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        )
+        if not text:
+            return (
+                f"{write.path} was not written: the tool returned no text content, and "
+                "writing an empty file would be a truncation rather than a result.",
+                False,
+            )
+        try:
+            await context.client.write_text_file(
+                session_id=context.session_id, path=write.path, content=text
+            )
+        except Exception as exc:  # noqa: BLE001 - see the module docstring
+            logger.info("fs/write_text_file for %s failed: %s", write.path, exc)
+            return f"Writing {write.path} through the client failed ({_why(exc)}).", False
+        return f"Wrote {len(text)} characters to {write.path}.", True
 
     async def _permitted(
         self,
@@ -634,9 +946,16 @@ class McpToolRouterExecutor:
         return allowed
 
     async def _refuse(self, context: TurnContext, exc: PromptConventionError) -> TurnResult:
-        """Say why, then stop. A silent refusal is worse than a wrong one."""
+        """Say why, then stop. A silent refusal is worse than a wrong one.
+
+        The convention footer is appended only when the convention is what was missed.
+        A prompt refused because the *client* cannot do what it correctly asked for gets
+        the reason alone — restating the convention there would send a client looking for
+        a mistake it did not make.
+        """
         logger.info("Refusing prompt for session %s: %s", context.session_id, exc)
-        await context.emit(update_agent_message_text(f"{exc} {CONVENTION}"))
+        message = f"{exc} {CONVENTION}" if exc.explains_convention else str(exc)
+        await context.emit(update_agent_message_text(message))
         return TurnResult.refused()
 
 
@@ -690,6 +1009,69 @@ def _plan_for(invocations: list[Invocation]) -> list[PlanEntry]:
     validates every invocation up front, so it already knows every step it will take.
     """
     return [plan_entry(f"Run {invocation.title}", status="pending") for invocation in invocations]
+
+
+def _why(exc: Exception) -> str:
+    """One phrase naming a failed client call, for a tool call's content.
+
+    A `RequestError` carries a JSON-RPC code the client chose and a message it wrote;
+    both belong in the transcript, because "the client said -32603 file not found" is a
+    different problem from "the connection dropped".
+    """
+    if isinstance(exc, RequestError):
+        # `RequestError` has no `.message`; the message is the exception's own args.
+        return f"{exc.code}: {exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _files_note(invocation: Invocation) -> str:
+    """What a dry run says about the files it did not touch.
+
+    A preview that named the tool and its arguments but stayed silent about the file it
+    was about to overwrite would be a preview of the wrong thing.
+    """
+    parts = [f"{read.path} -> {read.argument!r}" for read in invocation.reads]
+    note = f" Would read {', '.join(parts)}." if parts else ""
+    if invocation.write is not None:
+        note += f" Would write its output to {invocation.write.path}."
+    return note
+
+
+def _contained(context: TurnContext, index: int, path: Any, label: str) -> str:
+    """One declared path, checked against the session's roots, resolved.
+
+    `paths.py` owns the rule (`pyacp-3rw.4`); this only adapts its refusal into a prompt
+    refusal. `PathConstraintError` is a `ValueError` that `errors.py` would answer with
+    `-32602`, but it arrives here from inside a text block of an otherwise well-formed
+    `session/prompt`, and this executor answers a prompt it will not run with a refusal —
+    the same reasoning as every other parse failure. It is re-raised, not swallowed, so
+    the reason still reaches the client verbatim.
+    """
+    if not isinstance(path, str) or not path:
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}.path' must be a non-empty string."
+        )
+    try:
+        return str(require_contained(path, context.session.roots, f"{label}.path"))
+    except PathConstraintError as exc:
+        raise PromptConventionError(f"Prompt block {index}: {exc}") from None
+
+
+def _bounded(index: int, value: Any, label: str) -> int | None:
+    """`line` or `limit`: absent, or a non-negative integer.
+
+    The schema constrains both to `ge=0` and would reject anything else with a pydantic
+    error mid-turn; refusing here says which block and which field instead. `bool` is
+    excluded explicitly because it is an `int` in Python and `{"line": true}` is not a
+    line number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}' must be a non-negative integer."
+        )
+    return value
 
 
 def _describe(block: Any) -> str:

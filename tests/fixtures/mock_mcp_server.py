@@ -284,6 +284,20 @@ while True:
                 },
             }
         )
+    # A tool that succeeds with NO text content. `pyacp-8bv.2` needs it: an invocation
+    # that asks for its output to be written has nothing to write here, and writing an
+    # empty file would truncate one the client asked us to fill.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "picture":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+                    "isError": False,
+                },
+            }
+        )
     # A tool result that omits isError entirely. The spec defaults it to false;
     # the client is expected to fill it in rather than leave the field missing.
     elif method == "tools/call" and req.get("params", {}).get("name") == "no-flag":

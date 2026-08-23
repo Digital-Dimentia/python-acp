@@ -173,6 +173,12 @@ Notes that the table cannot carry:
 - **Ungated calls are a conformance bug, not a runtime error.** A client that never advertised
   `terminal` is entitled to answer `-32601`; the failure surfaces as a broken turn, so
   `pyacp-6ni.3` tests the gate, not the recovery.
+- **A client that simply lacks a capability is not that bug.** `UngatedClientCallError` →
+  `-32603` says *we* reached for something unadvertised. The ordinary case — a client with
+  no `fs` at all — is decided with `context.allows(...)` before the call, and
+  `pyacp-8bv.2` answers it with `stopReason: "refusal"`. Sending it through `require`
+  would report our conformance bug for the client's ordinary absence of a capability. See
+  [../src/python_acp/turns.md](../src/python_acp/turns.md).
 
 ## Consequences for later phases
 

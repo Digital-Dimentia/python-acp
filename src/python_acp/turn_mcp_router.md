@@ -27,6 +27,8 @@ A **text** content block whose entire text is a JSON object:
 | `tool` | yes | The MCP tool name |
 | `arguments` | no, defaults to `{}` | Passed to `tools/call` unchanged |
 | `server` | only when the session opened **more than one** MCP server | Which server from `session/new`'s `mcpServers` |
+| `read` | no | `{argument: {path, line?, limit?}}` — files to read **through the client** into arguments |
+| `write` | no | `{path}` — where the tool's text output goes, **through the client** |
 
 Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
 are arbitrary and may contain a slash, so a separator would be ambiguous exactly where
@@ -41,6 +43,92 @@ refusal names the servers that *are* open, so a client does not have to go looki
 The tool-call title is **always** qualified (`tools/echo`), even when the client omitted
 `server`. The title outlives the turn — it is in the transcript `session/load` replays —
 and "which server ran this" is not recoverable later from a bare name.
+
+## Files move through the client, never through this process
+
+`fs/read_text_file` and `fs/write_text_file` are `acp.interfaces.Client` methods: an ACP
+agent **calls** them, it does not serve them. This executor never opens a file, so the
+client stays in control of what is read and written — which is the whole reason the two
+optional fields exist rather than a `pathlib` call.
+
+```json
+{"tool": "summarise",
+ "read": {"document": {"path": "/abs/in.md", "line": 1, "limit": 40}},
+ "write": {"path": "/abs/out.md"}}
+```
+
+- **`read` maps an argument name to a file.** The file's content becomes that argument's
+  value immediately before the tool runs. `line` (1-based) and `limit` go straight through
+  to `ReadTextFileRequest`, so a client asks for a window rather than always paying for a
+  whole file; both must be non-negative integers, and `true` is rejected explicitly because
+  `bool` is an `int` in Python.
+- **An argument named in both `arguments` and `read` is refused.** Two sources for one
+  value is exactly the guess `server` already declines to make.
+- **`write` takes the tool's text content**, joined with newlines, after the call returns.
+
+### Containment, and the lock this cannot become
+
+Both paths must be absolute and inside the session's declared roots.
+[paths.py](paths.md) owns that rule (`pyacp-3rw.4`) and this module only adapts its
+refusal into a prompt refusal; the **resolved** path it returns is what goes on the wire,
+because the string the client wrote may traverse a symlink the check never followed.
+
+`paths.md` records that containment is *a check, not a lock* — a path that passes can
+become a symlink out of the tree a microsecond later — and says closing that needs
+`openat` / `O_NOFOLLOW` "with the code doing the opening — Phase 4.2".
+
+**This is Phase 4.2, and the lever is not here.** It opens nothing; the client does. What
+this side can do is send the resolved path, so the client is not asked to re-walk links we
+already walked, and that is what it does. Closing the window properly is the *client's*
+`fs/*` implementation, and no ACP agent can do it on the client's behalf.
+
+## A client with no filesystem is not a bug — the gate is read twice
+
+`clientCapabilities.fs` carries **two independent booleans**, and a read grant must never
+satisfy a write.
+
+| Where | Call | Because |
+|---|---|---|
+| **Parse time** | `context.allows(Gate.READ_TEXT_FILE)` / `WRITE_TEXT_FILE` | A client that never advertised `fs` has done nothing wrong. The prompt is **refused before anything runs**, with a message naming the missing capability — and **without** the convention footer, because the convention was followed |
+| **Call site** | `context.require(...)` | By then an unadvertised gate is *our* conformance bug: parsing should already have refused. That is exactly what `UngatedClientCallError` → `-32603` means |
+
+Routing the ordinary "this client has no filesystem" case through `require` would have
+answered `-32603` — telling a client that *we* were broken when the honest answer is that
+it cannot do what it asked for. `stopReason: "refusal"` is the answer, for the same reason
+a prompt naming an unopened server gets one.
+
+Checking at parse time also keeps validate-then-run honest where it matters most:
+discovering *after* a tool ran that its output has nowhere to go would leave the side
+effect behind and lose the result.
+
+`"read": {}` names no file, so it needs no capability — refusing it would refuse a request
+never made.
+
+## A file operation that fails is a failed call, not a failed turn
+
+The `isError` rule, one layer out. A client that answers `-32603` to `fs/read_text_file`,
+or drops the connection, or returns a response with no text in it, marks **that
+invocation** `failed` with the client's own code and message in the tool call's content.
+The remaining invocations still run and the turn ends `end_turn`; `on-tool-failure: stop`
+still stops it, because a failed file call is a failed call.
+
+Four cases, each decided rather than defaulted:
+
+| Case | What happens | Why |
+|---|---|---|
+| The read fails | the tool is **never called**; no `in_progress` | its argument is missing, and calling it with a placeholder would be inventing input |
+| The tool reported `isError` | the write is **skipped**, and said so | a tool's error message is a diagnostic, not the document the client asked for |
+| The tool returned no text content | the write is **skipped**, and said so | writing `""` is a truncation, not a write |
+| The write fails | the call is `failed`, but the tool's own output is still in the update | the tool did run; only the disposal of its result did not |
+
+The reads happen **after** the permission prompt and before `in_progress`: the client
+approving the call is what authorises pulling its files, so a denied call touches nothing.
+A dry run touches nothing either, and names the files it would have.
+
+`ToolCall.locations` carries the resolved paths — the schema's own field for "which files
+is this call about" — and is `None` rather than `[]` for a call that touches none.
+`in_progress` re-publishes `rawInput` with the file content substituted in, which is the
+only place a client can see what the tool was really called with.
 
 ## Only text blocks, and the other four are declined by name
 
@@ -295,8 +383,10 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | Symbol | Purpose |
 |---|---|
 | `McpToolRouterExecutor(backends)` | The executor. `agent.py`'s default |
-| `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title` |
-| `PromptConventionError` | A block that is not an invocation. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602` |
+| `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title`, `reads`, `write`, `locations` |
+| `FileRead` / `FileWrite` | One file to read into an argument, and where the output goes. Both carry the **resolved** path |
+| `PromptConventionError` | A prompt this executor will not run. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602`. `explains_convention` says whether the refusal appends `CONVENTION` |
+| `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |
@@ -315,6 +405,9 @@ directly, so the context does not widen for one executor's dependency. Servers w
   above: text only, the rest declined by name, and the literals derived from
   `supported_prompt_blocks`.
 - `pyacp-hnk.4` — the rest of the `session/update` variant set.
+- `pyacp-8bv.2` ✔ — `fs/read_text_file` and `fs/write_text_file`, above. It inherited
+  `paths.md`'s open TOCTOU question and **could not close it**: this module never opens a
+  file, so `O_NOFOLLOW` has nothing to attach to here.
 - `pyacp-hnk.5` ✔ — the `stopReason` contract. There is no fourth reason to add: the two
   this executor never returns are limits on a model, and it has none. See the table in
   [turns.md](turns.md).

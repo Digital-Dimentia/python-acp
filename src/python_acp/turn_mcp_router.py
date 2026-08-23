@@ -111,10 +111,6 @@ class _TurnCancelled(Exception):
     """
 
 
-class _PermissionUnavailable(Exception):
-    """The client refused `session/request_permission`, which it must not."""
-
-
 class PromptConventionError(ValueError):
     """A prompt block that is not an invocation.
 
@@ -159,6 +155,11 @@ PERMISSION_OPTIONS: tuple[PermissionOption, ...] = (
 
 #: Which of those options mean "run it". `reject_once` / `reject_always` are the other two.
 _ALLOWING_KINDS = frozenset({"allow_once", "allow_always"})
+
+#: Sentinel key in `Session.remembered_permissions` recording that we have already told
+#: this session's client we are proceeding without it. Not a tool name, and cannot collide
+#: with one: every real key is `server/tool`.
+_NO_HUMAN_KEY = "\x00 no permission channel"
 
 #: Which of them mean "and do not ask again this session".
 _REMEMBERING_KINDS = frozenset({"allow_always", "reject_always"})
@@ -233,8 +234,6 @@ class McpToolRouterExecutor:
                 plan[index].status = "pending"
                 await self._emit_plan(context, plan)
                 return TurnResult("cancelled")
-            except _PermissionUnavailable as exc:
-                return await self._refuse(context, PromptConventionError(str(exc)))
             plan[index].status = "failed" if failed else "completed"
             await self._emit_plan(context, plan)
         return TurnResult.ended()
@@ -454,16 +453,53 @@ class McpToolRouterExecutor:
                 key, description=f"Run the MCP tool {invocation.title}"
             )
         except RequestError as exc:
-            # `session/request_permission` is mandatory — `ClientCapabilities` has no field
-            # for it, so every ACP client must accept it. One that refuses is broken, and
-            # the safe reading is neither "assume consent" nor "deny forever" but "say so".
-            raise _PermissionUnavailable(
-                f"This client answered {exc.code} to session/request_permission, which "
-                "every ACP client must accept. Nothing was run, because assuming consent "
-                "for a tool nobody approved is not a choice this agent will make."
-            ) from exc
+            return await self._without_a_human(context, exc)
 
         return self._decide(context, invocation, response)
+
+    @staticmethod
+    async def _without_a_human(context: TurnContext, exc: RequestError) -> bool:
+        """Proceed when the client cannot take permission requests, and say so.
+
+        **This is a correction, made under interop evidence (`pyacp-6ni.4`).** The first
+        implementation refused the turn, reasoning that `session/request_permission` is
+        mandatory — `ClientCapabilities` has no field for it — so a client answering
+        `-32601` is broken. Then the SDK's own `examples/client.py` turned out to answer
+        exactly that, and a headless client with no human to ask has nothing else it
+        honestly can answer. An agent unusable against the reference client is the agent
+        with the problem.
+
+        Proceeding is not "assume consent from nowhere". **The client named this tool and
+        these arguments in `session/prompt` itself**, so the authorization already exists;
+        the prompt was only ever a courtesy to a human who might be watching, and a client
+        that cannot reach one has already made the decision.
+
+        That reasoning is **specific to this executor** and does not generalise. An
+        LLM-backed executor *chooses* the tool, so the client's prompt authorizes nothing
+        in particular and the fallback would be a hole. Any executor added later must
+        decide this again for itself.
+
+        Announced once per session rather than silently, and once rather than per call, so
+        a transcript says plainly why nothing was asked.
+        """
+        already_said = context.session.remembered_permissions.get(_NO_HUMAN_KEY)
+        if not already_said:
+            context.session.remembered_permissions[_NO_HUMAN_KEY] = True
+            await context.emit(
+                update_agent_message_text(
+                    f"This client answered {exc.code} to session/request_permission, so "
+                    "there is nobody to ask. Running the tools this prompt named anyway: "
+                    "the prompt is itself the authorization, because this agent only runs "
+                    "what the client explicitly named."
+                )
+            )
+        logger.warning(
+            "Client refused session/request_permission (%s); proceeding on the prompt's "
+            "own authority for session %s",
+            exc.code,
+            context.session_id,
+        )
+        return True
 
     @staticmethod
     def _decide(

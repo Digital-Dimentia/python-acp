@@ -184,8 +184,23 @@ The `_always` variants are remembered on the `Session` for its lifetime and copi
 shared) by a fork — a fork answering "always allow" must not decide for its parent. The
 scope is the session because the SDK's own option is named *"Approve for session"*.
 
-**A client that refuses the request gets a refusal.** Neither "assume consent" nor "deny
-forever" is a safe reading of a broken client, so the turn stops and says which is which.
+### A client that cannot ask a human is not a broken client
+
+This was implemented the other way first, and [interop](../../docs/interop.md) corrected
+it. `session/request_permission` is mandatory — `ClientCapabilities` has no field for it —
+so a client answering `-32601` looked broken, and the turn refused. Then the SDK's own
+`examples/client.py` turned out to answer exactly that, and so will any headless client
+with no human to ask. An agent unusable against the reference client is the agent with the
+problem.
+
+**The turn proceeds, and says so once per session.** Not "assume consent from nowhere":
+the client named this tool and these arguments in `session/prompt` itself, so the
+authorization already exists. The prompt was a courtesy to a human who might be watching,
+and a client that cannot reach one has already decided.
+
+**That reasoning does not generalise.** An LLM-backed executor *chooses* the tool, so a
+client's prompt authorizes nothing in particular and this fallback would be a hole. Any
+executor added later must decide it again for itself.
 
 ### `acp.contrib.permissions` is used, with one addition
 

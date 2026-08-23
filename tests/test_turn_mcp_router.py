@@ -636,17 +636,35 @@ async def test_a_remembered_answer_is_per_tool_not_per_session() -> None:
     assert [c.title for c in harness.client.permission_requests] == ["tools/echo", "tools/boom"]
 
 
-async def test_a_client_that_refuses_the_request_gets_a_refusal_not_a_silent_run() -> None:
-    """`session/request_permission` is mandatory; a client refusing it is broken.
+async def test_a_client_that_cannot_ask_a_human_gets_the_tool_run_anyway() -> None:
+    """Corrected under interop evidence (`pyacp-6ni.4`).
 
-    Neither "assume consent" nor "deny forever" is a safe reading, so the turn says so.
+    The first implementation refused the turn, on the reasoning that
+    `session/request_permission` is mandatory so a client answering `-32601` is broken.
+    The SDK's own `examples/client.py` answers exactly that. Proceeding is not assuming
+    consent from nowhere: **the client named this tool in `session/prompt` itself**, so
+    the authorization already exists and the prompt was a courtesy to a human who might
+    be watching.
     """
     async with Harness("tools", client=RecordingClient(refuses_permission=True)) as harness:
-        result = await harness.run(block(tool="echo"))
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}))
 
-    assert result.stop_reason == "refusal"
-    assert "every ACP client must accept" in harness.refusal()
-    assert [u.status for u in harness.tool_calls()] == ["pending"]
+    assert result.stop_reason == "end_turn"
+    assert [u.status for u in harness.tool_calls()] == ["pending", "in_progress", "completed"]
+
+
+async def test_proceeding_without_a_human_is_announced_once_per_session() -> None:
+    """Once, not silently and not per call, so a transcript says plainly why nothing was
+    asked."""
+    async with Harness("tools", client=RecordingClient(refuses_permission=True)) as harness:
+        await harness.run(block(tool="echo"))
+        await harness.run(block(tool="echo"))
+
+    announcements = [
+        u for u in harness.of("agent_message_chunk") if "nobody to ask" in u.content.text
+    ]
+    assert len(announcements) == 1
+    assert len(harness.client.permission_requests) == 2
 
 
 async def test_an_option_we_never_offered_is_not_treated_as_consent() -> None:

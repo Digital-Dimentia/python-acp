@@ -360,6 +360,39 @@ class MCPStdioClient:
         async with self._write_lock:
             await self._write(payload)
 
+    async def cancel_request(self, request_id: int, reason: str | None = None) -> None:
+        """Tell the server to stop working on a request whose answer we abandoned.
+
+        JSON-RPC has no in-band cancel, so a request we stop waiting for leaves
+        the server computing a reply nobody will read. MCP's remedy is
+        `notifications/cancelled` carrying the `requestId` and an optional
+        human-readable `reason`.
+
+        This is the *whole* "tell the MCP server to stop" path, kept as one
+        reusable method rather than buried in the timeout branch, so cancelling
+        for any other reason — an ACP-side cancellation, a client that hung up —
+        is this same call with a different `reason`.
+
+        Two deliberate properties:
+
+        - **It never raises.** A dead subprocess has nothing left to cancel, and
+          a failure here must not mask the failure that prompted the cancel.
+        - **It does not touch `_pending`.** Whoever abandoned the request owns
+          that future; this method only puts the notification on the wire.
+
+        The notification and a real response can cross in flight — that race is
+        expected on both sides, and a late reply for a forgotten id is discarded
+        by `_resolve_response`.
+        """
+        params: dict[str, Any] = {"requestId": request_id}
+        if reason:
+            params["reason"] = reason
+        try:
+            await self.notify("notifications/cancelled", params)
+        except MCPProtocolError:
+            # Best-effort by contract: log where the courtesy went undelivered.
+            logger.debug("Could not cancel MCP request %r", request_id, exc_info=True)
+
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -386,7 +419,19 @@ class MCPStdioClient:
         try:
             response = await asyncio.wait_for(future, timeout=self.request_timeout)
         except asyncio.TimeoutError as exc:
-            raise MCPProtocolError("Timed out waiting for MCP response") from exc
+            self._pending.pop(request_id, None)
+            # `initialize` is the one request a client MUST NOT cancel: there is
+            # no session for the server to abandon yet, and the lifecycle defines
+            # no state after a cancelled handshake. Every other abandoned request
+            # gets told to stop instead of computing a reply we will discard.
+            if method != "initialize":
+                await self.cancel_request(
+                    request_id,
+                    f"python-acp timed out after {self.request_timeout}s waiting for {method}",
+                )
+            raise MCPProtocolError(
+                f"Timed out waiting for MCP response to {method}"
+            ) from exc
         finally:
             self._pending.pop(request_id, None)
 

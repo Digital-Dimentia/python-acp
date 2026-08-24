@@ -138,6 +138,7 @@ Outbound — what `MCPStdioClient` wraps today, and the shape each returns:
 | `prompts/get` | `get_prompt(name, arguments)` | `{description, messages: [{role, content}]}` |
 | `resources/list` | `list_resources()` | `[{uri, name, mimeType}]` — every page |
 | `resources/read` | `read_resource(resource_id, arguments)` | `{contents: [{uri, mimeType, text\|blob}]}` |
+| `notifications/cancelled` | `cancel_request(request_id, reason=None)` | nothing — a notification |
 
 The three `*_list` wrappers all go through `_list_all`, which walks `nextCursor` to
 exhaustion and hands back one flat list — not the raw page envelope. An absent
@@ -149,7 +150,7 @@ list method belongs on `_list_all` too, not on a bare `request()`.
 Everything else goes through the generic `request()` / `notify()`. Not yet wrapped, in
 rough order of usefulness here: `ping`, `resources/templates/list`,
 `resources/subscribe` / `unsubscribe`, `logging/setLevel`, `completion/complete`,
-`notifications/cancelled`, `notifications/progress`.
+`notifications/progress`.
 
 Inbound — `_handle_message` routes by shape, and `mcp_stdio.md` has the table. The part
 worth memorizing: **every server request gets a reply.** `ping` is answered inline with
@@ -191,9 +192,30 @@ This trips people up because two of them look like success:
    fails every outstanding future with `MCPProtocolError`, so callers get an error
    rather than hanging.
 
-A timeout is its own case: `request()` raises after `request_timeout` (default 30s) but
-sends nothing to the server, which keeps working on an answer nobody will read. The
-spec's remedy is `notifications/cancelled` carrying the `requestId`.
+**Abandonment is its own case, and it is handled.** Two things end a wait without an
+answer — `request_timeout` expiring (default 30s), and *our caller* being cancelled,
+which is what an ACP `session/cancel` tearing down a turn mid-`tools/call` looks like
+from here. Both leave the server in the identical state: computing a reply nobody will
+read. So `request()` routes both through `_abandon(request_id, method, reason)`, which
+
+- **forgets the pending future first**, so a reply that crosses the notification in
+  flight finds nothing and is discarded by `_resolve_response`;
+- **skips `initialize`** — the one request a client MUST NOT cancel, because there is no
+  session for the server to abandon yet and the lifecycle defines no state after a
+  cancelled handshake;
+- **sends `notifications/cancelled`** via `cancel_request(request_id, reason=None)`,
+  under `asyncio.shield` so a second cancellation landing mid-write cannot truncate the
+  notification.
+
+The timeout path then raises `MCPProtocolError`; the cancellation path **re-raises the
+`CancelledError`**, because returning normally would tell asyncio the cancel did not
+take.
+
+`cancel_request` is the whole "tell the server to stop" path, reusable on its own with a
+different `reason`. Two properties to preserve: it **never raises** (a dead subprocess
+has nothing left to cancel, and an `OSError` from a mid-write death must not replace the
+error the caller is about to raise), and it **does not touch `_pending`** — whoever
+abandoned the request owns that future.
 
 ## Adding an MCP call: the checklist
 

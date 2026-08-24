@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Edit(.claude/skills/**)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {

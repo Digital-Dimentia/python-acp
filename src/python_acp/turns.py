@@ -426,6 +426,16 @@ class TurnResult:
         return cls("cancelled")
 
 
+class DetachedTurnError(RuntimeError):
+    """An executor tried to emit after its turn stopped belonging to a request.
+
+    A `RuntimeError`, so `errors.to_request_error` would map it to `-32603` — our bug,
+    not the client's — though in the case it exists for there is no request left to answer
+    it on. Raising is still the point: it turns a notification nobody can receive into a
+    loud failure inside the detached task instead of a silent write to a dead connection.
+    """
+
+
 class TurnContext:
     """Everything a turn is allowed to reach, and nothing else.
 
@@ -443,6 +453,10 @@ class TurnContext:
         self.session = session
         self.client = client
         self.gates = ClientGates.of(client_capabilities)
+        #: False once `detach()` runs. `emit` checks it, which is what makes "no
+        #: session/update after the request is over" hold on the path where there is no
+        #: response to be after. See `detach`.
+        self._attached = True
 
     @property
     def session_id(self) -> str:
@@ -472,6 +486,28 @@ class TurnContext:
     def allows(self, gate: Gate) -> bool:
         return self.gates.allows(gate)
 
+    def detach(self) -> None:
+        """Cut this context off from the wire. Idempotent, and never raises.
+
+        `agent.prompt` calls it once the turn no longer belongs to a live request. On the
+        ordinary path that is redundant — the response is built only after the turn task is
+        *done*, so nothing can emit later anyway — and on the path this exists for it is
+        the only thing standing there.
+
+        That path is the `session/prompt` **request itself** being cancelled, which is not
+        `session/cancel`. `prompt` cancels the turn task and re-raises without awaiting it,
+        because awaiting a task inside a dead request is how a hang gets made if an
+        executor ignores cancellation. So between the request dying and the task reaching
+        its next suspension point, an executor cleaning up under `except CancelledError`
+        can still call `emit` — for a request nobody is reading, on a connection that may
+        already be gone. `pyacp-48b`.
+
+        Deliberately not a cancel of the turn: this only closes the wire. Whether the task
+        stops is `prompt`'s business, and a context that killed the task would take the
+        decision away from the one place that can tell the two cancellations apart.
+        """
+        self._attached = False
+
     async def emit(self, update: Any) -> None:
         """Push one `session/update` notification for this turn's session.
 
@@ -481,7 +517,20 @@ class TurnContext:
 
         The session id comes from the context, never from the caller, so an executor
         cannot address someone else's session by accident.
+
+        Raises `DetachedTurnError` once `detach()` has run. Enforcement rather than
+        convention: "an executor should not emit after it is cancelled" is a rule nobody
+        can check, and this makes breaking it fail loudly in the task that broke it.
         """
+        if not self._attached:
+            # Refused *before* `record`, unlike a send that fails on the wire. That one
+            # still happened as far as the session is concerned; this one never will, so
+            # putting it in the history would promise a `session/load` replay of a
+            # notification no client ever saw.
+            raise DetachedTurnError(
+                f"Turn for session {self.session_id} emitted a "
+                f"{type(update).__name__} after its request was over"
+            )
         logger.debug("session/update for %s: %s", self.session_id, type(update).__name__)
         # Recorded before the send, not after: a notification that failed on the wire
         # still happened as far as this session is concerned, and `session/load` replaying

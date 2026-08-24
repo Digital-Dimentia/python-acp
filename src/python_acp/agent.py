@@ -554,6 +554,11 @@ class PythonAcpAgent:
         executor emitting from an `except CancelledError` cleanup block is still inside
         the task, so its notification is on the wire before the answer is.
 
+        That covers every path that *has* a response. The one that does not — this request
+        itself being cancelled — is closed by `context.detach()` in the `finally`: the turn
+        task is asked to stop but deliberately not awaited, so without it an executor
+        cleaning up could still emit for a request nobody is reading (`pyacp-48b`).
+
         Every `stopReason` this agent can return, and why the two limit conditions are not
         among them, is `turns.STOP_REASON_DISPOSITIONS`.
         """
@@ -573,11 +578,17 @@ class PythonAcpAgent:
             await asyncio.wait({turn})
         except asyncio.CancelledError:
             # This request died, not the turn. Do not leave it running for a response
-            # nobody will read.
+            # nobody will read. Not awaited on purpose: awaiting a task inside a dead
+            # request is how a hang gets made if an executor ignores cancellation.
             turn.cancel()
             raise
         finally:
             session.detach_turn()
+            # Closes the wire for a turn that outlives its request. Redundant on the
+            # normal path — the task is already done there — and load-bearing on the
+            # cancelled one, which is why it is in the `finally` rather than in the
+            # `except`: one rule, no path to forget.
+            context.detach()
 
         if turn.cancelled():
             return PromptResponse(stopReason="cancelled")

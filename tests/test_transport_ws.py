@@ -617,11 +617,19 @@ async def test_every_action_reply_names_its_replacement_and_the_removal() -> Non
         replies = {name: await websocket.ask(body) for name, body in requests.items()}
 
     for name, reply in replies.items():
-        assert reply["deprecated"] == {
-            "action": name,
-            "removedIn": REMOVED_IN,
-            "use": ACTION_REPLACEMENTS[name],
-        }, name
+        expected = {"action": name, "removedIn": REMOVED_IN}
+        # `use` is present only where an ACP path exists. `pyacp-sld.2` decided the MCP
+        # passthrough dies with this surface rather than moving to `ext_method`, so
+        # prompts, resources, and ping have nothing honest to point at — and an absent
+        # `use` says that, rather than naming a target that dies in the same release.
+        if ACTION_REPLACEMENTS[name] is not None:
+            expected["use"] = ACTION_REPLACEMENTS[name]
+        assert reply["deprecated"] == expected, name
+
+    assert [n for n, r in ACTION_REPLACEMENTS.items() if r is not None] == [
+        "list_tools",
+        "call_tool",
+    ]
 
 
 async def test_the_deprecation_notice_does_not_disturb_the_envelope() -> None:
@@ -656,7 +664,7 @@ async def test_a_failed_action_carries_the_notice_too() -> None:
     # A failed *tool* is a normal reply, not an error envelope, and keeps both.
     assert failed_tool["ok"] is False
     assert failed_tool["result"]["isError"] is True
-    assert failed_tool["deprecated"]["use"] == "tools/call"
+    assert failed_tool["deprecated"]["use"] == "session/new + session/prompt"
 
 
 async def test_the_json_rpc_passthrough_carries_no_notice() -> None:
@@ -690,9 +698,12 @@ async def test_the_server_log_warns_once_per_action_not_once_per_call(
     warnings = [record.getMessage() for record in caplog.records]
     assert len(warnings) == 2, warnings
     assert "'list_tools' is deprecated" in warnings[0]
-    assert "'tools/list' instead" in warnings[0]
+    assert "use session/new + session/prompt instead" in warnings[0]
     assert REMOVED_IN in warnings[0]
+    # `ping` is a real action with no ACP counterpart, which the operator's copy says in
+    # so many words: the capability goes away, not just the spelling.
     assert "'ping' is deprecated" in warnings[1]
+    assert "no ACP replacement" in warnings[1]
 
 
 async def test_an_unsupported_action_warns_without_naming_a_replacement(
@@ -716,7 +727,7 @@ def test_the_notice_is_a_fresh_dict_each_time() -> None:
     first = deprecation_notice("list_tools")
     first["use"] = "smuggled"
 
-    assert deprecation_notice("list_tools")["use"] == "tools/list"
+    assert deprecation_notice("list_tools")["use"] == "session/new + session/prompt"
 
 
 # ---------------------------------------------------------------------------

@@ -149,10 +149,17 @@ or deleting it outright, since `PythonAcpAgent` has no member for it and the SDK
 would answer `-32601`. Either way a working surface disappears in the release that rebound
 the socket, which is not what D4 promises.
 
-**So `legacy_ws.py` carries the JSON-RPC passthrough too, under its current method names,
-until `pyacp-sld.2` moves it to `ext_method`.** That turns the eventual change from a
-disappearance into a rename a client can be told about. `LEGACY_METHODS` is a closed set
-that only ever shrinks.
+**So `legacy_ws.py` carries the JSON-RPC passthrough too, under its current method
+names**, for the length of the deprecation window.
+
+**It never reaches `ext_method`.** `pyacp-sld.2` revisited the plan and declined the move:
+the passthrough addresses the process-wide `--mcp-command` server, which is the exact
+arrangement ACP v1 inverted, so a namespaced `_tools/call` would preserve the pre-v1
+architecture behind a new name — and would cost clients a rename now plus a deletion
+later. `pyacp-sld.3` deletes it with the action surface instead. `LEGACY_METHODS` is a
+closed set that never grows and empties in one step. What goes with it — MCP prompts and
+resources, which have no ACP replacement — is recorded in
+[legacy_ws.md](../src/python_acp/legacy_ws.md).
 
 Two smaller deviations from the plan as written:
 

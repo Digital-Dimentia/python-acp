@@ -13,16 +13,16 @@ serves.
 | Request | Reply | Says so on the wire? |
 |---|---|---|
 | `{"action": "list_tools", ...}` | `{"ok": true, ...}` / `{"ok": false, "error": "..."}` | yes — a `deprecated` block on every reply (`pyacp-sld.1`) |
-| `{"method": "tools/call", ...}` | JSON-RPC result / error | not yet — `pyacp-sld.2` |
+| `{"method": "tools/call", ...}` | JSON-RPC result / error | not on the wire — `pyacp-sld.3` deletes it |
 
 The second is the one that needs explaining. `tools/*`, `prompts/*`, and `resources/*`
 are **MCP methods on an ACP wire** — they are not ACP and never were, and
 `PythonAcpAgent` has no members for them. Once the socket was bound to the SDK they would
 have answered `-32601`, deleting a working surface in the same release that rebound it.
 D4 promises the legacy API keeps working through the migration, so they are carried here
-under their current names until `pyacp-sld.2` moves them onto `ext_method` as
-`_tools/call` and friends — a rename a client can be told about, rather than a
-disappearance.
+under their current names for the length of the deprecation window.
+
+**They are not moving to `ext_method`.** See "The passthrough does not survive" below.
 
 `ping` and `notifications/initialized` are here for the same reason. Neither is an ACP
 method, and `notifications/initialized` is in fact an MCP-ism that arrived by copy.
@@ -65,29 +65,63 @@ Four decisions worth not re-deriving:
 *working*, so `ok`, `tools`, `result`, and `error` mean exactly what they meant before and
 `deprecated` is purely additive.
 
-### What `use` points at, and why it is another deprecated thing
-
-Every target in `ACTION_REPLACEMENTS` is on the other half of this module, which reads
-oddly until you ask what an ACP-native replacement would be: **there is no ACP method that
-lists tools.** The ACP path is `session/new` with `mcpServers` and then `session/prompt`,
-where the turn executor calls tools on the client's behalf — a different shape of program,
-not a method swap.
-
-So the table names the like-for-like step a client can take *now*, and `pyacp-sld.2`
-moves those targets under a namespaced prefix on `ext_method` as a second, smaller move.
-Staging it is the whole point of D4. The prefix is not chosen yet, and that bead also owns
-deciding whether the passthrough survives removal at all — so this table names only what
-works today and makes no promise about the name it will have.
+### What `use` points at, and why two-thirds of the table is empty
 
 | Action | `use` |
 |---|---|
-| `list_tools` | `tools/list` |
-| `call_tool` | `tools/call` |
-| `list_prompts` | `prompts/list` |
-| `get_prompt` | `prompts/get` |
-| `list_resources` | `resources/list` |
-| `read_resource` | `resources/read` |
-| `ping` | `ping` |
+| `list_tools` | `session/new + session/prompt` |
+| `call_tool` | `session/new + session/prompt` |
+| `list_prompts` | — |
+| `get_prompt` | — |
+| `list_resources` | — |
+| `read_resource` | — |
+| `ping` | — |
+
+Each entry used to name the **JSON-RPC passthrough form of the same call** —
+`list_tools` → `tools/list` — on the reasoning that those names would survive a move to
+`ext_method`. `pyacp-sld.2` decided they will not, so pointing a client at one would be
+pointing at a target that dies in the same release: two breaking changes where one will
+do.
+
+The ACP path is a different *shape of program*, not a method swap. Open a session with
+`session/new` naming the server in `mcpServers`, then drive it with `session/prompt`; the
+turn executor calls tools on the client's behalf, and the turn's first
+`available_commands` update is the tool list. That covers `list_tools` and `call_tool`.
+
+**The dashes are the finding, not a gap.** MCP prompts and resources have no ACP path at
+all — ACP's model is that an agent uses them internally, not that a client reaches through
+the agent to the server — and `ping` is MCP plumbing with no ACP counterpart. Naming
+something anyway would invent a migration. So `ACTION_REPLACEMENTS` keeps a key for every
+action, with `None` where the honest answer is nothing, and `deprecation_notice` omits
+`use` rather than filling it.
+
+## The passthrough does not survive
+
+`pyacp-sld.2` was scoped to move `tools/*`, `prompts/*`, and `resources/*` onto
+`ext_method` under a namespaced prefix, and to decide whether the passthrough survives
+removal at all. The second answer settles the first: **it does not survive, so the move is
+declined.**
+
+Three reasons, in the order they matter:
+
+1. **It addresses the wrong server.** The passthrough talks to the process-wide
+   `--mcp-command` backend. ACP v1 inverted exactly that: a session's MCP servers are
+   named by the *client* in `session/new` and live and die with the session. Carrying the
+   passthrough forward under `_tools/call` would preserve the pre-v1 architecture behind a
+   new name, and keep `--mcp-command` alive to serve it (`pyacp-sld.4`).
+2. **The move would cost clients two breaking changes instead of one** — a rename now, a
+   deletion later — for a surface that is being deleted either way.
+3. **The stated motive is already satisfied.** The bead's reasoning was that MCP method
+   names "do not belong in an ACP agent's method table once dispatch comes from
+   `acp.agent.router`". They are not in it: `transport_ws.receive()` intercepts every one
+   before the SDK sees the message, and `tests/test_conformance.py` asserts the router's
+   table separately. The pollution the move would have fixed does not exist.
+
+**What is lost with it, stated plainly:** `prompts/get`, `prompts/list`,
+`resources/list`, and `resources/read` disappear from this bridge entirely, because no ACP
+method replaces them. A client that needs MCP prompts or resources should speak MCP to
+that server itself. This was a deliberate product decision, taken with no known consumers
+of the surface.
 
 ## It needs `--mcp-command`, and nothing else does
 
@@ -101,9 +135,9 @@ reads like a backend fault.
 
 ## `LEGACY_METHODS` only shrinks
 
-The set is closed. It loses entries as `pyacp-sld.2` moves them to `ext_method`, and
-never gains one — a new method that belongs on this surface is a new method that should
-not exist.
+The set is closed and never gains an entry — a new method that belongs on this surface is
+a new method that should not exist. It does not drain, either: `pyacp-sld.3` empties it in
+one step, because `pyacp-sld.2` declined to move anything out of it first.
 
 ## Errors
 

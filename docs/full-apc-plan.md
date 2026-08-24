@@ -155,6 +155,10 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
 
 7.1. Emit deprecation warnings from the `action` surface.
 7.2. Carry the legacy MCP passthrough methods on `ext_method` during the transition.
+     **Declined by `pyacp-sld.2`:** the passthrough addresses the process-wide
+     `--mcp-command` server — the arrangement ACP v1 inverted — so it is deleted with the
+     action surface in 7.3 rather than renamed onto the ACP surface first. `ext_method`
+     stays empty. MCP prompts and resources have no ACP replacement and go with it.
 7.3. Remove the `action` surface; rewrite the README's request documentation.
 
 ### Phase 8 — Validation and conformance

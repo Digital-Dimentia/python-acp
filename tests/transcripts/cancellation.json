@@ -63,9 +63,9 @@
         "mcpServers": [
           {
             "name": "tools",
-            "command": "/Users/dave/dev/other/python-acp/.venv/bin/python",
+            "command": "<python>",
             "args": [
-              "/Users/dave/dev/other/python-acp/tests/fixtures/mock_mcp_server.py"
+              "<fixture-server>"
             ],
             "env": []
           }

@@ -1,13 +1,19 @@
 """Tests for the WebSocket binding and the deprecated surface it shelters.
 
-Every test here drives a **fake socket** rather than a listening port. That is not only
-to dodge the sandbox's `bind()` denial (`pyacp-22w`): the thing under test is the
-message path from a frame to the SDK router and back, and a real TCP listener adds a
-port, a handshake, and two timeouts without exercising one extra line of it.
+Most tests here drive a **fake socket** rather than a listening port. That is not only to
+dodge the sandbox's `bind()` denial: the thing under test is the message path from a frame
+to the SDK router and back, and a real TCP listener adds a port, a handshake, and two
+timeouts without exercising one extra line of it.
 `test_the_sdk_accepts_our_transport_and_completes_initialize` is the exception that
 matters — it runs a real `acp.run_agent` over `WebSocketMessageTransport`, which is the
 decision-B4 canary: if a future SDK changes the private `Transport` shape we conform to,
 that test fails on the day the pin moves.
+
+The section "The real WebSocket" is the other exception. A fake socket cannot exercise
+`websockets`' opening handshake, its frame codec, or `WebSocketAgentServer.start()` —
+and those are the parts a client meets first. `pyacp-22w` covers them over a
+`socket.socketpair()` instead of a listening port, so they run wherever `bind()` is
+denied.
 
 The MCP backend is the real `tests/fixtures/mock_mcp_server.py` subprocess, per the
 repo's convention of not mocking it.
@@ -19,13 +25,16 @@ import asyncio
 import contextlib
 import json
 import logging
+import socket
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+import websockets
 from acp import PROTOCOL_VERSION
+from websockets.protocol import State
 
 from python_acp import __version__
 from python_acp.capabilities import build_agent_capabilities
@@ -529,8 +538,8 @@ async def test_requests_and_responses_are_logged_at_debug(
 
 async def test_the_server_binds_each_accepted_socket_to_an_agent() -> None:
     """Covers `WebSocketAgentServer` down to `_handle_client`, which is as far as a
-    fake socket reaches. `start()`/`stop()` need a real listener and are exercised by
-    running the process, not by this suite — see `pyacp-22w`.
+    fake socket reaches. The real handshake, real frames, and `start()`/`stop()` are
+    covered without a listening port under "The real WebSocket" below (`pyacp-22w`).
     """
     async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
         await mcp_client.initialize()
@@ -708,3 +717,207 @@ def test_the_notice_is_a_fresh_dict_each_time() -> None:
     first["use"] = "smuggled"
 
     assert deprecation_notice("list_tools")["use"] == "tools/list"
+
+
+# ---------------------------------------------------------------------------
+# The real WebSocket: `serve()`, the opening handshake, and real frames, with
+# no listening port (pyacp-22w)
+# ---------------------------------------------------------------------------
+
+
+class _StubAsyncioServer:
+    """The slice of `asyncio.Server` that `websockets.asyncio.server.Server` touches.
+
+    `serve()` calls `loop.create_server(...)` and keeps the result. Everything downstream
+    of that — the protocol factory, the handshake, the frame codec, the handler task — is
+    the real thing; only the *listener* is stubbed out, because a listener is the one part
+    that needs `bind()` and the one part these tests do not care about.
+    """
+
+    sockets = ()
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self.closed = False
+
+    def get_loop(self) -> asyncio.AbstractEventLoop:
+        return self._loop
+
+    def is_serving(self) -> bool:
+        return not self.closed
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+    async def start_serving(self) -> None:
+        return None
+
+
+@contextlib.asynccontextmanager
+async def listening_server(**kwargs: Any) -> AsyncIterator[tuple[WebSocketAgentServer, Any]]:
+    """A started `WebSocketAgentServer` whose listener never binds anything.
+
+    `loop.create_server` is swapped for the duration of `start()` only — long enough to
+    capture the protocol factory `serve()` builds and hand back a stub. `accept()` on the
+    yielded handle then feeds that factory an already-connected socket, which is exactly
+    what a real accept would have done.
+    """
+    loop = asyncio.get_running_loop()
+    captured: dict[str, Any] = {}
+    real_create_server = loop.create_server
+
+    async def create_server(protocol_factory: Any, *args: Any, **kw: Any) -> _StubAsyncioServer:
+        captured["factory"] = protocol_factory
+        return _StubAsyncioServer(loop)
+
+    server = WebSocketAgentServer(**kwargs)
+    loop.create_server = create_server  # type: ignore[method-assign]
+    try:
+        await server.start()
+    finally:
+        loop.create_server = real_create_server  # type: ignore[method-assign]
+
+    sockets: list[socket.socket] = []
+
+    class Accepting:
+        async def connect(self) -> Any:
+            """One client, connected through the real opening handshake."""
+            client_sock, server_sock = socket.socketpair()
+            sockets.extend((client_sock, server_sock))
+            await loop.connect_accepted_socket(captured["factory"], server_sock)
+            # `ws://localhost/` is never resolved: `sock=` supplies the connection, and
+            # the URI only supplies the Host header the handshake has to send.
+            return await websockets.connect("ws://localhost/", sock=client_sock)
+
+    try:
+        yield server, Accepting()
+    finally:
+        await server.stop()
+        for leftover in sockets:
+            with contextlib.suppress(OSError):
+                leftover.close()
+
+
+async def test_the_real_opening_handshake_completes() -> None:
+    """A fake socket starts *after* this. Everything a client meets first is here.
+
+    `websockets.connect` raises unless the server answers `101 Switching Protocols` with
+    a correct `Sec-WebSocket-Accept`, so reaching OPEN is the assertion.
+    """
+    async with listening_server(mcp_client=None) as (_server, accepting):
+        connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        try:
+            assert connection.protocol.state is State.OPEN
+            assert connection.response.status_code == 101
+        finally:
+            await connection.close()
+
+
+async def test_a_real_frame_round_trips_through_the_agent() -> None:
+    """Text frames, encoded and decoded by `websockets`, not handed over as dicts."""
+    async with listening_server(mcp_client=None) as (_server, accepting):
+        connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        try:
+            await connection.send(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": PROTOCOL_VERSION}}
+                )
+            )
+            raw = await asyncio.wait_for(connection.recv(), timeout=TIMEOUT)
+        finally:
+            await connection.close()
+
+    assert isinstance(raw, str), "ACP is a text protocol; a binary frame would be wrong"
+    reply = json.loads(raw)
+    assert reply["result"]["protocolVersion"] == PROTOCOL_VERSION
+    assert reply["result"]["agentInfo"]["name"] == "python-acp"
+
+
+async def test_the_server_accepts_a_message_far_larger_than_the_websockets_default() -> None:
+    """`_MAX_MESSAGE_BYTES` is only real on a real connection.
+
+    `websockets` defaults to 1 MiB and *closes the connection* rather than answering when
+    a frame exceeds it, so a client hitting the cap sees a disconnect with no error to
+    read. Nothing but a real frame codec can prove the override reached `serve()`.
+    """
+    padding = "x" * (2 * 1024 * 1024)  # 2 MiB: over the default, under our 50 MiB cap.
+    async with listening_server(mcp_client=None) as (_server, accepting):
+        connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        try:
+            await connection.send(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": PROTOCOL_VERSION, "_padding": padding}}
+                )
+            )
+            reply = json.loads(await asyncio.wait_for(connection.recv(), timeout=TIMEOUT))
+        finally:
+            await connection.close()
+
+    assert reply["result"]["protocolVersion"] == PROTOCOL_VERSION
+
+
+async def test_two_clients_are_served_at_once_each_with_its_own_agent() -> None:
+    """One session registry, two connections: `on_connect` must not cross the wires."""
+    async with listening_server(mcp_client=None) as (_server, accepting):
+        first = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        second = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        try:
+            for index, connection in enumerate((first, second), start=1):
+                await connection.send(
+                    json.dumps(
+                        {"jsonrpc": "2.0", "id": index, "method": "session/new",
+                         "params": {"cwd": "/tmp", "mcpServers": []}}
+                    )
+                )
+            replies = [
+                json.loads(await asyncio.wait_for(connection.recv(), timeout=TIMEOUT))
+                for connection in (first, second)
+            ]
+        finally:
+            await first.close()
+            await second.close()
+
+    ids = [reply["result"]["sessionId"] for reply in replies]
+    assert len(set(ids)) == 2, "two connections must not share a session"
+
+
+async def test_start_is_idempotent_and_stop_leaves_the_server_restartable() -> None:
+    """`start()` returns early when already started; `stop()` clears the handle.
+
+    Both branches are pure lifecycle and were unreachable while every test used a fake
+    socket — `test_the_server_binds_each_accepted_socket_to_an_agent` enters at
+    `_handle_client`, below both of them.
+    """
+    async with listening_server(mcp_client=None) as (server, _accepting):
+        assert server._server is not None
+        already = server._server
+        await server.start()
+        assert server._server is already, "a second start() must not build a second server"
+
+    assert server._server is None, "stop() clears the handle"
+    # And stopping again is a no-op rather than an AttributeError on the cleared handle.
+    await server.stop()
+
+
+async def test_serve_forever_returns_when_the_server_is_closed() -> None:
+    """It is `start()` plus `wait_closed()`, so the only thing to prove is that it ends."""
+    loop = asyncio.get_running_loop()
+    real_create_server = loop.create_server
+
+    async def create_server(protocol_factory: Any, *args: Any, **kw: Any) -> _StubAsyncioServer:
+        return _StubAsyncioServer(loop)
+
+    server = WebSocketAgentServer(None)
+    loop.create_server = create_server  # type: ignore[method-assign]
+    try:
+        serving = asyncio.create_task(server.serve_forever())
+        await asyncio.sleep(0)
+        await server.stop()
+        await asyncio.wait_for(serving, timeout=TIMEOUT)
+    finally:
+        loop.create_server = real_create_server  # type: ignore[method-assign]

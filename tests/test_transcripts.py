@@ -38,6 +38,12 @@ Session ids, tool-call ids, and terminal ids are minted per run, so `canonicaliz
 replaces each with a stable placeholder (`<session-1>`) the first time it is seen. That is
 deliberately positional: it preserves *which* id appeared where — a swap of two session ids
 still fails — while dropping only the randomness.
+
+**Environment paths are the other half, and they are easier to miss.** A recorded
+`session/new` carries the interpreter that spawned the MCP server and the absolute path of
+the fixture, so a transcript recorded in `.venv` fails in `.venv311`, and one recorded in
+your checkout fails in CI's. Neither is a wire change. `_ENVIRONMENT` maps each to a
+placeholder; anything else absolute that reaches a golden file belongs there too.
 """
 
 from __future__ import annotations
@@ -167,6 +173,26 @@ _MINTED = (
 )
 _ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}:\d{2}|Z)?$")
 
+#: Values that differ per machine, per checkout, and per `VENV_DIR`, and are therefore not
+#: wire content. Longest first, so a path that contains another is replaced whole.
+_ENVIRONMENT: tuple[tuple[str, str], ...] = tuple(
+    sorted(
+        (
+            (sys.executable, "<python>"),
+            (str(FIXTURE_SERVER), "<fixture-server>"),
+            (str(Path(__file__).parent.parent), "<repo>"),
+        ),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+)
+
+
+def _despecialize(value: str) -> str:
+    for actual, placeholder in _ENVIRONMENT:
+        value = value.replace(actual, placeholder)
+    return value
+
 
 def canonicalize(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace per-run values with stable placeholders, preserving identity.
@@ -198,10 +224,12 @@ def canonicalize(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return out
         if isinstance(node, list):
             return [walk(item) for item in node]
-        if isinstance(node, str) and node in seen:
-            # An id echoed in a position that is not its own key — a refusal message
-            # naming the session, say.
-            return seen[node]
+        if isinstance(node, str):
+            if node in seen:
+                # An id echoed in a position that is not its own key — a refusal message
+                # naming the session, say.
+                return seen[node]
+            return _despecialize(node)
         return node
 
     return [walk(entry) for entry in entries]

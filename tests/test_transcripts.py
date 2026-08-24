@@ -534,6 +534,52 @@ async def test_a_reordering_of_notifications_fails_the_suite() -> None:
     assert canonicalize(scrambled)[: len(golden)] != golden
 
 
+#: Absolute paths a golden transcript is allowed to contain. Every one is a literal the
+#: flows choose on purpose and that means the same thing on every machine — not something
+#: the recording environment supplied.
+ALLOWED_ABSOLUTE_PATHS = {"/tmp"}
+
+_ABSOLUTE_PATH = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
+
+
+def test_no_golden_transcript_carries_a_path_from_the_machine_that_recorded_it() -> None:
+    """The guard on `canonicalize`, and the one that would have caught this in review.
+
+    A transcript that bakes in `sys.executable` or a checkout path passes for whoever
+    recorded it and fails for everyone else — in CI, in a second venv, in another clone.
+    It shipped once exactly that way: recorded under `.venv` on macOS, green locally, and
+    broken the moment it ran anywhere else. The failure did not look like a wire change,
+    which is what made it easy to miss.
+
+    Asserting `canonicalize` handled *this* run's paths would be circular — it is the
+    thing under test. So this reads the committed files and refuses any absolute path that
+    is not a declared literal, which fails for a machine-specific path no matter which
+    machine recorded it.
+    """
+    offenders: list[str] = []
+
+    def walk(node: Any, where: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{where}.{key}")
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, f"{where}[{index}]")
+        elif isinstance(node, str) and _ABSOLUTE_PATH.match(node):
+            if node not in ALLOWED_ABSOLUTE_PATHS:
+                offenders.append(f"{where}: {node!r}")
+
+    for path in sorted(TRANSCRIPTS.glob("*.json")):
+        walk(json.loads(path.read_text()), path.name)
+
+    assert not offenders, (
+        "Golden transcripts contain absolute paths that came from the recording machine.\n"
+        "Add a placeholder to `_ENVIRONMENT` and re-record, or declare the literal in\n"
+        "`ALLOWED_ABSOLUTE_PATHS` if it really is the same everywhere:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_every_golden_transcript_is_reachable_from_a_test() -> None:
     """A golden file nothing asserts against is a file that can rot unnoticed."""
     recorded = {path.stem for path in TRANSCRIPTS.glob("*.json")}

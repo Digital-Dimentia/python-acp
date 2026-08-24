@@ -31,6 +31,10 @@ if _stderr_bytes:
 _list_pages = int(os.environ.get("MOCK_MCP_LIST_PAGES", "1"))
 _list_stuck = os.environ.get("MOCK_MCP_LIST_STUCK") == "1"
 _list_empty_middle = os.environ.get("MOCK_MCP_LIST_EMPTY_MIDDLE") == "1"
+# Adds `wipe`, `patch`, and `plain` beside `echo` on the first tools/list page, so the
+# annotation -> ACP kind mapping has a destructive tool, an additive one, and one that
+# says nothing. Opt-in: every other test expects this server to offer exactly one tool.
+_annotated_tools = os.environ.get("MOCK_MCP_ANNOTATED_TOOLS") == "1"
 
 
 # Protocol-version negotiation knobs. Default echoes back whatever the client
@@ -90,6 +94,9 @@ def list_result(req, key, item_for_page):
         items = []
     else:
         items = [item_for_page(index)]
+    # An item factory may hand back several items for one page: `tool_for_page` does,
+    # when MOCK_MCP_ANNOTATED_TOOLS asks for the annotated ones.
+    items = [entry for item in items for entry in (item if isinstance(item, list) else [item])]
     result = {key: items}
     if _list_stuck:
         result["nextCursor"] = "stuck"
@@ -100,7 +107,7 @@ def list_result(req, key, item_for_page):
 
 def tool_for_page(index):
     if index == 0:
-        return {
+        echo = {
             "name": "echo",
             "description": "Echoes text",
             "inputSchema": {
@@ -108,7 +115,39 @@ def tool_for_page(index):
                 "properties": {"text": {"type": "string"}},
                 "required": ["text"],
             },
+            # A real annotation block, always present: echoing genuinely reads nothing
+            # and reaches nothing, and a fixture whose only tool is unannotated could
+            # not tell "we did not read the hints" from "there were none".
+            "annotations": {
+                "title": "Echo",
+                "readOnlyHint": True,
+                "openWorldHint": False,
+            },
         }
+        if not _annotated_tools:
+            return echo
+        # Opt-in so every unrelated test keeps seeing exactly one tool. These exist to
+        # exercise the annotation -> ACP kind mapping end to end.
+        return [
+            echo,
+            {
+                "name": "wipe",
+                "description": "Deletes things",
+                "inputSchema": {"type": "object", "properties": {}},
+                "annotations": {"readOnlyHint": False, "destructiveHint": True},
+            },
+            {
+                "name": "patch",
+                "description": "Appends things",
+                "inputSchema": {"type": "object", "properties": {}},
+                "annotations": {"readOnlyHint": False, "destructiveHint": False},
+            },
+            {
+                "name": "plain",
+                "description": "Says nothing about itself",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+        ]
     return {
         "name": "echo-%d" % index,
         "description": "Echoes text (page %d)" % index,
@@ -404,6 +443,19 @@ while True:
                     "id": req_id,
                     "result": {
                         "content": [{"type": "text", "text": text}],
+                        "isError": False,
+                    },
+                }
+            )
+        # The annotated tools exist only to carry annotations; what they return is not
+        # the point, so they all answer the same way.
+        elif params.get("name") in ("wipe", "patch", "plain"):
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": "%s ran" % params["name"]}],
                         "isError": False,
                     },
                 }

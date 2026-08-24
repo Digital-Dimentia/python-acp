@@ -142,7 +142,9 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
 ### Phase 6 — MCP backend adapter
 
 6.1. Backend hardening — protocol-version negotiation, client capability declaration,
-     pagination, cancellation, error-code fidelity, shutdown ordering.
+     pagination, cancellation, error-code fidelity, shutdown ordering. **Also delivered
+     here:** reading the server's tool annotations as an ACP `ToolCall.kind`
+     (`pyacp-eg1.3`), which relabels a permission prompt and never skips one.
 6.2. Map MCP results onto ACP tool-call and content updates.
 6.3. Backend abstraction permitting non-MCP executors. **Resolved by Phase 3.1:** the
      `TurnExecutor` seam is the abstraction, and `pyacp-eg1.2` closed by *proving* it —

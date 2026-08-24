@@ -12,7 +12,7 @@ Spec index: <https://modelcontextprotocol.io/specification/>
 | Revision | What changed | Effect on this repo |
 |---|---|---|
 | `2024-11-05` | The original. `initialize` handshake, tools/resources/prompts, HTTP+SSE transport. | **Still accepted**, never proposed. A server pinned here must counter with it, and hanging up on that counter would drop every server that has not moved. |
-| `2025-03-26` | Streamable HTTP replaces HTTP+SSE. Tool annotations, audio content, progress messages, OAuth. | None — all stdio-side behavior is unchanged. Assumed by an HTTP server that gets no `MCP-Protocol-Version` header. Its tool annotations are the unclaimed win: `pyacp-eg1.3`. |
+| `2025-03-26` | Streamable HTTP replaces HTTP+SSE. Tool annotations, audio content, progress messages, OAuth. | None — all stdio-side behavior is unchanged. Assumed by an HTTP server that gets no `MCP-Protocol-Version` header. Its tool annotations are read by `mcp_tools.py` (`pyacp-eg1.3`). |
 | `2025-06-18` | `elicitation/create` added. `structuredContent` and `outputSchema` on tools. Resource links in tool results. `title` alongside `name` on tools/prompts/resources. `MCP-Protocol-Version` header required on HTTP. JSON-RPC batching removed. | **What we propose.** Same handshake, same framing, additive result fields. |
 | `2026-07-28` | Redesign — see below. | A rewrite of the client, not a version bump. |
 
@@ -37,8 +37,11 @@ next bump is judged the same way:
   be resource links. `call_tool` passes the whole dict through, so nothing broke —
   but anything downstream that assumes `content[0].type == "text"` will.
 - Batching is gone. `mcp_stdio.py` never batched, so there was nothing to remove.
-- Tool annotations (from `2025-03-26`) are now reachable and still unread. That is the
-  remaining piece of the version bump's value: `pyacp-eg1.3`.
+- Tool annotations (from `2025-03-26`) are reachable and **read** — `pyacp-eg1.3`.
+  `mcp_tools.py` maps them onto ACP's `ToolCall.kind`, so a permission prompt says
+  `delete` rather than `other`. They never skip the prompt: a server asserting
+  `readOnlyHint: true` to escape it would be a privilege escalation written by the party
+  being restrained, which is MCP's own warning about annotations.
 
 ## Why `2026-07-28` is a different protocol
 

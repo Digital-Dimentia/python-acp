@@ -96,7 +96,7 @@
             "currentValue": true,
             "id": "announce-tools",
             "name": "Announce available tools",
-            "description": "List the session's MCP tools at the start of every turn. Costs one tools/list per server per turn; turn it off for a client that already knows.",
+            "description": "List the session's MCP tools at the start of every turn. Turning it off saves the notification, not every tools/list: a turn still lists the servers it calls, because a tool call's kind comes from their annotations.",
             "type": "boolean"
           },
           {

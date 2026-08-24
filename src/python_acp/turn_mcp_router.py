@@ -193,6 +193,7 @@ from acp.schema import (
 from python_acp.mcp_content import to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
+from python_acp.mcp_tools import ToolCatalogue
 from python_acp.paths import PathConstraintError, require_contained
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turns import Gate, TurnContext, TurnResult
@@ -390,8 +391,9 @@ SESSION_CONFIG_OPTIONS: tuple[Any, ...] = (
         id=ANNOUNCE_TOOLS,
         name="Announce available tools",
         description=(
-            "List the session's MCP tools at the start of every turn. Costs one "
-            "tools/list per server per turn; turn it off for a client that already knows."
+            "List the session's MCP tools at the start of every turn. Turning it off "
+            "saves the notification, not every tools/list: a turn still lists the "
+            "servers it calls, because a tool call's kind comes from their annotations."
         ),
         currentValue=True,
     ),
@@ -486,8 +488,11 @@ class McpToolRouterExecutor:
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         backends = self._backends.backends(context.session_id)
+        # One `tools/list` per server per turn at most, shared by the announcement and by
+        # the tool-call `kind` each invocation is labelled with. See `mcp_tools.py`.
+        catalogue = ToolCatalogue(backends)
         await self._echo_prompt(context, prompt)
-        await self._announce_tools(context, backends)
+        await self._announce_tools(context, backends, catalogue)
 
         try:
             invocations = self._parse(context, prompt, backends)
@@ -507,7 +512,9 @@ class McpToolRouterExecutor:
             plan[index].status = "in_progress"
             await self._emit_plan(context, plan)
             try:
-                failed = await self._run(context, tracker, broker, backends, invocation, index)
+                failed = await self._run(
+                    context, tracker, broker, backends, catalogue, invocation, index
+                )
             except _TurnCancelled:
                 # The client cancelled while its permission prompt was open. It said so in
                 # the response, which is a different route to the same answer as
@@ -545,7 +552,9 @@ class McpToolRouterExecutor:
             if isinstance(text, str):
                 await context.emit(update_user_message_text(text))
 
-    async def _announce_tools(self, context: TurnContext, backends: Any) -> None:
+    async def _announce_tools(
+        self, context: TurnContext, backends: Any, catalogue: ToolCatalogue
+    ) -> None:
         """List the session's MCP tools as `available_commands`.
 
         Emitted at the start of **every** turn, including one about to be refused — that
@@ -553,14 +562,18 @@ class McpToolRouterExecutor:
         actionable; one that only says "that was not an invocation" is not.
 
         Costs one `tools/list` per server per turn. Against a local subprocess that is
-        sub-millisecond, and caching it would need `notifications/tools/list_changed`
-        handling to stay honest, which is `pyacp-eg1.1`'s neighbourhood.
+        sub-millisecond, and caching it *across* turns would need
+        `notifications/tools/list_changed` handling to stay honest.
+
+        The listing goes through the turn's `ToolCatalogue`, so turning announcements off
+        does not make the tool-call `kind` cost a second call — and turning them on does
+        not make it cost a first one.
         """
         if not _option(context, ANNOUNCE_TOOLS, True):
             return
         commands: list[AvailableCommand] = []
-        for server, client in sorted(backends.items()):
-            for tool in await client.list_tools():
+        for server in sorted(backends):
+            for tool in await catalogue.listing(server):
                 name = tool.get("name")
                 if not isinstance(name, str):
                     continue
@@ -829,6 +842,7 @@ class McpToolRouterExecutor:
         tracker: ToolCallTracker,
         broker: PermissionBroker,
         backends: Any,
+        catalogue: ToolCatalogue,
         invocation: Invocation,
         index: int,
     ) -> bool:
@@ -841,13 +855,17 @@ class McpToolRouterExecutor:
 
         Returns whether the *tool* failed — not whether the call did. See the module
         docstring for why those are different.
+
+        `kind` comes from the server's own tool annotations, and is the **only** thing
+        they are allowed to change: the permission request below is sent either way. See
+        `mcp_tools.py` for why a hint may relabel a question but never withdraw it.
         """
         key = str(index)
         await context.emit(
             tracker.start(
                 key,
                 title=invocation.title,
-                kind="other",
+                kind=await catalogue.kind(invocation.server, invocation.tool),
                 status="pending",
                 raw_input=invocation.arguments,
                 locations=invocation.locations,

@@ -21,6 +21,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - MCP content mapping (`mcp_content.py`): the seam between MCP's content model and ACP's. Unmappable content becomes a visible placeholder rather than a gap.
 - MCP elicitation forwarding (`elicitation.py`): an MCP server's `elicitation/create` becomes an ACP one, so a question from a backend reaches the only human in the system.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
+- MCP tool annotations (`mcp_tools.py`): reads a server's `readOnlyHint`/`destructiveHint` hints as an ACP `ToolCall.kind`, so a permission prompt says *what* it is asking about. A hint relabels the question; it never withdraws it.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
 ```mermaid
@@ -40,6 +41,7 @@ flowchart LR
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
+    Tools["mcp_tools.py<br/>annotations &rarr; ToolCall.kind"]
     Elicit["elicitation.py<br/>MCP question &rarr; ACP question"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess<br/>one per session server")]
@@ -62,6 +64,7 @@ flowchart LR
     Agent --> Paths
     Agent --> Turns
     Turns -.implemented by.-> Router
+    Router --> Tools
     Router --> Backends
     Agent --> Backends
     Sessions -. "on_close" .-> Backends
@@ -177,6 +180,7 @@ flowchart LR
     Agent --> Paths
     Agent --> Turns
     Turns -.implemented by.-> Router
+    Router --> Tools
     Router --> Backends
     Turns -.implemented by.-> Router
     Legacy --> Registry
@@ -444,6 +448,7 @@ sequenceDiagram
 - [MCP content mapping module](src/python_acp/mcp_content.md)
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
+- [MCP tool annotations module](src/python_acp/mcp_tools.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 

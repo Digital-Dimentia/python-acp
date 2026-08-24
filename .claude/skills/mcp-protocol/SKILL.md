@@ -263,10 +263,6 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
   and not on the read loop the handler runs on; `pyacp-owi` weighs the ways to bridge that.
 - `roots.listChanged` is `false`, so a session whose roots could change could not say so.
   Nothing can change them today, which makes it honest rather than a gap.
-- Nothing reads tool annotations, so `turn_mcp_router` asks permission for every tool
-  call. `2025-06-18` carries them; reading them is `pyacp-eg1.3`, and a server's own hint
-  about its tool is not a security boundary — a missing or false one must still land on
-  "ask".
 - `read_resource` forwards an `arguments` param that is not in the MCP spec —
   `resources/read` takes `uri` only. The mock server honors it; a real server will
   ignore it. Templated resources are meant to be expanded client-side into a concrete

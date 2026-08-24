@@ -350,17 +350,20 @@ A session whose executor exposes no options takes every default.
 
 ## Permission
 
-**Every tool call is consequential**, so every one is asked about. That is not caution
-for its own sake: nothing here reads a tool's annotations — `readOnlyHint`,
-`destructiveHint`, and friends — so there is no way to tell a read from a delete.
-Treating everything as consequential is the only setting that cannot silently do damage,
-and `allow_always` is what keeps it to once per tool per session.
+**Every tool call is consequential**, so every one is asked about — including the ones
+the server calls read-only.
 
-The version that gated this is no longer the blocker: `pyacp-pb7` moved the pinned MCP
-revision to `2025-06-18`, so annotations are available on the wire whenever the server
-sends them. What is left is reading them and deciding what a hint may downgrade, which is
-`pyacp-eg1.3` — and it stays a *hint*: a server's own claim about its tool is not a
-security boundary, so a missing or false annotation must still land on "ask".
+`pyacp-eg1.3` settled what a hint may and may not do, and the answer is that it changes
+how the question **looks** and never whether it is **asked**. The tool call now carries a
+`kind` read from the server's `readOnlyHint` / `destructiveHint` annotations
+([mcp_tools.py](mcp_tools.md)), so the prompt a human answers says `delete` rather than
+`other`. It does not skip the prompt, because a server asserting `readOnlyHint: true` and
+thereby escaping it would be a privilege escalation written by the party being restrained
+— which is MCP's own warning about annotations, in its own spec.
+
+So `allow_always` is still what keeps the asking to once per tool per session, and a
+missing, false, or unreadable annotation lands on `other` and on "ask", exactly as before
+annotations were read at all.
 
 *"But the client already chose the tool"* — the client that sent `session/prompt` and the
 human at the ACP client are not necessarily the same party. Automation asks; the

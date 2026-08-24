@@ -1090,7 +1090,12 @@ def test_one_option_of_each_variant_is_exposed() -> None:
 
 
 async def test_turning_off_the_announcement_skips_the_command_list() -> None:
-    """And skips the `tools/list` behind it, which is the point of the option."""
+    """The notification goes, not every `tools/list` behind it.
+
+    Since `pyacp-eg1.3` a turn lists the servers it actually calls either way, because a
+    tool call's `kind` is read from their annotations. What the option still saves is the
+    notification and the servers this turn does not touch.
+    """
     async with Harness("tools") as harness:
         configured(harness, "announce-tools", False)
         result = await harness.run(block(tool="echo"))
@@ -2048,3 +2053,81 @@ async def test_a_file_and_a_command_cannot_fill_the_same_argument(tmp_path: Path
 
     assert result.stop_reason == "refusal"
     assert "named in 'run' and somewhere else too" in harness.refusal()
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations (pyacp-eg1.3)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_read_only_tool_is_still_asked_about(monkeypatch: Any) -> None:
+    """**The test this whole feature is fenced by.**
+
+    `pyacp-eg1.3` opened by proposing the router "skip the prompt for readOnlyHint
+    tools". It is refused: a server asserting `readOnlyHint: true` and thereby escaping
+    the permission prompt is a privilege escalation written by the party being
+    restrained. MCP says the same in its own words — never make tool-use decisions on
+    annotations from an untrusted server.
+
+    So the hint relabels the question and the question is still asked.
+    """
+    monkeypatch.setenv("MOCK_MCP_ANNOTATED_TOOLS", "1")
+    async with Harness("tools") as harness:
+        result = await harness.run(block(tool="echo", arguments={"text": "hi"}))
+
+    assert result.stop_reason == "end_turn"
+    assert [c.title for c in harness.client.permission_requests] == ["tools/echo"]
+    assert harness.client.permission_requests[0].kind == "read"
+
+
+@pytest.mark.parametrize(
+    ("tool", "kind"),
+    [
+        ("echo", "read"),
+        ("wipe", "delete"),
+        ("patch", "edit"),
+        ("plain", "other"),
+    ],
+)
+async def test_the_servers_annotations_reach_the_wire(
+    monkeypatch: Any, tool: str, kind: str
+) -> None:
+    """On the `tool_call` a client renders *and* on the prompt a human answers.
+
+    Both, because they are what the hint is for: an icon, and a better question.
+    """
+    monkeypatch.setenv("MOCK_MCP_ANNOTATED_TOOLS", "1")
+    async with Harness("tools") as harness:
+        await harness.run(block(tool=tool, arguments={"text": "hi"}))
+
+    assert harness.of("tool_call")[0].kind == kind
+    assert harness.client.permission_requests[0].kind == kind
+
+
+async def test_the_kind_survives_a_turn_that_does_not_announce(monkeypatch: Any) -> None:
+    """Turning off `announce-tools` must not quietly downgrade the permission prompt.
+
+    The option is about a notification. A human deciding whether to run something called
+    `wipe` should not get a worse question because the client already knew the tool list.
+    """
+    monkeypatch.setenv("MOCK_MCP_ANNOTATED_TOOLS", "1")
+    async with Harness("tools") as harness:
+        configured(harness, "announce-tools", False)
+        await harness.run(block(tool="wipe"))
+
+    assert harness.of("available_commands_update") == []
+    assert harness.of("tool_call")[0].kind == "delete"
+
+
+async def test_a_server_that_annotates_nothing_labels_nothing(monkeypatch: Any) -> None:
+    """The pre-annotation behaviour, unchanged, for a server that says nothing.
+
+    `MOCK_MCP_ANNOTATED_TOOLS` off leaves `echo` as the only tool — annotated, because a
+    fixture whose one tool said nothing could not tell "we ignore hints" from "there were
+    none". So this asserts the *absence* case through a tool the listing does not
+    describe at all: `handshake-report` is callable and unlisted.
+    """
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="handshake-report"))
+
+    assert harness.of("tool_call")[0].kind == "other"

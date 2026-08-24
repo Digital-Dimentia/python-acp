@@ -160,9 +160,21 @@ SDK's union so a release that grows a variant forces a decision.
   `session/load` replay. Do not call `client.session_update` directly from a turn.
 
 Client-method gating lives on the seam, in method vocabulary: `context.require(Gate.X)`.
-Three shapes that are not interchangeable — `fs` is **two independent booleans**,
-`terminal` is **one boolean for all five** methods, and `plan` / `elicitation` are
-advertised by **presence** of an empty marker model (`is not None`, never `bool(model)`).
+Four shapes that are not interchangeable — `fs` is **two independent booleans**,
+`terminal` is **one boolean for all five** methods, `plan` is advertised by **presence**
+of an empty marker model (`is not None`, never `bool(model)`), and `elicitation` is a
+**container** of two independent presence markers (`form`, `url`) whose own presence
+promises nothing: a client may send `elicitation: {}` and support neither mode. Reading
+the outer object the way `plan` is read is the mistake `Gate.ELICITATION_FORM` and
+`Gate.ELICITATION_URL` exist to prevent.
+
+**One client method is declined structurally, and it is the only one.**
+`complete_elicitation` is addressed by `elicitationId`, which exists only on the two
+**URL** variants of `ElicitationMode`. Nothing here creates one — the sole source of an
+elicitation is an MCP server's form-shaped `elicitation/create`, forwarded by
+`elicitation.py` — so there is no id to complete. Row 11 of the client surface table in
+`docs/acp-compliance-matrix.md` carries the reasoning; do not "fix" it back into a
+deferred row with a bead on it.
 
 ## The deprecated surface
 

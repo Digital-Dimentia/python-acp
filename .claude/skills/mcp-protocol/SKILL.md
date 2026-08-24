@@ -1,6 +1,6 @@
 ---
 name: mcp-protocol
-description: Use when changing how python-acp talks to the MCP server subprocess it embeds — adding an MCP call, handling a server-initiated request or notification, touching the initialize handshake or capability block, changing subprocess lifecycle or stdio framing, or debugging a hang, a dropped message, or a swallowed error. Covers the stdio transport MUSTs, the lifecycle, the primitive surface in both directions, and where mcp_stdio.py currently diverges from the spec. Trigger on work involving mcp_stdio.py, MCPStdioClient, MCPProtocolError, tests/fixtures/mock_mcp_server.py, or the MCP protocol version.
+description: Use when changing how python-acp talks to the MCP server subprocess it embeds — adding an MCP call, handling a server-initiated request or notification, touching the initialize handshake or capability block, changing subprocess lifecycle or stdio framing, or debugging a hang, a dropped message, or a swallowed error. Covers the stdio transport MUSTs, the lifecycle, the primitive surface in both directions, and where mcp_stdio.py currently diverges from the spec. Trigger on work involving mcp_stdio.py, MCPStdioClient, MCPProtocolError, elicitation.py, tests/fixtures/mock_mcp_server.py, or the MCP protocol version.
 ---
 
 # The MCP Side of the Bridge
@@ -100,17 +100,23 @@ the promise reaches the wire.
 | Client capability | Enables the server to call | python-acp's answer |
 |---|---|---|
 | `roots: {listChanged: bool}` | `roots/list` | **declared today.** `mcp_registry.roots_responder` answers it from the session's `cwd` + `additionalDirectories`; `listChanged` is `false` because a session's roots are fixed for its lifetime |
-| `elicitation: {}` | `elicitation/create` | declarable, not yet declared — `pyacp-8bv.4` forwards it to ACP `session/request_permission`, and declaring it before that lands would strand a server |
+| `elicitation: {}` | `elicitation/create` | **declared today, per session.** `elicitation.py` forwards the question to the ACP client as a form-mode `elicitation/create` and hands the answer back; `mcp_registry` declares the capability only when handed that forwarder, and `agent.py` builds one only when the connected client advertised `elicitation.form` |
 | `sampling: {}` | `sampling/createMessage` | **never**, and `MCPClientCapabilities` has no field for it — there is no LLM in this runtime, so the block cannot be built wrong |
 
 An undeclared capability contributes **no key at all**, not a `false`: absent means
 unsupported.
 
-The check `initialize` runs is presence, not coverage — one callable stands behind every
-declared capability, so a handler wired up for `roots/list` is also what a server's
+The check `initialize` runs is presence, not coverage — **one** callable stands behind
+every declared capability, so a handler wired up for `roots/list` is also what a server's
 `sampling/createMessage` reaches. Raise `UnsupportedServerRequest` there: it becomes
 `-32601` ("we never offered this") instead of `-32603` ("we broke"), and that distinction
 is what makes the capability block mean anything on the wire.
+
+Because there is only one, `mcp_registry.backend_responder` composes the two answers this
+process has — `roots/list` to `roots_responder`, `elicitation/create` to the session's
+forwarder — into it, and falls through to `UnsupportedServerRequest` for everything else.
+A backend with neither roots nor a forwarder is handed **no handler at all**, which is
+what lets `initialize` refuse to send a block nothing stands behind.
 
 Server capabilities move the other way. Treat the `initialize` result as the source of
 truth for what to call; a server that omits `prompts` will answer `prompts/list` with
@@ -153,11 +159,21 @@ rough order of usefulness here: `ping`, `resources/templates/list`,
 `notifications/progress`.
 
 Inbound — `_handle_message` routes by shape, and `mcp_stdio.md` has the table. The part
-worth memorizing: **every server request gets a reply.** `ping` is answered inline with
-`{}`, anything else goes to `on_server_request` or gets `-32601`, a handler that raises
-`UnsupportedServerRequest` also gets `-32601`, and a handler that raises anything else
-produces `-32603` instead of killing the read loop. An unanswered request strands the
-server forever.
+worth memorizing: **every server request gets a reply.** `ping` is answered with `{}`,
+anything else goes to `on_server_request` or gets `-32601`, a handler that raises
+`UnsupportedServerRequest` also gets `-32601`, one that raises `MalformedServerRequest`
+gets `-32602` — the server used a capability we really do declare, with params we cannot
+read, which is its mistake and not ours — and one that raises anything else produces
+`-32603` instead of killing the read loop. An unanswered request strands the server
+forever.
+
+**The read loop does not await the handler.** Each server request runs in a task of its
+own, because `elicitation/create` is forwarded to the ACP client and waits on a human; a
+loop parked inside one would stop reading everything else on the connection, including
+the response to the very `tools/call` that provoked the request. Replies may therefore
+leave out of arrival order, which JSON-RPC allows: the id is what matches them. `stop()`
+cancels whatever is still in flight, before the subprocess goes and again after the read
+loop is gone.
 
 Server notifications to expect: `notifications/message` (logging),
 `notifications/tools/list_changed`, `notifications/resources/list_changed`,
@@ -242,8 +258,9 @@ Anything that adds or renames a module also triggers the `repo-docs-sync` skill.
 
 Real gaps, in rough priority order. Check beads before filing a duplicate.
 
-- `elicitation` is declarable but not declared: nothing forwards `elicitation/create` to
-  the ACP client yet (`pyacp-8bv.4`).
+- A forwarded `elicitation/create` carries no `toolCallId`, so a client cannot attach the
+  question to the tool call that provoked it. The id is known where `tools/call` is made
+  and not on the read loop the handler runs on; `pyacp-owi` weighs the ways to bridge that.
 - `roots.listChanged` is `false`, so a session whose roots could change could not say so.
   Nothing can change them today, which makes it honest rather than a gap.
 - Nothing reads tool annotations, so `turn_mcp_router` asks permission for every tool
@@ -262,7 +279,8 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
 `initialize` will accept back.
 
 **Proposed and accepted are deliberately different sets.** We ask for the newer revision
-because `elicitation` does not exist before it, and still accept a `2024-11-05`
+because `elicitation` — the capability `elicitation.py` forwards to the ACP client — does
+not exist before it, and still accept a `2024-11-05`
 counter-offer because hanging up on one would drop every server that has not moved yet.
 Never propose a revision that is not also in the accepted set — that is a handshake which
 always fails.

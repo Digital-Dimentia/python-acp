@@ -107,6 +107,14 @@ Subclass `ValueError` to get `-32602` for free. `UnknownSessionError`,
 `PathConstraintError`, and `UnknownBackendError` all do, and none of them needs a special
 case anywhere.
 
+**Not every `-32602` on the wire comes from `errors.py`.** Params that do not parse are
+refused by the SDK's schema before an agent method is ever called, and it answers with
+pydantic's own report — `data.errors`, carrying `loc` and `type` — not the `{reason}` the
+table above describes. So `data`'s key names the layer that refused: `errors` is the
+schema's, `reason` is ours, `source` is the backend's, and never more than one appears.
+`tests/test_negative.py` asserts the whole mapping as one table — including that no
+wrongness falls through to a bare `-32603` — and is where a new failure mode belongs.
+
 ## Capability advertisement
 
 `initialize`'s block is built from `AGENT_CAPABILITY_MANIFEST` and nothing else. **Do not
@@ -179,8 +187,12 @@ flattened back to its message for that shape only.
 
 - **`salvage_on_error` and `skip_invalid_items`.** A junk `protocolVersion` becomes the
   default instead of `-32602`, and a malformed entry in `session/new`'s `mcpServers` is
-  **silently dropped** before the agent sees it. Both are pinned by tests so they are
-  known rather than rediscovered. You cannot refuse what never arrives.
+  **silently dropped** before the agent sees it. Both are pinned in `tests/test_negative.py`
+  so they are known rather than rediscovered. You cannot refuse what never arrives.
+  The second one has teeth and is tracked as `pyacp-mej`: the client asked for N servers,
+  the agent opens the ones that survived, and `session/new` hands back an id whose tools
+  silently do not exist — the exact failure `mcp_registry`'s all-or-nothing opening exists
+  to prevent, arriving by a route that module cannot see.
 - **`normalize_result`.** Five routes are registered with it — `authenticate`,
   `session/load`, `session/close`, `session/set_mode`, `session/set_config_option` — so
   their responses arrive as plain **dicts** rather than models when a test drives the

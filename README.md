@@ -379,7 +379,16 @@ make container-image
 make package
 make release-bundle
 make clean
+make clean-venv
+make distclean
 ```
+
+**`make clean` no longer removes the virtual environment.** It takes build outputs and
+tool caches; `make clean-venv` takes `$VENV_DIR` and nothing else, and `make distclean`
+takes both. The venv is stamped and reused, so deleting it is the one action here that
+forces a full reinstall over the network — and behind a TLS-intercepting proxy that may
+not be recoverable without `PIP_TRUSTED_HOST` or `PIP_CERT`. A target called `clean`
+should not be able to leave a checkout unbuildable offline.
 
 `make docs-check` enforces three documentation invariants nothing else does: relative
 links resolve, every Mermaid flowchart edge names a node its own block defines, and every

@@ -31,7 +31,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image package release-bundle run clean
+.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image package release-bundle run clean clean-outputs clean-venv distclean
 
 venv: $(VENV_STAMP)
 
@@ -115,5 +115,32 @@ run: venv
 	@printf 'Press Ctrl+C to stop.\n'
 	$(PYTHON_BIN) -m python_acp.cli --host $(HOST) --port $(PORT)
 
-clean:
-	rm -rf build dist artifacts *.egg-info .pytest_cache .ruff_cache $(VENV_DIR)
+## Build outputs and tool caches. **Leaves the virtual environment alone.**
+##
+## Since the venv became stamped and reused (`pyacp-caq`), deleting it is the one action
+## here that forces a full reinstall over the network -- and behind a TLS-intercepting
+## proxy that may not be recoverable at all without PIP_TRUSTED_HOST or PIP_CERT. A
+## target named `clean` should not be able to leave a checkout unbuildable offline, so
+## asking for that is now a separate, deliberate word.
+##
+## `src/*.egg-info` and not just `*.egg-info`: this is a src-layout project, so the
+## editable install writes `src/python_acp.egg-info`, which the old glob never matched.
+clean: clean-outputs
+	@printf 'Build outputs and caches removed. $(VENV_DIR) was left alone;\n'
+	@printf 'use `make clean-venv` to remove it (needs the network to rebuild).\n'
+
+## The removal itself, shared with `distclean` so that target does not inherit the note
+## above -- which would be false there, since `distclean` does remove the venv.
+clean-outputs:
+	rm -rf build $(BUILD_DIR) $(ARTIFACTS_DIR) src/*.egg-info *.egg-info \
+		.pytest_cache .ruff_cache
+
+## The virtual environment, and nothing else. Rebuilding it needs the network unless
+## every wheel is already cached. Honours VENV_DIR, so `make clean-venv VENV_DIR=.venv312`
+## removes that one and leaves the default alone.
+clean-venv:
+	rm -rf $(VENV_DIR)
+
+## Everything `clean` removes, plus the venv -- the GNU convention name, and what the
+## single old `clean` target used to do.
+distclean: clean-outputs clean-venv

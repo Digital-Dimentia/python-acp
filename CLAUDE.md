@@ -74,6 +74,9 @@ make docs-check  # links resolve, mermaid edges name real nodes, module docs exi
 make test     # pytest tests
 make transcripts  # re-record tests/transcripts/*.json — then READ THE DIFF
 make build    # python -m build → dist/*.whl, dist/*.tar.gz
+make clean    # build outputs and caches — NOT the venv
+make clean-venv  # $(VENV_DIR), and only that
+make distclean   # both
 ```
 
 `make venv` writes `.venv/.python-acp-venv.json`, a stamp recording the interpreter the
@@ -81,6 +84,12 @@ venv was built from and a hash of `pyproject.toml`. While that stamp matches, `l
 `test`, and `build` skip `pip` entirely and need **no network**. Editing `pyproject.toml`
 invalidates it and the next `make venv` reinstalls; `make sync` forces a reinstall
 without editing anything.
+
+**`clean` deliberately spares the venv** (`pyacp-x4w`). The venv is stamped and reused,
+so removing it is the one action in that family that forces a full reinstall over the
+network, and behind a TLS-intercepting proxy it may not be recoverable without
+`PIP_TRUSTED_HOST` or `PIP_CERT`. Ask for that with `clean-venv` or `distclean`, which
+is what the single old `clean` target used to do.
 
 Knobs, all overridable on the command line:
 

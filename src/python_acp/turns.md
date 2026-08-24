@@ -127,6 +127,34 @@ explicitly stopped.
 operation than be torn out of it —
 `asyncio.wait([work, cancel], return_when=FIRST_COMPLETED)`.
 
+### Emitting on the way out, and the one time it is refused
+
+Cleanup that tells the client what got finished is legitimate, and `shield` is how it
+survives its own cancellation long enough to reach the wire. It works on the
+`session/cancel` path by construction: `prompt` is still inside `asyncio.wait` there, so
+the notification is on the wire *before* the response — which is the "nothing after the
+response" guarantee, not a breach of it.
+
+There is one path where it is refused, and it is a different cancellation. When the
+**`session/prompt` request itself** dies — the connection dropped, the client's call was
+cancelled — there is no response for anything to be after, and `prompt` cancels the turn
+task without awaiting it (awaiting a task inside a dead request is how a hang gets made if
+an executor ignores cancellation). Between those two moments an executor's shielded
+cleanup could put a notification on a socket nobody is reading.
+
+So `prompt` calls `context.detach()` in its `finally`, and `emit` raises
+`DetachedTurnError` afterwards. Three properties worth not re-deriving:
+
+| | Why |
+|---|---|
+| It raises rather than dropping quietly | Dropping would leave an executor believing it told the client something. The failure belongs in the task that caused it |
+| It refuses **before** `record`, unlike a send that fails on the wire | A wire failure still happened as far as the session is concerned and `session/load` should replay it. This one never happened and never will, so recording it would promise a replay of a notification no client ever saw |
+| It closes the wire only — it does not cancel the turn | Whether the task stops is `prompt`'s business, and it is the one place that can tell the two cancellations apart |
+
+`detach()` is in the `finally` rather than the `except` so there is one rule and no path
+to forget it. On the ordinary path it is redundant — the task is already done — which is
+the point: the invariant does not depend on which way the turn ended. `pyacp-48b`.
+
 ## `TurnResult`
 
 A record rather than a bare `StopReason`, because `PromptResponse` already carries `usage`
@@ -148,7 +176,8 @@ cancelled, `agent.py` checks `Task.cancelled()` (which would be `False`), and a
 | Symbol | Purpose |
 |---|---|
 | `TurnExecutor` | The Protocol one turn runs behind: `execute`, plus `supported_prompt_blocks`, `session_modes`, and `session_config_options` |
-| `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation` |
+| `TurnContext` | `session`, `client`, `session_id`, `gates`, `cancelled`, `emit`, `require`, `allows`, `wait_for_cancellation`, `detach` |
+| `DetachedTurnError` | Raised by `emit` after `detach()` — a turn that outlived its request. See "Emitting on the way out" |
 | `TurnResult` | `stop_reason` plus optional `usage`; `ended()`, `refused()`, `cancelled()` name the three exit paths |
 | `Gate`, `ClientGates`, `UngatedClientCallError` | Capability gating in method vocabulary |
 | `SESSION_UPDATE_DISPOSITIONS`, `UpdateVariant`, `Disposition` | Every `session/update` variant and its fate — see above |

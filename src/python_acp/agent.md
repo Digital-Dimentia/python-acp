@@ -97,6 +97,14 @@ are not among them.
 are asked to follow: an executor emitting from an `except CancelledError` cleanup block
 is still inside the task, so its notification is on the wire before the answer is.
 
+That covers every path that *has* a response. The one that does not is this request itself
+being cancelled: `prompt` cancels the turn task and re-raises **without awaiting it**,
+because awaiting a task inside a dead request is how a hang gets made if an executor
+ignores cancellation. `context.detach()` in the `finally` closes that window — `emit`
+raises `DetachedTurnError` from then on, so a shielded cleanup cannot write to a socket
+nobody is reading. `pyacp-48b`; the reasoning is in [turns.py](turns.md) under "Emitting
+on the way out".
+
 `prompt` reports the executor's `stopReason` rather than deciding it, with **one
 override**: if `session/cancel` was delivered to this turn and the executor still returned
 something other than `cancelled`, the response says `cancelled` and a warning names the

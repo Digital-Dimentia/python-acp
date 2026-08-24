@@ -32,7 +32,12 @@ from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
-from python_acp.turns import IdleTurnExecutor, TurnContext, TurnResult
+from python_acp.turns import (
+    DetachedTurnError,
+    IdleTurnExecutor,
+    TurnContext,
+    TurnResult,
+)
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
@@ -731,6 +736,144 @@ async def test_a_cancelled_session_is_idle_again_afterwards() -> None:
     await asyncio.wait_for(turn, timeout=5)
 
     assert registry.get(created.session_id).turn_is_running is False
+
+
+# ---------------------------------------------------------------------------
+# A turn that outlives its request (pyacp-48b). `session/cancel` is not this:
+# there, `prompt` is still waiting and there IS a response to be before. Here the
+# `session/prompt` request itself dies, so no response is ever built and the
+# "nothing after the response" guarantee has nothing to hang on.
+# ---------------------------------------------------------------------------
+
+
+class LateEmittingExecutor:
+    """Emits from its `except CancelledError` handler, under `asyncio.shield`.
+
+    The shape the bead names, and a legitimate one: an executor is allowed to tell the
+    client what it managed to finish before it was torn out. `shield` is what makes the
+    emit survive its own cancellation long enough to reach the wire, which is exactly why
+    a convention ("do not emit after cancellation") could not have closed this.
+    """
+
+    supported_prompt_blocks = frozenset({"text"})
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.emit_error: Exception | None = None
+        self.emit_attempted = False
+
+    async def execute(self, context, prompt):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.emit_attempted = True
+            try:
+                await asyncio.shield(
+                    context.emit(AgentMessageChunk(
+                        sessionUpdate="agent_message_chunk",
+                        content=TextContentBlock(type="text", text="too late"),
+                    ))
+                )
+            except Exception as exc:  # noqa: BLE001 — the point of the test
+                self.emit_error = exc
+            raise
+
+
+async def _cancel_the_prompt_request(executor) -> RecordingClient:
+    """Start a turn, then cancel the *request* — not the session."""
+    client = RecordingClient()
+    agent = make_agent(executor=executor)
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    request = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    # Let the detached turn task reach its cleanup and try to emit.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    return client
+
+
+async def test_a_turn_cannot_emit_after_its_request_was_cancelled() -> None:
+    """The bug: a notification for a request nobody is reading, on a possibly dead socket."""
+    executor = LateEmittingExecutor()
+
+    client = await _cancel_the_prompt_request(executor)
+
+    assert executor.emit_attempted, "the executor never reached its cleanup"
+    assert client.updates == [], "a session/update escaped a request that no longer exists"
+
+
+async def test_the_late_emit_fails_loudly_in_the_task_that_made_it() -> None:
+    """Enforcement, not silence.
+
+    Dropping the notification quietly would leave an executor believing it told the client
+    something. `DetachedTurnError` puts the failure in the task that caused it.
+    """
+    executor = LateEmittingExecutor()
+
+    await _cancel_the_prompt_request(executor)
+
+    assert isinstance(executor.emit_error, DetachedTurnError)
+    assert "after its request was over" in str(executor.emit_error)
+
+
+async def test_a_refused_late_emit_is_not_recorded_for_session_load() -> None:
+    """A notification no client ever saw must not come back in a `session/load` replay."""
+    executor = LateEmittingExecutor()
+    registry = SessionRegistry()
+    client = RecordingClient()
+    agent = make_agent(sessions=registry, executor=executor)
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    request = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert registry.get(created.session_id).history == []
+
+
+async def test_session_cancel_still_lets_a_turn_emit_on_its_way_out() -> None:
+    """The boundary. `session/cancel` must keep working exactly as it did.
+
+    `prompt` is still inside `asyncio.wait` there, so the turn is attached and its
+    cleanup notification is on the wire *before* the response — which is the guarantee,
+    not a violation of it. Detaching on this path too would have broken a working feature
+    while fixing a different one.
+    """
+    executor = LateEmittingExecutor()
+    client = RecordingClient()
+    agent = make_agent(executor=executor)
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    request = asyncio.create_task(
+        router("session/prompt", {"sessionId": created.session_id, "prompt": []}, False)
+    )
+    await asyncio.wait_for(executor.started.wait(), timeout=5)
+    await router("session/cancel", {"sessionId": created.session_id}, True)
+    result = await asyncio.wait_for(request, timeout=5)
+
+    assert result.stop_reason == "cancelled"
+    assert executor.emit_error is None, "session/cancel must not detach the context"
+    assert [text for _, text in client.updates] or client.updates, "the cleanup emit went out"
+    assert len(client.updates) == 1
 
 
 async def test_a_second_concurrent_prompt_is_refused() -> None:

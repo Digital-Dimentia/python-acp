@@ -358,6 +358,7 @@ make venv
 make sync
 make install
 make lint
+make docs-check
 make test
 make transcripts
 make build
@@ -368,6 +369,10 @@ make package
 make release-bundle
 make clean
 ```
+
+`make docs-check` enforces three documentation invariants nothing else does: relative
+links resolve, every Mermaid flowchart edge names a node its own block defines, and every
+module under `src/python_acp/` has a sibling `.md`. It runs in CI.
 
 `make transcripts` re-records the golden JSON-RPC transcripts in `tests/transcripts/` and
 prints the diff; read it before committing, since an unreviewed regeneration turns a wire

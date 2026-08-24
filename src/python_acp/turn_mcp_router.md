@@ -460,6 +460,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `McpToolRouterExecutor(backends)` | The executor. `agent.py`'s default |
 | `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title`, `reads`, `write`, `locations` |
 | `FileRead` / `FileWrite` | One file to read into an argument, and where the output goes. Both carry the **resolved** path |
+| `CommandRun` | One command to run in a client terminal, into one tool argument — `FileRead`'s mirror. `output_byte_limit` is never absent |
 | `PromptConventionError` | A prompt this executor will not run. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602`. `explains_convention` says whether the refusal appends `CONVENTION` |
 | `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |
@@ -468,6 +469,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `SESSION_MODES` | The three modes, and `EXECUTE` / `DRY_RUN` / `AUTO_APPROVE` for their ids |
 | `SESSION_CONFIG_OPTIONS` | The two config options, and `ANNOUNCE_TOOLS` / `ON_TOOL_FAILURE` |
 | `McpToolRouterExecutor.supported_prompt_blocks` | `{"text"}` — what `promptCapabilities` is derived from |
+| `McpToolRouterExecutor.session_modes` / `.session_config_options` | The modes and options `session/new` advertises, declared here because only this executor acts on them |
 
 ## What later beads own
 

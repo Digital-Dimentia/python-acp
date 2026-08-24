@@ -175,6 +175,7 @@ decides whether to cancel and retry.
 | `Session.fork` / `to_info` | The deep copy, and the `session/list` view |
 | `SessionRegistry` | `create` / `get` / `fork` / `resume` / `list` / `close` / `close_all` |
 | `UnknownSessionError`, `TurnAlreadyRunningError` | See **Errors** above |
+| `PAGE_SIZE` | The default `session/list` page size (100), and the `limit` a caller gets when it names none |
 
 `SessionRegistry` takes `clock` and `id_factory` so tests are deterministic rather than
 time- and uuid-dependent, and `on_close` for the backend seam.

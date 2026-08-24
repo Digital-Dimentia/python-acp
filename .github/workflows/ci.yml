@@ -28,6 +28,7 @@ jobs:
         run: |
           make venv
           make lint
+          make docs-check
           make test
           make build
       - name: Upload build artifacts

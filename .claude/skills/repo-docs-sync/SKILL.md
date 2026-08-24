@@ -1,6 +1,6 @@
 ---
 name: repo-docs-sync
-description: Use when adding, renaming, deleting, or materially changing any file under src/python_acp/, or when touching ARCHITECTURE.md or the README's WebSocket action list. This repo requires a co-located Markdown doc with the same basename beside every production Python module, plus Mermaid diagrams in ARCHITECTURE.md that track the real request path. Trigger before finishing any change to production source or architecture docs.
+description: Use when adding, renaming, deleting, or materially changing any file under src/python_acp/, or when touching ARCHITECTURE.md or the README's client-facing surface. This repo requires a co-located Markdown doc with the same basename beside every production Python module, plus Mermaid diagrams in ARCHITECTURE.md that track the real request path, and `make docs-check` enforces the mechanical half. Trigger before finishing any change to production source or architecture docs.
 ---
 
 # Documentation Invariants
@@ -47,27 +47,46 @@ node labels with parentheses or slashes are quoted.
 
 ## README.md
 
-The "WebSocket actions" section lists an example JSON payload per supported action, and
-the "Features" section lists the supported action names. Both drift the moment a method
-is added. See the `acp-protocol` skill for the full add-a-method checklist.
+The "Features" list and the worked request examples under "Run the bridge" both drift the
+moment the client-facing surface changes. See the `acp-protocol` skill for the full
+add-a-method checklist.
+
+(This section used to describe a "WebSocket actions" section with one payload example per
+deprecated action. `pyacp-sld.3` deleted both the surface and the section.)
 
 ## Checking before handoff
 
 ```bash
-# every production module has a sibling doc
-for f in src/python_acp/*.py; do
-  case "$f" in */__init__.py) continue;; esac
-  [ -f "${f%.py}.md" ] || echo "MISSING DOC: ${f%.py}.md"
-done
-
-# every doc still has a module
-for f in src/python_acp/*.md; do
-  [ -f "${f%.md}.py" ] || echo "ORPHAN DOC: $f"
-done
+make docs-check
 ```
 
-## Note on git state
+`pyacp-6ni.5` turned the hand-rolled loop that used to live here into
+[scripts/check_docs.py](../../../scripts/check_docs.py), which runs in CI and in
+`tests/test_check_docs.py`. It enforces three things:
 
-`ARCHITECTURE.md`, `docs/`, and the three module `.md` files were untracked as of the
-last check. If a doc edit seems to vanish from a diff, confirm the file is actually
-tracked before assuming the edit failed.
+1. **Every relative Markdown link resolves.** Links are resolved from the linking file,
+   not the repo root, so `turns.md` → `sessions.md` works.
+2. **Every Mermaid *flowchart* edge names a node its own block defines**, and no node is
+   defined twice. This is the one worth having: GitHub renders a dangling edge by
+   inventing a bare node, so a drifted diagram looks *plausible* instead of broken.
+3. **The co-located doc rule** — a sibling `.md` for every module, no orphans.
+
+**It does not check everything, and the gaps are deliberate.** It does not render Mermaid
+(that needs node and a headless browser), it does not follow `#anchors` (heading slugs are
+GitHub's business and pinning them would fail on every rename), and it does not verify
+that a doc's prose is *true* — including that the symbols it names still exist. A green
+`docs-check` means the wiring is intact, not that the writing is right. Read the doc.
+
+## What a green check still will not tell you
+
+The audits worth running by hand when a module's surface changes, because no script does
+them:
+
+- Does the sibling `.md`'s **Main symbols** table still name what the module exports, and
+  only that? A renamed class leaves a table entry that reads as authoritative.
+- Does a doc cite a test that has been renamed? Beware: some citations are deliberately
+  historical (`capabilities.md` names a test that "died with the first flip, as
+  intended"), so this cannot be automated without false positives.
+- Do `ARCHITECTURE.md`'s diagrams still describe the *delivered* system rather than a
+  planned one? Two diagrams of the same thing is how one goes stale — `pyacp-6ni.5` merged
+  a "today" and a "target" section for exactly that reason.

@@ -31,7 +31,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint test transcripts build wheel sdist container-image package release-bundle run clean
+.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image package release-bundle run clean
 
 venv: $(VENV_STAMP)
 
@@ -49,7 +49,14 @@ sync:
 install: venv
 
 lint: venv
-	$(PYTHON_BIN) -m ruff check src tests
+	$(PYTHON_BIN) -m ruff check src tests scripts
+
+## Documentation invariants nothing else enforces: relative links resolve, every
+## Mermaid flowchart edge names a node its own block defines, and every production
+## module has a sibling .md. See scripts/check_docs.py for what it deliberately
+## does not check.
+docs-check: venv
+	$(PYTHON_BIN) scripts/check_docs.py
 
 test: venv
 	$(PYTHON_BIN) -m pytest tests

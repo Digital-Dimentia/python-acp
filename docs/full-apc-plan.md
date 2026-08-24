@@ -191,7 +191,17 @@ rule automatically.
 Documentation is therefore no longer a phase. Instead it is part of every issue's
 definition of done: **any new module under `src/python_acp/` ships its sibling `.md` in
 the same change, and any change to the request path updates the `ARCHITECTURE.md`
-sequence diagram.** Phase 8.5 is the final consistency pass.
+sequence diagram.** Phase 8.5 was the final consistency pass, and it did three things
+beyond tidying: merged the "today" and "target" subsystem sections into one (two diagrams
+of the same system is how one goes stale), rebuilt a flowchart that had drifted into a
+duplicate node and edges to nodes it never defined, and turned **Further Consideration 2**
+— a CI check for Markdown link integrity and Mermaid syntax — from a maybe into
+`scripts/check_docs.py`, wired to `make docs-check` and CI.
+
+That check is deliberately narrower than "Mermaid syntax": it does not render diagrams,
+which would mean node and a headless browser. It checks that every flowchart edge names a
+node its own block defines, which is the failure that actually happened here and the one
+GitHub hides — a dangling edge renders as a plausible bare node rather than an error.
 
 ## Verification
 
@@ -201,7 +211,9 @@ sequence diagram.** Phase 8.5 is the final consistency pass.
 3. Capability advertisement matches implemented behavior exactly — no aspirational literals.
 4. A real ACP client completes a session over stdio end to end.
 5. Full 3.11–3.14 CI matrix green.
-6. Mermaid diagrams render; module docs match delivered symbol names.
+6. Mermaid flowchart edges all name defined nodes, relative links resolve, and every
+   module has a sibling doc — `make docs-check`, in CI. Whether a doc's *prose* is
+   true is still a human job; the checker says so.
 
 ## What changed from the original plan
 

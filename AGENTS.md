@@ -139,7 +139,8 @@ to `.venv/` on the first `make venv` (re-activate your shell afterwards). Do not
 ```bash
 make venv     # create/refresh .venv; a no-op when it is already current
 make sync     # force pip install -e '.[dev]' even when the venv looks current
-make lint     # ruff check src tests
+make lint     # ruff check src tests scripts
+make docs-check  # links resolve, mermaid edges name real nodes, module docs exist
 make test     # pytest tests
 make transcripts  # re-record tests/transcripts/*.json — then READ THE DIFF
 make build    # python -m build → dist/*.whl, dist/*.tar.gz
@@ -173,7 +174,15 @@ Knobs, all overridable on the command line:
 The venv logic lives in [scripts/venv_bootstrap.py](scripts/venv_bootstrap.py), not in a
 Makefile recipe, because the rules are conditional in ways `make` expresses badly.
 
-Before handing off any code change: `make lint && make test`.
+Before handing off any code change: `make lint && make docs-check && make test`.
+
+`make docs-check` runs [scripts/check_docs.py](scripts/check_docs.py), which enforces
+the three documentation invariants nothing else does: every relative Markdown link
+resolves, every Mermaid **flowchart** edge names a node its own block defines (GitHub
+renders a dangling edge as a bare node, so the failure is a plausible-looking wrong
+picture rather than an error), and every production module has a sibling `.md` with no
+orphans. It is in CI and in `tests/test_check_docs.py`, because a gate that reports
+success by finding nothing fails open.
 
 **Golden transcripts.** `tests/transcripts/*.json` record the whole JSON-RPC conversation
 for four flows — initialize, session lifecycle, streaming, cancellation — in order and in
@@ -197,7 +206,7 @@ Packaging targets:
   `ws://127.0.0.1:8766`. Both the bridge and the MCP subprocess run on
   `$(VENV_DIR)/bin/python`, so they cannot drift onto different interpreters.
 
-CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make test && make build`
+CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make docs-check && make test && make build`
 across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version
 `requires-python = ">=3.11,<3.15"` claims — with `fail-fast: false` so one version's
 failure does not mask the others. Build artifacts are uploaded from the 3.11 leg only.

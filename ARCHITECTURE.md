@@ -1,19 +1,24 @@
 # python-acp Architecture
 
-This document describes how `python-acp` is organized today, how requests flow through the
-runtime, and the subsystem shape it is being migrated to.
+This document describes how `python-acp` is organized and how a request flows through it.
 
-## Subsystems Today
+**ACP v1 is delivered.** This used to carry a second "target" section describing a shape
+the runtime was migrating toward; Phases 1–7 built it and `pyacp-6ni.5` merged the two,
+because two diagrams of the same system is how one of them silently goes stale. What is
+here is what runs.
 
-Both transports now bind the same agent through the SDK. There is one dispatch path, one
+## Subsystems
+
+Both transports bind the same agent through the SDK. There is one dispatch path, one
 capability block, and one error mapping, whichever wire a client arrives on.
 
-- CLI runtime: parses startup arguments and bootstraps async services. Owns the one MCP subprocess.
+- CLI runtime (`cli.py`): parses startup arguments, builds the three process-wide registries, and hands the process to a transport. Starts no MCP server — every one belongs to a session.
 - Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire, and nothing else.
-- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. Every routed method is live except `session/set_mode` and `session/set_config_option` (`pyacp-fln.2`, `pyacp-fln.3`).
-- Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
+- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. All 15 members are live; `authenticate` is the one that deliberately refuses, with `-32000 auth_required`.
+- Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake. One table, derived from the compliance matrix; nothing else builds a capability block.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
-- Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
+- Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. `turn_mcp_router.py`'s `fs/*` calls are its consumer.
+- Client terminals (`terminals.py`): the terminals a turn created on the client, released on every path out of a turn — and forgotten, never released, when the client disconnects.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
 - MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
@@ -36,6 +41,8 @@ flowchart LR
     Errors["errors.py"]
     Sessions["sessions.py<br/>SessionRegistry"]
     Paths["paths.py<br/>containment rule"]
+    Terminals["terminals.py<br/>TerminalRegistry"]
+    Content["mcp_content.py<br/>MCP content &rarr; ACP blocks"]
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
@@ -50,6 +57,7 @@ flowchart LR
     CLI --> TWs
     CLI --> Sessions
     CLI --> Backends
+    CLI --> Terminals
     TStdio --> SDK
     TWs --> SDK
     TWs --> Errors
@@ -61,11 +69,16 @@ flowchart LR
     Agent --> Turns
     Turns -.implemented by.-> Router
     Router --> Tools
+    Router --> Content
+    Router --> Paths
+    Router --> Terminals
     Router --> Backends
     Agent --> Backends
+    Agent --> Terminals
     Sessions -. "on_close" .-> Backends
+    Sessions -. "on_close" .-> Terminals
     Turns -. "session/update via the Client handle" .-> SDK
-    Turns -. "gated client calls (Phase 4)" .-> SDK
+    Turns -. "gated fs/*, terminal/*, elicitation/* calls" .-> SDK
     Backends --> MCPClient
     Backends -. "elicitation forwarder" .-> Elicit
     Agent --> Elicit
@@ -86,30 +99,12 @@ B6a). And there is no process-wide MCP subprocess anywhere on it — `pyacp-sld.
 the deprecated surface that was its only consumer and `pyacp-sld.4` removed
 `--mcp-command` with it, so every backend on this diagram belongs to a session.
 
-## Target Subsystems (ACP v1)
+## The handshake
 
-The runtime is being rebuilt on the `agent-client-protocol` SDK. See
-[docs/module-boundaries.md](docs/module-boundaries.md) for what each module owns, how
-`ws_bridge.py` was split, and which parts still await verification against the pinned SDK,
-and [docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md) for the per-method
-dispositions.
-
-**Phase 1's runtime is built.** `agent.py` (`PythonAcpAgent`, all 15
-`acp.interfaces.Agent` members), `capabilities.py` (the block `initialize` advertises,
-and version negotiation), `errors.py` (one exception-to-`RequestError` mapping), and
-both transports — `transport_stdio.py` and `transport_ws.py`. An ACP client can spawn the process and complete `initialize`
-today; session and prompt methods answer `-32601` until Phases 2 and 3 fill them in, and
-the agent cannot reach the MCP backend yet — that is the Phase 2 registry.
-
-The capability block that handshake returns is **entirely off**, by construction rather
-than by omission: every field is a row of `AGENT_CAPABILITY_MANIFEST` carrying the bead
-that will flip it, and a row cannot be turned on without a test proving the feature
-behind it runs. See [capabilities.py](src/python_acp/capabilities.md).
-
-The WebSocket path is rebound (`pyacp-tzd.3`): under `--transport ws` a client reaches
-the same agent through the same router, and since `pyacp-sld.3` nothing else. The
-deprecated surface that used to be intercepted before the SDK is gone — see
-[Request Lifecycle](#request-lifecycle) below.
+`initialize` is the same conversation on both transports, and the capability block it
+returns is built from `AGENT_CAPABILITY_MANIFEST` and nothing else — a literal cannot be
+turned on without a manifest row and a test proving the feature behind it runs. See
+[capabilities.py](src/python_acp/capabilities.md).
 
 ```mermaid
 sequenceDiagram
@@ -121,69 +116,27 @@ sequenceDiagram
 
     E->>T: spawns the process; JSON-RPC over stdin
     T->>SDK: run_agent(agent, use_unstable_protocol=True)
-    SDK->>A: initialize(protocol_version, client_capabilities)
+    SDK->>A: initialize(protocolVersion, clientCapabilities)
     A->>C: negotiate version, build the capability block
     C-->>A: negotiated version + AgentCapabilities
     A-->>SDK: InitializeResponse
     SDK-->>E: result on stdout
-    SDK->>A: session/new
-    A-->>SDK: RequestError(-32601) until Phase 2
-    SDK-->>E: error on stdout
+    SDK->>A: session/new(cwd, mcpServers)
+    A-->>SDK: NewSessionResponse(sessionId, modes, configOptions)
+    SDK-->>E: result on stdout
 ```
 
-- Transport bindings (`transport_stdio.py`, `transport_ws.py`): attach the agent to a wire. Nothing else.
-- Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation; translates and delegates.
-- Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake. One table, derived from the compliance matrix; nothing else builds a capability block.
-- Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
-- Session registry (`sessions.py`): cwd, additional directories, modes, config options, lifetimes.
-- Turn executor (`turns.py` + `turn_mcp_router.py`): serves one prompt turn and streams `session/update`.
-- MCP backend (`mcp_registry.py` + `mcp_stdio.py`): per-session MCP servers behind a registry.
-- Error mapping (`errors.py`): our exceptions to `acp.RequestError`, in one place.
+Two things the client learns here and nowhere else. **What it may be asked to do** —
+`clientCapabilities` is stored for the life of the connection, and every `fs/*`,
+`terminal/*`, and `elicitation/*` call a turn makes is gated on it
+([turns.py](src/python_acp/turns.md)). And **which unstable methods exist**:
+`session/close`, `/fork`, and `/resume` are registered `unstable=True` in the SDK's
+router, so the three capability rows announcing them are withheld unless the connection
+passed the flag. Both transports pass it.
 
-```mermaid
-flowchart LR
-    Editor["ACP client<br/>(stdio)"]
-    WsClient["Local automation<br/>(WebSocket)"]
-    CLI["cli.py"]
-    TStdio["transport_stdio.py"]
-    TWs["transport_ws.py"]
-    SDK["acp.run_agent<br/>+ agent router"]
-    Agent["agent.py<br/>PythonAcpAgent"]
-    Caps["capabilities.py<br/>capability manifest"]
-    Errors["errors.py"]
-    Paths["paths.py"]
-    Sessions["sessions.py"]
-    Turns["turns.py<br/>TurnExecutor"]
-    Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
-    Tools["mcp_tools.py"]
-    Registry["mcp_registry.py"]
-    MCPClient["mcp_stdio.py"]
-    MCPProc[("MCP server subprocess")]
-
-    Editor <--> TStdio
-    WsClient <--> TWs
-    CLI --> TStdio
-    CLI --> TWs
-    TStdio --> SDK
-    TWs --> SDK
-    SDK <--> Agent
-    Agent --> Caps
-    Agent --> Errors
-    Agent --> Sessions
-    Agent --> Paths
-    Agent --> Turns
-    Turns -.implemented by.-> Router
-    Router --> Tools
-    Router --> Registry
-    Sessions -. "on_close" .-> Registry
-    Registry --> MCPClient
-    MCPClient <--> MCPProc
-    Router -. "session/update via Client handle" .-> SDK
-```
-
-The dotted edge is the point of the design: the turn executor pushes `session/update`
-back through the `Client` handle the agent received from `on_connect`, without knowing
-which transport is underneath.
+For what every method is for and why, see
+[docs/acp-compliance-matrix.md](docs/acp-compliance-matrix.md); for what each module owns,
+[docs/module-boundaries.md](docs/module-boundaries.md).
 
 ## Request Lifecycle
 
@@ -467,6 +420,14 @@ mapped to the method it promises, and the method is called. A `true` with a brok
 behind it is the failure the capability manifest exists to prevent, and this is where the
 promise meets the behaviour.
 
+`scripts/check_docs.py` guards this document itself, and `make docs-check` runs it in
+CI. Every relative link must resolve, every Mermaid **flowchart** edge must name a node
+its own block defines, and every module under `src/python_acp/` must have a sibling `.md`
+with no orphans. The middle one is the reason it exists: GitHub renders a dangling edge as
+a bare node, so a diagram that has drifted looks *plausible* rather than broken — which is
+exactly how the duplicate node this pass removed survived. `tests/test_check_docs.py`
+tests the checker, because a gate that reports success by finding nothing fails open.
+
 `tests/test_executor_neutrality.py` guards a different promise: that decision D3's
 swappable executor is real. A complete executor with no backend at all serves a whole
 session through the SDK's router, and an AST walk keeps `sessions.py`,
@@ -488,7 +449,10 @@ update-emission path.
   `{"action": ...}` surface and the MCP passthrough (`tools/*`, `prompts/*`,
   `resources/*`, `ping`) that used to ride the same socket. Both transports now carry the
   same one protocol.
-- An ACP method with no implementation yet returns `-32601` from the SDK router.
+- **Every routed ACP method is implemented.** `-32601` now means one of two things: a
+  method the SDK's router does not register at all, or one of the three unstable
+  lifecycle methods on a connection that did not pass `use_unstable_protocol` — which
+  the router refuses *without calling the agent*.
 - Error codes from the MCP backend are forwarded rather than collapsed into
   `-32603`, tagged with `data.source = "mcp"` to mark whose namespace they are
   from. See [the error mapping docs](src/python_acp/errors.md).

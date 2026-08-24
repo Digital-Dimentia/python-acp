@@ -40,19 +40,29 @@ mod = load()
 
 
 class FakeRunner:
-    """Records every command, returning a queued exit code for each."""
+    """Records every command, returning a queued exit code for each.
 
-    def __init__(self, *codes: int) -> None:
+    A successful command that names the output path also creates it, standing in
+    for the tar a real engine would write. Without that, every build would trip
+    the "reported success but produced no tar" check.
+    """
+
+    def __init__(self, *codes: int, output: Path | None = None) -> None:
         self.codes = list(codes)
         self.calls: list[list[str]] = []
+        self.output = output
 
     def __call__(self, cmd: list[str]) -> int:
         self.calls.append(list(cmd))
-        return self.codes.pop(0) if self.codes else 0
+        code = self.codes.pop(0) if self.codes else 0
+        if code == 0 and self.output is not None and any(str(self.output) in a for a in cmd):
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            self.output.write_bytes(b"image")
+        return code
 
     @property
     def verbs(self) -> list[str]:
-        """The subcommand of each call — `build`, `save`, ..."""
+        """The subcommand of each call — `build`, `save`, `buildx`, ..."""
         return [c[1] for c in self.calls]
 
 
@@ -166,7 +176,7 @@ def test_failed_save_leaves_no_partial_tar(tmp_path) -> None:
 
 def test_successful_build_saves_in_order(tmp_path) -> None:
     out = tmp_path / "nested" / "img.tar"
-    runner = FakeRunner(0, 0)
+    runner = FakeRunner(0, 0, output=out)
     code = mod.build_and_save(
         "podman", "python-acp:local", Path("Containerfile"), Path("."), out, runner
     )
@@ -174,6 +184,21 @@ def test_successful_build_saves_in_order(tmp_path) -> None:
     assert runner.verbs == ["build", "save"]
     assert runner.calls[0][:4] == ["podman", "build", "-t", "python-acp:local"]
     assert str(out) in runner.calls[1]
+    assert out.exists()
+
+
+def test_success_without_an_artifact_is_a_failure(tmp_path) -> None:
+    """An engine that exits 0 and writes nothing must not read as a good build.
+
+    buildx can do exactly this when its output is misconfigured, and the result
+    would otherwise be a green release with no image attached to it.
+    """
+    out = tmp_path / "img.tar"
+    code = mod.build_and_save(
+        "podman", "python-acp:local", Path("Containerfile"), Path("."), out, FakeRunner(0, 0)
+    )
+    assert code == 1
+    assert not out.exists()
 
 
 # --- skip vs --require ------------------------------------------------------
@@ -235,3 +260,154 @@ def test_release_workflow_requires_the_image() -> None:
         / "publish-artifacts.yml"
     ).read_text()
     assert "make container-image REQUIRE_CONTAINER=1" in workflow
+
+
+# --- multi-platform builds --------------------------------------------------
+#
+# A single-arch image is the dangerous outcome here, because it is not visibly
+# wrong: it builds, exports, passes every check, and then fails to start on a
+# Raspberry Pi. So these assert on the command *shape*, which is the only part
+# observable without an engine.
+
+
+def test_engine_kind_is_read_from_the_binary_name() -> None:
+    assert mod.engine_kind("/usr/bin/docker") == "docker"
+    assert mod.engine_kind("/opt/homebrew/bin/podman") == "podman"
+    assert mod.engine_kind("/usr/local/bin/docker.exe") == "docker"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, []),
+        ("", []),
+        ("linux/arm64", ["linux/arm64"]),
+        ("linux/amd64,linux/arm64", ["linux/amd64", "linux/arm64"]),
+        (" linux/amd64 , linux/arm64 ", ["linux/amd64", "linux/arm64"]),
+        ("linux/amd64,,", ["linux/amd64"]),
+    ],
+)
+def test_platform_list_parsing(raw, expected) -> None:
+    assert mod.normalize_platforms(raw) == expected
+
+
+def plan(engine: str, platforms: list[str]) -> list[list[str]]:
+    return mod.plan_commands(
+        engine,
+        "python-acp:local",
+        Path("Containerfile"),
+        Path("."),
+        Path("dist/img.tar"),
+        platforms,
+    )
+
+
+def test_docker_multi_platform_uses_buildx_not_build() -> None:
+    """Plain `docker build` silently ignores a multi-platform request."""
+    cmds = plan("/usr/bin/docker", ["linux/amd64", "linux/arm64"])
+    assert len(cmds) == 1
+    assert cmds[0][1] == "buildx"
+    assert "--platform" in cmds[0]
+    assert cmds[0][cmds[0].index("--platform") + 1] == "linux/amd64,linux/arm64"
+    assert any(a.startswith("--output=type=oci") for a in cmds[0])
+
+
+def test_podman_multi_platform_builds_a_manifest_and_pushes_all() -> None:
+    """Without --manifest there is no list; without --all the archive holds one arch."""
+    build, push = plan("/opt/homebrew/bin/podman", ["linux/amd64", "linux/arm64"])
+    assert "--manifest" in build
+    assert build[build.index("--platform") + 1] == "linux/amd64,linux/arm64"
+    assert push[1:3] == ["manifest", "push"]
+    assert "--all" in push
+    assert push[-1].startswith("oci-archive:")
+
+
+def test_single_platform_keeps_the_plain_build_path() -> None:
+    """One platform must not pay for buildx or a manifest list."""
+    for engine in ("/usr/bin/docker", "/usr/bin/podman"):
+        cmds = plan(engine, ["linux/arm64"])
+        assert [c[1] for c in cmds] == ["build", "save"]
+        assert "--manifest" not in cmds[0]
+        assert cmds[0][cmds[0].index("--platform") + 1] == "linux/arm64"
+
+
+def test_no_platform_is_a_host_build() -> None:
+    cmds = plan("/usr/bin/podman", [])
+    assert "--platform" not in cmds[0]
+    assert [c[1] for c in cmds] == ["build", "save"]
+
+
+def test_multi_platform_failure_leaves_no_archive(tmp_path) -> None:
+    """The stale-tar rule holds on the buildx path too, which has only one command."""
+    out = tmp_path / "img.tar"
+    out.write_bytes(b"stale")
+    code = mod.build_and_save(
+        "/usr/bin/docker",
+        "python-acp:local",
+        Path("Containerfile"),
+        Path("."),
+        out,
+        FakeRunner(1),
+        platforms=["linux/amd64", "linux/arm64"],
+    )
+    assert code == 1
+    assert not out.exists()
+
+
+# --- the ARMv8.2-A misconception --------------------------------------------
+
+
+def test_raspberry_pi_platform_is_plain_arm64() -> None:
+    """ARMv8.2-A is a superset of ARMv8-A, not a separate build target.
+
+    The Pi 5's Cortex-A76 is ARMv8.2-A and runs a linux/arm64 image natively.
+    Neither OCI nor Docker Hub defines an arm64/v8.2 platform -- python:3.11-slim
+    publishes arm64/v8 and nothing finer -- and we ship pure Python plus a
+    prebuilt pydantic-core wheel built for baseline ARMv8-A, so there is no
+    native code that a v8.2 build could specialise. This test exists so that
+    reasoning survives the next person who reads "Pi 5" and reaches for a
+    third platform.
+    """
+    assert mod.RASPBERRY_PI_PLATFORM == "linux/arm64"
+    assert "8.2" not in mod.RASPBERRY_PI_PLATFORM
+
+
+def test_nothing_ships_an_armv8_2_platform() -> None:
+    """No build may name a platform the registry does not publish.
+
+    Matches platform-shaped strings only. Prose that *warns* against v8.2 must
+    keep working -- those comments are the point, not a violation.
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    # linux/arm64/v8.2, arm64/v8.2, linux/armv8.2 -- anything that would be
+    # passed to --platform rather than written in a sentence.
+    bogus = re.compile(r"(linux/)?arm(64)?[/v]v?8\.2", re.IGNORECASE)
+    for name in ("Makefile", ".github/workflows/publish-artifacts.yml"):
+        for lineno, line in enumerate((root / name).read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue  # a comment explaining why v8.2 is wrong is not a platform
+            assert not bogus.search(line), f"{name}:{lineno} names a nonexistent platform"
+
+
+def test_release_platforms_cover_amd64_and_the_pi() -> None:
+    makefile = (Path(__file__).resolve().parent.parent / "Makefile").read_text()
+    line = next(ln for ln in makefile.splitlines() if ln.startswith("RELEASE_PLATFORMS"))
+    platforms = mod.normalize_platforms(line.split(":=", 1)[1])
+    assert platforms == ["linux/amd64", mod.RASPBERRY_PI_PLATFORM]
+
+
+def test_release_workflow_builds_multi_arch_with_qemu() -> None:
+    """arm64 steps run under emulation on an amd64 runner; without QEMU they fail."""
+    workflow = (
+        Path(__file__).resolve().parent.parent
+        / ".github"
+        / "workflows"
+        / "publish-artifacts.yml"
+    ).read_text()
+    assert "docker/setup-qemu-action" in workflow
+    assert "docker/setup-buildx-action" in workflow
+    # The platform list is read from the Makefile, never duplicated here.
+    assert "print-release-platforms" in workflow

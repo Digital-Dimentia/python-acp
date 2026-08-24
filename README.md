@@ -417,6 +417,35 @@ docker run --rm -p 8765:8765 python-acp --host 0.0.0.0
 `--host 0.0.0.0` rather than the default `127.0.0.1`, which inside a container is
 reachable only from inside it.
 
+### Raspberry Pi and other arm64 hosts
+
+Released images are **multi-arch: `linux/amd64` and `linux/arm64`**. `podman pull` or
+`podman load` picks the right one for the host, so nothing above changes on a Pi.
+
+`linux/arm64` covers **Raspberry Pi 3, 4, 5 and Zero 2 W on 64-bit Raspberry Pi OS**,
+the default since 2022. That includes the Pi 5: its Cortex-A76 is ARMv8.2-A, which is a
+superset of ARMv8-A and runs an `arm64` image natively — there is no separate ARMv8.2
+image to look for, and no OCI platform that would describe one.
+
+Building on the Pi itself also works and needs no flags, since a native build already
+targets the host:
+
+```bash
+podman build -t python-acp -f Containerfile .
+```
+
+To cross-build from an x86 machine, ask for the platform explicitly (this needs QEMU
+registered on the builder):
+
+```bash
+make container-image PLATFORMS=linux/amd64,linux/arm64
+```
+
+Not supported: **32-bit Raspberry Pi OS** (`linux/arm/v7`) is not in the released
+manifest, though it would work if added — open an issue. **Pi Zero and Pi 1** (ARMv6)
+cannot be supported: no `python:3.11-slim` image is published for that architecture, and
+`pydantic-core` ships no armv6 wheel, so it would require compiling Rust on an ARM11.
+
 **The image contains the agent and nothing else** — `Containerfile` copies `src/` and
 installs the package. It starts no MCP server, and a client's `session/new` names servers
 that must be executable *inside the container*, so a useful image is normally this one
@@ -427,7 +456,7 @@ so it had been broken independently of the flag's removal.)
 ## CI/CD
 
 - `.github/workflows/ci.yml`: lint, tests, and build validation.
-- `.github/workflows/publish-artifacts.yml`: publishes Python wheel/sdist artifacts and the container image artifact on a GitHub release.
+- `.github/workflows/publish-artifacts.yml`: publishes Python wheel/sdist artifacts and the multi-arch (`linux/amd64` + `linux/arm64`) container image archive on a GitHub release.
 
 ## Notes
 

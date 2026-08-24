@@ -12,6 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # QEMU registers binfmt handlers so the runner (amd64) can execute arm64
+      # build steps. Without it the linux/arm64 leg fails the moment the base
+      # image runs anything. buildx supplies the driver that can emit a
+      # multi-platform manifest at all -- plain `docker build` cannot.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
       - uses: actions/setup-python@v5
         with:
           # Deliberately the floor from `requires-python`, not the newest version in
@@ -25,7 +33,11 @@ jobs:
           # REQUIRE_CONTAINER=1: a release must not silently ship without its
           # container image. Locally the target skips when no usable engine is
           # present; here that skip is a build failure.
-          make container-image REQUIRE_CONTAINER=1
+          # PLATFORMS: amd64 for servers, arm64 for Raspberry Pi 3/4/5 and
+          # Zero 2 W on 64-bit Raspberry Pi OS. arm64 also covers the Pi 5's
+          # ARMv8.2-A, which is a superset of ARMv8-A and has no platform of
+          # its own -- do not add one.
+          make container-image REQUIRE_CONTAINER=1 PLATFORMS="$(make -s print-release-platforms)"
           mkdir -p artifacts
           tar -czf artifacts/python-acp-artifacts.tar.gz -C dist .
       - name: Publish release artifacts

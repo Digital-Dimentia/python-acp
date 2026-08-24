@@ -163,8 +163,42 @@ Packaging targets:
   `publish-artifacts.yml` does, so a release cannot quietly ship without its image.
   A failed build exports nothing *and deletes any tar an earlier run left*, so
   `release-bundle` — which bundles that file whenever it merely exists — cannot pick up
-  a stale image. `tests/test_container_image.py` covers all of it, since a target whose
-  failure mode is silence needs the same treatment as `docs-check`.
+  a stale image. So does an engine that exits 0 without writing the tar, which buildx
+  will do if its output is misconfigured. `tests/test_container_image.py` covers all of
+  it, since a target whose failure mode is silence needs the same treatment as
+  `docs-check`.
+- **`PLATFORMS`** — comma-separated build targets, empty by default (build for the
+  host). Two or more produce a manifest list, which needs QEMU for any platform that is
+  not the host's, so local builds do not pay emulation cost unless asked. Releases build
+  `$(RELEASE_PLATFORMS)` = `linux/amd64,linux/arm64`; `make print-release-platforms`
+  prints it, and `publish-artifacts.yml` reads it from there rather than keeping its own
+  copy that could drift.
+
+### Raspberry Pi, and why there is no ARMv8.2 build
+
+`linux/arm64` **is** the Raspberry Pi build — for Pi 3, Pi 4, Pi 5 and Zero 2 W alike,
+on 64-bit Raspberry Pi OS. The Pi 5's Cortex-A76 is ARMv8.2-A, and it runs a
+`linux/arm64` image natively, because **ARMv8.2-A is a superset of ARMv8-A, not a
+different target**.
+
+Do not add a v8.2 platform. It does not exist to add: `python:3.11-slim` publishes
+`amd64`, `arm/v5`, `arm/v7`, `arm64/v8`, `386`, `ppc64le`, `riscv64` and `s390x`, and
+neither OCI nor Docker Hub defines `arm64/v8.2`. A finer target would only pay off if we
+compiled native code with `-march=armv8.2-a`; this project ships `py3-none-any` and
+consumes `pydantic-core` as a prebuilt manylinux `aarch64` wheel built for baseline
+ARMv8-A, so there is nothing for it to specialise. `tests/test_container_image.py`
+fails the build if a v8.2-shaped platform string appears in the Makefile or the
+workflow.
+
+Two platforms are deliberately excluded:
+
+- **`linux/arm/v7`** (32-bit Raspberry Pi OS) works — `pydantic-core` ships a
+  `manylinux_2_17_armv7l` wheel, so there is no Rust build on the Pi — but it is a third
+  emulated leg for a shrinking install base. Add it to `RELEASE_PLATFORMS` if someone
+  asks; nothing else needs to change.
+- **Pi Zero and Pi 1** (ARMv6) are out of reach, not merely slow. `python:3.11-slim` has
+  no `arm/v6` image, and `pydantic-core` publishes no armv6 or armv5 wheel at all, so it
+  would mean compiling Rust on an ARM11.
 - `make package` — build + container image, tarred to
   `artifacts/python-acp-artifacts.tar.gz`.
 - `make release-bundle` — build only (no container build of its own; it includes the

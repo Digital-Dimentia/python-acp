@@ -35,6 +35,14 @@ packaging a stale container as though it were current. Here the output file is
 deleted before the build, and the save runs only if the build succeeded, so a
 failed build leaves no tar for ``package``/``release-bundle`` to pick up.
 
+Multi-platform builds take a different path per engine, which is why the engine
+*kind* matters and not just its path: ``docker`` needs ``buildx`` and emits an
+OCI archive directly, while ``podman`` builds into a manifest list and then
+pushes that to an archive. Plain ``docker build`` cannot produce a multi-platform
+image at all, so choosing the wrong verb fails rather than silently producing a
+single-arch image -- which would be the worse outcome, since a single-arch image
+looks entirely correct until someone runs it on a Pi.
+
 Every mode is stdlib-only and safe to run with any interpreter >= 3.11.
 """
 
@@ -49,6 +57,13 @@ from pathlib import Path
 
 DEFAULT_ENGINES = ("podman", "docker")
 DEFAULT_PROBE_TIMEOUT = 120
+
+# linux/arm64 is what a Raspberry Pi 3, 4, 5 or Zero 2 W runs under 64-bit
+# Raspberry Pi OS. There is deliberately no armv8.2 entry here: ARMv8.2-A (the
+# Pi 5's Cortex-A76) is a superset of ARMv8-A, it runs an arm64/v8 image
+# natively, and neither OCI nor Docker Hub defines an arm64/v8.2 platform. See
+# the "Raspberry Pi" note in CLAUDE.md before adding one.
+RASPBERRY_PI_PLATFORM = "linux/arm64"
 
 
 class EngineState(Enum):
@@ -154,6 +169,84 @@ def resolve_engine(
     return probe_engine(found, timeout=timeout)
 
 
+def engine_kind(engine: str) -> str:
+    """``podman`` or ``docker``, from the binary name.
+
+    The two need different verbs for a multi-platform build, so this is load
+    bearing rather than cosmetic.
+    """
+    name = Path(engine).name.lower()
+    if name.startswith("docker"):
+        return "docker"
+    return "podman"
+
+
+def normalize_platforms(platforms: str | None) -> list[str]:
+    """Split a comma-separated platform list, dropping blanks."""
+    if not platforms:
+        return []
+    return [p.strip() for p in platforms.split(",") if p.strip()]
+
+
+def plan_commands(
+    engine: str,
+    tag: str,
+    containerfile: Path,
+    context: Path,
+    output: Path,
+    platforms: list[str],
+) -> list[list[str]]:
+    """The exact commands a build will run, in order.
+
+    Split out from execution so the command *shape* can be tested. Multi-arch
+    end-to-end cannot be verified without an engine, but "did we emit a
+    single-arch build when we were asked for two platforms" can be, and that is
+    the failure worth catching: a single-arch image is not obviously wrong until
+    it will not start on a Pi.
+    """
+    if len(platforms) <= 1:
+        build = [engine, "build"]
+        if platforms:
+            build += ["--platform", platforms[0]]
+        build += ["-t", tag, "-f", str(containerfile), str(context)]
+        return [build, [engine, "save", "-o", str(output), tag]]
+
+    joined = ",".join(platforms)
+    if engine_kind(engine) == "docker":
+        # Plain `docker build` cannot do this; buildx writes the OCI archive itself.
+        return [
+            [
+                engine,
+                "buildx",
+                "build",
+                "--platform",
+                joined,
+                "-t",
+                tag,
+                "-f",
+                str(containerfile),
+                f"--output=type=oci,dest={output}",
+                str(context),
+            ]
+        ]
+    # podman builds into a manifest list, then exports it. --all keeps every
+    # per-platform image; without it the archive carries only one.
+    return [
+        [
+            engine,
+            "build",
+            "--platform",
+            joined,
+            "--manifest",
+            tag,
+            "-f",
+            str(containerfile),
+            str(context),
+        ],
+        [engine, "manifest", "push", "--all", tag, f"oci-archive:{output}"],
+    ]
+
+
 def build_and_save(
     engine: str,
     tag: str,
@@ -161,37 +254,38 @@ def build_and_save(
     context: Path,
     output: Path,
     runner: object = subprocess.call,
+    platforms: list[str] | None = None,
 ) -> int:
     """Build the image, then export it -- in that order, and only in that order.
 
-    The output file is removed first. If the build fails, no tar exists, so
-    ``package`` and ``release-bundle`` cannot bundle a stale one left by an
+    The output file is removed first. If any step fails, no tar is left behind,
+    so ``package`` and ``release-bundle`` cannot bundle a stale one from an
     earlier run.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
 
-    build_cmd = [engine, "build", "-t", tag, "-f", str(containerfile), str(context)]
-    code = runner(build_cmd)  # type: ignore[operator]
-    if code != 0:
-        print(
-            f"container-image: `{engine} build` failed with exit {code}; not exporting.",
-            file=sys.stderr,
-        )
-        return int(code)
+    commands = plan_commands(engine, tag, containerfile, context, output, platforms or [])
+    for command in commands:
+        code = runner(command)  # type: ignore[operator]
+        if code != 0:
+            verb = " ".join(command[1:3])
+            print(
+                f"container-image: `{engine} {verb}` failed with exit {code}; not exporting.",
+                file=sys.stderr,
+            )
+            # A partial or stale tar is worse than none: it looks like a real artifact.
+            if output.exists():
+                output.unlink()
+            return int(code)
 
-    save_cmd = [engine, "save", "-o", str(output), tag]
-    code = runner(save_cmd)  # type: ignore[operator]
-    if code != 0:
+    if not output.exists():
         print(
-            f"container-image: `{engine} save` failed with exit {code}.",
+            f"container-image: {engine} reported success but produced no {output}.",
             file=sys.stderr,
         )
-        # A partial tar is worse than none: it would look like a real artifact.
-        if output.exists():
-            output.unlink()
-        return int(code)
+        return 1
 
     return 0
 
@@ -215,6 +309,16 @@ def main(argv: list[str] | None = None) -> int:
             "cannot silently ship without its container image."
         ),
     )
+    parser.add_argument(
+        "--platform",
+        default=None,
+        help=(
+            "Comma-separated target platforms, e.g. "
+            f"'linux/amd64,{RASPBERRY_PI_PLATFORM}'. One platform builds normally; two or "
+            "more produce a manifest list, which needs docker buildx or podman and QEMU "
+            "for any platform that is not the host's. Default: build for the host."
+        ),
+    )
     parser.add_argument("--probe-timeout", type=int, default=DEFAULT_PROBE_TIMEOUT)
     args = parser.parse_args(argv)
 
@@ -231,8 +335,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     assert status.engine is not None
+    platforms = normalize_platforms(args.platform)
+    if len(platforms) > 1:
+        print(
+            f"container-image: building a manifest list for {', '.join(platforms)}.",
+            file=sys.stderr,
+        )
     return build_and_save(
-        status.engine, args.tag, args.containerfile, args.context, args.output
+        status.engine,
+        args.tag,
+        args.containerfile,
+        args.context,
+        args.output,
+        platforms=platforms,
     )
 
 

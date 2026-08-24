@@ -21,7 +21,18 @@ CONTAINER_TAG ?= python-acp:local
 # usable engine is present. Empty by default so packaging works on a machine
 # without one; set in .github/workflows/publish-artifacts.yml.
 REQUIRE_CONTAINER ?=
-CONTAINER_FLAGS := $(if $(strip $(REQUIRE_CONTAINER)),--require,)
+
+# PLATFORMS is empty by default: build for the host, which is what a developer
+# iterating locally wants. Two or more entries produce a manifest list and need
+# QEMU for any platform that is not the host's, so the release workflow sets it
+# rather than every local build paying emulation cost.
+#   linux/arm64 covers Raspberry Pi 3/4/5 and Zero 2 W on 64-bit Raspberry Pi OS.
+#   Do NOT add an armv8.2 entry -- see the Raspberry Pi note in CLAUDE.md.
+PLATFORMS ?=
+RELEASE_PLATFORMS := linux/amd64,linux/arm64
+
+CONTAINER_FLAGS := $(if $(strip $(REQUIRE_CONTAINER)),--require,) \
+	$(if $(strip $(PLATFORMS)),--platform $(strip $(PLATFORMS)),)
 DEMO_MCP_COMMAND ?= $(PYTHON_BIN) tests/fixtures/mock_mcp_server.py
 HOST ?= 127.0.0.1
 PORT ?= 8766
@@ -39,7 +50,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image package release-bundle run clean clean-outputs clean-venv distclean
+.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image print-release-platforms package release-bundle run clean clean-outputs clean-venv distclean
 
 venv: $(VENV_STAMP)
 
@@ -99,6 +110,11 @@ container-image: venv
 		--context . \
 		--output $(BUILD_DIR)/python-acp-container.tar \
 		$(CONTAINER_FLAGS)
+
+## The platform list releases build for. publish-artifacts.yml reads it from here
+## rather than repeating it, so the workflow and RELEASE_PLATFORMS cannot drift.
+print-release-platforms:
+	@printf '%s\n' '$(RELEASE_PLATFORMS)'
 
 package: build container-image
 	mkdir -p $(ARTIFACTS_DIR)

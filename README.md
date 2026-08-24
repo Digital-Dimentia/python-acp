@@ -8,7 +8,8 @@
   binding the same agent through the `agent-client-protocol` SDK.
 - Connects to an MCP server over stdio.
 - Initializes the server and forwards MCP messages.
-- Exposes MCP tools, prompts, and resources through the deprecated WebSocket actions:
+- Exposes MCP tools, prompts, and resources through the deprecated WebSocket actions
+  (every reply carries a `deprecated` block naming its replacement):
   - `list_tools`
   - `call_tool`
   - `list_prompts`
@@ -308,6 +309,53 @@ The `{"action": ...}` API and the MCP passthrough on JSON-RPC (`tools/*`, `promp
 and are removed in Phase 7; the passthrough methods move to `_`-prefixed extension
 methods first. New work should use the ACP surface above. See
 [legacy_ws.py](src/python_acp/legacy_ws.md).
+
+### Every action reply says so
+
+Since the deprecation landed, every `{"action": ...}` reply — successful or not — carries
+a `deprecated` block naming the replacement and the removal milestone:
+
+```json
+{
+  "ok": true,
+  "tools": [{"name": "echo", "description": "Echoes text", "inputSchema": {}}],
+  "deprecated": {
+    "action": "list_tools",
+    "use": "tools/list",
+    "removedIn": "the ACP v1 migration (Phase 7)"
+  }
+}
+```
+
+The block is purely additive: `ok`, `tools`, `result`, and `error` mean exactly what they
+meant before, so an existing client keeps working and can ignore the key. `use` is omitted
+for an action that does not exist. The server also logs a warning, once per action per
+connection.
+
+### Migration table
+
+| Deprecated action | Send instead, today |
+|---|---|
+| `{"action": "list_tools"}` | `{"method": "tools/list"}` |
+| `{"action": "call_tool"}` | `{"method": "tools/call"}` |
+| `{"action": "list_prompts"}` | `{"method": "prompts/list"}` |
+| `{"action": "get_prompt"}` | `{"method": "prompts/get"}` |
+| `{"action": "list_resources"}` | `{"method": "resources/list"}` |
+| `{"action": "read_resource"}` | `{"method": "resources/read"}` |
+| `{"action": "ping"}` | `{"method": "ping"}` |
+
+The right-hand column is a **like-for-like step you can take now**, and it is the one the
+`deprecated` block names. Be aware that it is itself deprecated: those method names are
+MCP's, not ACP's, and a later change moves them under a namespaced prefix on the SDK's
+`ext_method` escape hatch. That prefix is not chosen yet, and whether the passthrough
+survives at all — as against tool access going exclusively through `session/prompt` — is
+still open. Watch this section.
+
+If you want the ACP-native path instead of either, there is no direct equivalent: ACP has
+no method that lists tools. You open a session with `session/new` naming your
+`mcpServers`, then send `session/prompt`, and the agent calls tools on your behalf and
+streams `session/update` notifications back. That is a different shape of program, which
+is why the staged rename exists at all.
 
 Connect to `ws://127.0.0.1:8765` and send JSON messages.
 

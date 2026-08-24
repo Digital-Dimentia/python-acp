@@ -31,11 +31,60 @@ point of `pyacp-tzd.3`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from python_acp.mcp_stdio import MCPStdioClient, tool_result_text
 
 logger = logging.getLogger(__name__)
+
+#: When the action surface goes away, in the terms this project actually plans in.
+#: Deliberately **not** a version number: `pyacp-sld.3` is gated on Phase 8 proving
+#: JSON-RPC parity, so no release has been promised this surface, and inventing one here
+#: would put a commitment on the wire that nobody made.
+REMOVED_IN = "the ACP v1 migration (Phase 7)"
+
+#: The JSON-RPC method that does the same job as each deprecated action, **today**.
+#:
+#: Every target is itself on the deprecated half of this module, which reads oddly until
+#: you look at what an ACP-native replacement would be: there is no ACP method that lists
+#: tools. The ACP path is `session/new` with `mcpServers` and then `session/prompt`, where
+#: the turn executor calls tools on the client's behalf — a different shape of program,
+#: not a method swap. So this table names the like-for-like step a client can take now,
+#: and `pyacp-sld.2` moves those targets under a namespaced prefix on `ext_method` as a
+#: second, smaller move — a prefix it has not chosen yet, and which it may decide against
+#: entirely. Staging it that way is the whole point of D4.
+ACTION_REPLACEMENTS: Mapping[str, str] = {
+    "list_tools": "tools/list",
+    "call_tool": "tools/call",
+    "list_prompts": "prompts/list",
+    "get_prompt": "prompts/get",
+    "list_resources": "resources/list",
+    "read_resource": "resources/read",
+    "ping": "ping",
+}
+
+
+def deprecation_notice(action: Any) -> dict[str, Any]:
+    """The `deprecated` block that rides on every action reply.
+
+    A log line is invisible to the person who needs it: they are on the other end of a
+    WebSocket, and the server's stdout is not theirs to read. So the notice goes in the
+    envelope, where a client is already parsing, and `logger.warning` is the operator's
+    copy rather than the only copy.
+
+    `use` is omitted for an action that is not in `ACTION_REPLACEMENTS` — an unsupported
+    action is still a use of a deprecated surface and still earns the notice, but there
+    is no honest migration target to name for a method that never existed.
+
+    A fresh dict per call: this ends up inside a reply the caller owns and may mutate,
+    and a shared one would let a single mutation rewrite every later notice.
+    """
+    notice: dict[str, Any] = {"action": action, "removedIn": REMOVED_IN}
+    replacement = ACTION_REPLACEMENTS.get(action) if isinstance(action, str) else None
+    if replacement is not None:
+        notice["use"] = replacement
+    return notice
 
 #: JSON-RPC methods this handler answers instead of the ACP agent. Every one is an MCP
 #: method or transport plumbing; none is in `acp.meta.AGENT_METHODS`. The set is closed —
@@ -76,6 +125,12 @@ class LegacyActionHandler:
 
     def __init__(self, mcp_client: MCPStdioClient | None) -> None:
         self._mcp_client = mcp_client
+        #: Actions already logged on this connection. The envelope notice is per *call*
+        #: — that is the signal the client acts on — but the log line is per action per
+        #: connection, because a chatty client calling `call_tool` in a loop would
+        #: otherwise bury every other line in the operator's log with the same sentence.
+        #: No action is silent; none of them repeats.
+        self._warned: set[str] = set()
 
     @property
     def mcp_client(self) -> MCPStdioClient:
@@ -101,8 +156,43 @@ class LegacyActionHandler:
         error envelope.
         """
         if "action" in message:
-            return await self.dispatch_action(message)
+            action = message.get("action")
+            self.warn_deprecated(action)
+            # Before dispatch, so an unsupported action still warns on its way to the
+            # `ValueError` — using a surface that is going away is the thing worth
+            # saying, and getting the action name wrong does not make it less true.
+            reply = await self.dispatch_action(message)
+            reply["deprecated"] = deprecation_notice(action)
+            return reply
         return await self.dispatch_method(message)
+
+    def warn_deprecated(self, action: Any) -> None:
+        """Log the operator's copy of the notice, once per action per connection.
+
+        The client's copy is `deprecation_notice`, which rides the reply. This one exists
+        so a deployment can see the surface is still in use without instrumenting its
+        clients — which is what tells you whether `pyacp-sld.3` is safe to land.
+        """
+        key = action if isinstance(action, str) else repr(action)
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        replacement = ACTION_REPLACEMENTS.get(key)
+        if replacement is None:
+            logger.warning(
+                "The WebSocket action surface is deprecated and is removed in %s; "
+                "%r is not one of its actions",
+                REMOVED_IN,
+                action,
+            )
+            return
+        logger.warning(
+            "The WebSocket action %r is deprecated and is removed in %s; "
+            "send the JSON-RPC method %r instead",
+            key,
+            REMOVED_IN,
+            replacement,
+        )
 
     # ------------------------------------------------------------------
     # The `{"action": ...}` surface — `{"ok": bool}` envelopes

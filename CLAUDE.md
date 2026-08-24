@@ -71,6 +71,7 @@ make venv     # create/refresh .venv; a no-op when it is already current
 make sync     # force pip install -e '.[dev]' even when the venv looks current
 make lint     # ruff check src tests
 make test     # pytest tests
+make transcripts  # re-record tests/transcripts/*.json — then READ THE DIFF
 make build    # python -m build → dist/*.whl, dist/*.tar.gz
 ```
 
@@ -103,6 +104,14 @@ The venv logic lives in [scripts/venv_bootstrap.py](scripts/venv_bootstrap.py), 
 Makefile recipe, because the rules are conditional in ways `make` expresses badly.
 
 Before handing off any code change: `make lint && make test`.
+
+**Golden transcripts.** `tests/transcripts/*.json` record the whole JSON-RPC conversation
+for four flows — initialize, session lifecycle, streaming, cancellation — in order and in
+both directions, so an ordering regression surfaces as a diff. They are *recorded*, never
+hand-edited: `make transcripts` rewrites them and prints the diff. **Read that diff before
+committing it** — a regeneration nobody looked at launders a wire regression into a
+committed file, which is worse than having no transcript at all. See
+[tests/test_transcripts.py](tests/test_transcripts.py) for what is canonicalized and why.
 
 Packaging targets:
 

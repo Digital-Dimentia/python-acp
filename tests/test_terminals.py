@@ -446,3 +446,96 @@ async def test_a_cancellation_racing_a_release_still_completes(tmp_path: Path) -
         await task
 
     assert client.released == ["terminal-1"]
+
+
+# ---------------------------------------------------------------------------
+# Cancelled mid-create (pyacp-9hd)
+# ---------------------------------------------------------------------------
+
+
+class SlowCreateClient(TerminalClient):
+    """A client whose `terminal/create` starts the process, then stalls before replying.
+
+    The real race, reproduced deliberately: the terminal **exists** on the client and its
+    id is on its way back when the turn is cancelled. A client that failed to create
+    would not exercise anything.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.creating = asyncio.Event()
+        self.reply = asyncio.Event()
+
+    async def create_terminal(self, **kwargs: Any):
+        response = await super().create_terminal(**kwargs)
+        self.creating.set()
+        await self.reply.wait()
+        return response
+
+
+async def test_a_terminal_created_after_the_cancel_is_still_given_back(
+    tmp_path: Path,
+) -> None:
+    """The window `pyacp-9hd` was filed for, and it closes.
+
+    Without the shield the reply lands on a future nobody awaits: the process runs on
+    the client's machine under an id this process never learned, so it can be neither
+    released nor even named. With it, the id still arrives and the terminal is killed and
+    released like any other cancelled command's.
+    """
+    registry = TerminalRegistry()
+    client = SlowCreateClient()
+    context = context_for(SessionRegistry(), client, str(tmp_path))
+
+    turn = asyncio.create_task(started(registry, context, SLEEP))
+    await asyncio.wait_for(client.creating.wait(), timeout=10)
+    turn.cancel()
+    # The reply lands *after* the cancellation, which is the whole point.
+    client.reply.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert len(client.created) == 1, "the client really did start a terminal"
+    assert client.released == ["terminal-1"], "and it was given back"
+    assert client.killed == ["terminal-1"], "killed too — nobody was left to read it"
+    assert registry.live(context.session_id) == ()
+
+
+async def test_a_create_that_never_answers_does_not_hang_the_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The residual window, bounded rather than closed.
+
+    A reply that never arrives is a connection dying underneath us, and the id existed
+    only in that reply — nothing on this side can recover it. What this asserts is the
+    part that *is* ours: the cancellation completes instead of hanging on a wait that
+    will never finish.
+    """
+    monkeypatch.setattr(TerminalRegistry, "_UNCLAIMED_CREATE_TIMEOUT", 0.05)
+    registry = TerminalRegistry()
+    client = SlowCreateClient()
+    context = context_for(SessionRegistry(), client, str(tmp_path))
+
+    turn = asyncio.create_task(started(registry, context, SLEEP))
+    await asyncio.wait_for(client.creating.wait(), timeout=10)
+    turn.cancel()
+    # `client.reply` is never set: the answer is gone for good.
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(turn, timeout=10)
+
+    assert registry.live(context.session_id) == ()
+
+
+async def test_an_ordinary_create_is_unaffected_by_the_shield(tmp_path: Path) -> None:
+    """The shield must not change the uncancelled path, which is every other turn."""
+    registry = TerminalRegistry()
+    client = TerminalClient()
+    context = context_for(SessionRegistry(), client, str(tmp_path))
+
+    terminal = await started(registry, context)
+
+    assert registry.live(context.session_id) == (terminal,)
+    assert client.killed == []
+    await terminal.release()

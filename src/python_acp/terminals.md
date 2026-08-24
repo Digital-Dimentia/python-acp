@@ -65,13 +65,30 @@ So `forget_client` **drops tracking and releases nothing**:
 separate disconnect event: the client going away *is* the process ending, and the shutdown
 path (`sessions.close_all()`, which fires the hook) covers it.
 
-### The window this does not close
+### The window this *did* not close, and now mostly does
 
 A turn cancelled *during* `terminal/create` — after the client started the process but
-before its answer reached us — leaves a terminal whose id we never learned. There is
-nothing to track and nothing to release, and no amount of care on this side changes that:
-the id existed only in a response that was never delivered. It is the ordinary lost-reply
-problem, stated here so it is known rather than discovered.
+before its answer reached us — used to leave a terminal whose id we never learned: a
+process running on someone's machine that this side could neither release nor even name.
+This document said no amount of care could change that, on the reasoning that the id
+existed only in a reply that was never delivered.
+
+**That was too strong.** The reply was not undelivered; it was delivered to a future
+nobody was waiting on any more, because our own cancellation dropped it. `pyacp-9hd`
+closed the gap with `asyncio.shield`: the request survives the turn's cancellation, so
+the id still arrives, and `_abandon_unclaimed` kills and releases the terminal exactly as
+`_capture` does for a command cancelled a moment later. It is tracked before it is
+abandoned, so a concurrent `session/close` can still see it if anything below fails.
+
+What genuinely cannot be closed is narrower: a reply that never arrives *at all*, which is
+the connection dying underneath us. There the id really did exist only in a message that
+does not exist, and the wait is bounded (`_UNCLAIMED_CREATE_TIMEOUT`, 5s) so a cancellation
+cannot hang on it. That case logs a warning naming the command, which is the whole of what
+can honestly be done.
+
+`tests/test_terminals.py` covers all three: the reply that lands late and is released, the
+reply that never lands and does not hang, and the ordinary create the shield must not
+disturb. The first of those fails without the shield — checked, rather than assumed.
 
 ## `output_byte_limit` is always set
 
@@ -141,6 +158,9 @@ only worth asking about something that was really running.
 | Path | Test |
 |---|---|
 | Turn cancelled mid-command | `test_turn_mcp_router.py::test_cancelling_a_turn_mid_command_kills_and_releases_the_terminal` |
+| Turn cancelled mid-**create**, reply lands late | `test_a_terminal_created_after_the_cancel_is_still_given_back` |
+| Turn cancelled mid-create, reply never lands | `test_a_create_that_never_answers_does_not_hang_the_cancellation` |
+| The shield leaves an ordinary create alone | `test_an_ordinary_create_is_unaffected_by_the_shield` |
 | Session closed holding a live terminal | `test_closing_a_session_releases_the_terminal_a_turn_left_running` |
 | Client disconnects | `test_a_disconnect_drops_tracking_and_releases_nothing` |
 | A release that raises | `test_a_release_that_raises_still_drops_tracking` |

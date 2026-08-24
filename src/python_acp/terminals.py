@@ -69,8 +69,10 @@ that check was missing. See `turns.md` and `turn_mcp_router.md`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
+from typing import Any
 
 from acp.interfaces import Client
 from acp.schema import (
@@ -214,6 +216,12 @@ class TerminalRegistry:
     belongs to, because that is who has to be asked for it back.
     """
 
+    #: How long a `terminal/create` cancelled mid-flight is given to still answer, so
+    #: the terminal it created can be released (`pyacp-9hd`). The reply is either already
+    #: on the wire — milliseconds — or never coming, which is a connection dying
+    #: underneath us; this bounds the second case so a cancellation cannot hang on it.
+    _UNCLAIMED_CREATE_TIMEOUT = 5.0
+
     def __init__(self) -> None:
         self._live: dict[str, dict[str, Terminal]] = {}
 
@@ -261,14 +269,29 @@ class TerminalRegistry:
             )
         context.require(Gate.TERMINAL)
         session_id = context.session_id
-        response = await context.client.create_terminal(
-            session_id=session_id,
-            command=command,
-            args=list(args) if args else None,
-            env=list(env) if env else None,
-            cwd=cwd,
-            output_byte_limit=output_byte_limit,
+        # Shielded, and that is the whole of `pyacp-9hd`. A turn cancelled while this
+        # request is in flight would otherwise abandon the future the id arrives on --
+        # the client has already started the process, so the terminal exists and its id
+        # is in a reply nobody is waiting for. Shielding keeps the request alive through
+        # our own cancellation so the id still lands and the terminal can be given back.
+        request = asyncio.ensure_future(
+            context.client.create_terminal(
+                session_id=session_id,
+                command=command,
+                args=list(args) if args else None,
+                env=list(env) if env else None,
+                cwd=cwd,
+                output_byte_limit=output_byte_limit,
+            )
         )
+        try:
+            response = await asyncio.shield(request)
+        except asyncio.CancelledError:
+            # Under `shield` again for the same reason `_capture`'s cleanup is: the
+            # cancellation is already in flight, and an unshielded await here would be
+            # cancelled at its first suspension point.
+            await asyncio.shield(self._abandon_unclaimed(context, request, command))
+            raise
         terminal = Terminal(
             self, context.client, context.gates, session_id, response.terminal_id
         )
@@ -277,6 +300,50 @@ class TerminalRegistry:
             "Created terminal %s for session %s (%s)", terminal.terminal_id, session_id, command
         )
         return terminal
+
+    async def _abandon_unclaimed(
+        self, context: TurnContext, request: asyncio.Future[Any], command: str
+    ) -> None:
+        """Give back a terminal whose id arrived after nobody was left to want it.
+
+        The turn is going away and the command is already running on the client's
+        machine, so this is `_capture`'s cancelled path one step earlier: kill it and
+        release it rather than leave it burning a machine for output no one will read.
+
+        Bounded, because the reply is either already in flight — milliseconds — or never
+        coming, which is what a connection dying underneath us looks like. Waiting
+        forever there would hang the cancellation this is running inside.
+
+        It is **tracked before it is abandoned**, even though it is released a line later:
+        `session/close` can be running concurrently, and a terminal the registry cannot
+        see is one `close` cannot clean up if anything below fails.
+        """
+        try:
+            response = await asyncio.wait_for(request, self._UNCLAIMED_CREATE_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            request.cancel()
+            # The one case that genuinely cannot be closed: the id existed only in a
+            # reply that was never delivered. See `terminals.md`.
+            logger.warning(
+                "terminal/create for %r was cancelled and its id never arrived; if the "
+                "client started the process, that terminal is now unreachable",
+                command,
+            )
+            return
+        except Exception:  # noqa: BLE001 — the create failed, so there is nothing to give back
+            logger.debug("terminal/create for %r failed while being abandoned", command)
+            return
+
+        terminal = Terminal(
+            self, context.client, context.gates, context.session_id, response.terminal_id
+        )
+        self._live.setdefault(context.session_id, {})[terminal.terminal_id] = terminal
+        logger.info(
+            "terminal/create for %r landed after its turn was cancelled; releasing %s",
+            command,
+            terminal.terminal_id,
+        )
+        await terminal.abandon()
 
     async def close(self, session_id: str) -> None:
         """Release every terminal a session holds. The `SessionRegistry.on_close` hook.

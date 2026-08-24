@@ -192,7 +192,10 @@ Notes that the table cannot carry:
   connection. Sessions deliberately survive a disconnect, so their entries stay and the
   departed client's terminal *handles* are dropped — the processes are that client's to
   reap, because it is the only party that can. Release on completion, cancellation, and
-  `session/close` is real; release on disconnect is not available to any ACP agent. See
+  `session/close` is real; release on disconnect is not available to any ACP agent.
+  **Cancellation now includes a turn cancelled mid-`terminal/create`** (`pyacp-9hd`): the
+  request is shielded so the id still arrives and the terminal is given back, instead of
+  being lost with the future our own cancellation dropped. See
   [../src/python_acp/terminals.md](../src/python_acp/terminals.md).
 - **A client that simply lacks a capability is not that bug.** `UngatedClientCallError` →
   `-32603` says *we* reached for something unadvertised. The ordinary case — a client with

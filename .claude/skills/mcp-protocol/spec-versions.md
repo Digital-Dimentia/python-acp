@@ -1,6 +1,6 @@
 # MCP Revisions and What a Version Bump Costs
 
-Read this before changing the `"2024-11-05"` string in `MCPStdioClient.initialize`.
+Read this before changing the `"2025-06-18"` string in `MCPStdioClient.initialize`.
 MCP revisions are dated, not semver, and the negotiated version is whatever
 `initialize` settles on — so "upgrading" means being able to *speak* the newer
 revision, not just asking for it.
@@ -11,31 +11,34 @@ Spec index: <https://modelcontextprotocol.io/specification/>
 
 | Revision | What changed | Effect on this repo |
 |---|---|---|
-| `2024-11-05` | The original. `initialize` handshake, tools/resources/prompts, HTTP+SSE transport. | **What we pin.** Everything in `mcp_stdio.py` targets it. |
-| `2025-03-26` | Streamable HTTP replaces HTTP+SSE. Tool annotations, audio content, progress messages, OAuth. | None — all stdio-side behavior is unchanged. Assumed by an HTTP server that gets no `MCP-Protocol-Version` header. |
-| `2025-06-18` | `elicitation/create` added. `structuredContent` and `outputSchema` on tools. Resource links in tool results. `title` alongside `name` on tools/prompts/resources. `MCP-Protocol-Version` header required on HTTP. JSON-RPC batching removed. | The realistic next target. Same handshake, same framing, additive result fields. |
+| `2024-11-05` | The original. `initialize` handshake, tools/resources/prompts, HTTP+SSE transport. | **Still accepted**, never proposed. A server pinned here must counter with it, and hanging up on that counter would drop every server that has not moved. |
+| `2025-03-26` | Streamable HTTP replaces HTTP+SSE. Tool annotations, audio content, progress messages, OAuth. | None — all stdio-side behavior is unchanged. Assumed by an HTTP server that gets no `MCP-Protocol-Version` header. Its tool annotations are the unclaimed win: `pyacp-eg1.3`. |
+| `2025-06-18` | `elicitation/create` added. `structuredContent` and `outputSchema` on tools. Resource links in tool results. `title` alongside `name` on tools/prompts/resources. `MCP-Protocol-Version` header required on HTTP. JSON-RPC batching removed. | **What we propose.** Same handshake, same framing, additive result fields. |
 | `2026-07-28` | Redesign — see below. | A rewrite of the client, not a version bump. |
 
-## Moving to `2025-06-18`
+## The move to `2025-06-18` (done — `pyacp-pb7`)
 
-Cheap, and the transport does not move. What it buys and costs:
+Cheap, and the transport did not move. What it cost and what it bought, recorded so the
+next bump is judged the same way:
 
-- Send `"protocolVersion": "2025-06-18"` and **widen what the response may say**.
-  `initialize` already checks the reply, so bumping `_MCP_PROTOCOL_VERSION` alone turns
-  every `2024-11-05`-only server into a hard failure. Put both revisions in
-  `_SUPPORTED_MCP_PROTOCOL_VERSIONS` so a server that counters with the older one is
-  accepted rather than hung up on.
-- `elicitation` becomes declarable. This is the one that matters here: it is the MCP
-  primitive that maps onto ACP `session/request_permission`, and `on_server_request` is
-  already the hook for it. Declaring `elicitation: {}` in the capability block is what
-  makes a server actually send `elicitation/create`.
+- `_MCP_PROTOCOL_VERSION` became `"2025-06-18"` and `_SUPPORTED_MCP_PROTOCOL_VERSIONS`
+  became **both** revisions. Those two are not the same set on purpose: `initialize`
+  checks the reply, so bumping the proposal alone would have turned every
+  `2024-11-05`-only server into a hard failure.
+- `elicitation` became declarable. This is the one that mattered: it is the MCP primitive
+  that maps onto ACP `session/request_permission`, and `on_server_request` is the hook
+  for it. It is **declarable but not yet declared** — `pyacp-8bv.4` is where forwarding
+  to the ACP client lands, and declaring a capability before something answers it strands
+  the server on a `-32601` it was told would not happen.
   - Request: `{message, requestedSchema}` — a flat object schema of primitives only.
   - Response: `{action: "accept" | "decline" | "cancel", content?}`. All three are
     *successful* results; declining is not an error.
 - Tool results may carry `structuredContent` next to `content`, and content blocks may
-  be resource links. `call_tool` passes the whole dict through, so nothing breaks —
+  be resource links. `call_tool` passes the whole dict through, so nothing broke —
   but anything downstream that assumes `content[0].type == "text"` will.
-- Batching is gone. `mcp_stdio.py` never batched, so nothing to remove.
+- Batching is gone. `mcp_stdio.py` never batched, so there was nothing to remove.
+- Tool annotations (from `2025-03-26`) are now reachable and still unread. That is the
+  remaining piece of the version bump's value: `pyacp-eg1.3`.
 
 ## Why `2026-07-28` is a different protocol
 
@@ -75,7 +78,7 @@ Treat it as its own project with its own beads epic, not as part of another chan
 The handshake answer is authoritative. Against any stdio server:
 
 ```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
   | <the server command> 2>/dev/null | head -1
 ```
 

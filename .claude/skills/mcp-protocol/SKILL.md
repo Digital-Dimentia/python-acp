@@ -19,7 +19,7 @@ WebSocket client ──ACP──▶ python-acp ──MCP──▶ server subproc
 ```
 
 So "capabilities", "initialize", "notifications/initialized" and JSON-RPC error codes
-all appear twice with different meanings. `ws_bridge.py`'s `initialize` is ACP;
+all appear twice with different meanings. `agent.py`'s `initialize` is ACP;
 `MCPStdioClient.initialize` is MCP. The `acp-protocol` skill owns the other side.
 
 ## Transport rules (non-negotiable)
@@ -64,8 +64,9 @@ SHOULD send nothing but `ping`; before `notifications/initialized` arrives a
 well-behaved server sends nothing but `ping` and log messages.
 
 **Version negotiation is real, and `initialize` performs it.** We propose
-`_MCP_PROTOCOL_VERSION` (`"2024-11-05"`); the server replies with the revision it will
-actually use, which need not be the one we asked for. `_agreed_protocol_version` checks
+`_MCP_PROTOCOL_VERSION` (`"2025-06-18"`) and accept either it or `"2024-11-05"` back;
+the server replies with the revision it will actually use, which need not be the one we
+asked for. `_agreed_protocol_version` checks
 that reply against `_SUPPORTED_MCP_PROTOCOL_VERSIONS` and raises `MCPProtocolError` when
 it is missing or unusable; `initialize` then stops the subprocess and never sends
 `notifications/initialized`. Do not soften that into a warning — half a handshake is
@@ -84,19 +85,32 @@ Both sides declare what they support in `initialize`, and each side MUST NOT use
 capability the other did not declare. A missing declaration means the feature is never
 exercised; a false declaration means the peer calls something you cannot answer.
 
-We send `"capabilities": {}` — literally nothing. That is currently a lie by omission:
-`_handle_server_request` will happily route `roots/list`, `sampling/createMessage`, or
-`elicitation/create` to `on_server_request`, but no conforming server will ever send
-them, because we never said we could take them.
+`MCPClientCapabilities` (frozen, in `mcp_stdio.py`) is the block we send, and
+`MCPStdioClient.client_capabilities` is where a caller sets it. It is empty by default,
+because a client with no `on_server_request` handler can answer nothing.
 
-**Rule: when you make `on_server_request` handle a client primitive, declare it in the
-same change.** The mapping:
+**Rule: declaring a capability and answering it are one change, never two.** Both halves
+fail quietly on their own — declare nothing and the handler is dead code no server will
+ever reach; declare what nothing answers and the server strands itself on a `-32601` it
+was told would not happen. `initialize` enforces the second half:
+`_declared_capabilities()` raises `RuntimeError` — a conformance bug in *this* process,
+not a bad input — when the block is non-empty and `on_server_request` is `None`, before
+the promise reaches the wire.
 
 | Client capability | Enables the server to call | python-acp's answer |
 |---|---|---|
-| `roots: {listChanged: bool}` | `roots/list` | plausible — ACP sessions carry `cwd`/`additionalDirectories` |
-| `elicitation: {}` | `elicitation/create` | the intended path; maps onto ACP `session/request_permission` |
-| `sampling: {}` | `sampling/createMessage` | **no** — there is no LLM in this runtime, and declaring it strands the server |
+| `roots: {listChanged: bool}` | `roots/list` | **declared today.** `mcp_registry.roots_responder` answers it from the session's `cwd` + `additionalDirectories`; `listChanged` is `false` because a session's roots are fixed for its lifetime |
+| `elicitation: {}` | `elicitation/create` | declarable, not yet declared — `pyacp-8bv.4` forwards it to ACP `session/request_permission`, and declaring it before that lands would strand a server |
+| `sampling: {}` | `sampling/createMessage` | **never**, and `MCPClientCapabilities` has no field for it — there is no LLM in this runtime, so the block cannot be built wrong |
+
+An undeclared capability contributes **no key at all**, not a `false`: absent means
+unsupported.
+
+The check `initialize` runs is presence, not coverage — one callable stands behind every
+declared capability, so a handler wired up for `roots/list` is also what a server's
+`sampling/createMessage` reaches. Raise `UnsupportedServerRequest` there: it becomes
+`-32601` ("we never offered this") instead of `-32603` ("we broke"), and that distinction
+is what makes the capability block mean anything on the wire.
 
 Server capabilities move the other way. Treat the `initialize` result as the source of
 truth for what to call; a server that omits `prompts` will answer `prompts/list` with
@@ -139,9 +153,10 @@ rough order of usefulness here: `ping`, `resources/templates/list`,
 
 Inbound — `_handle_message` routes by shape, and `mcp_stdio.md` has the table. The part
 worth memorizing: **every server request gets a reply.** `ping` is answered inline with
-`{}`, anything else goes to `on_server_request` or gets `-32601`, and a handler that
-raises produces `-32603` instead of killing the read loop. An unanswered request
-strands the server forever.
+`{}`, anything else goes to `on_server_request` or gets `-32601`, a handler that raises
+`UnsupportedServerRequest` also gets `-32601`, and a handler that raises anything else
+produces `-32603` instead of killing the read loop. An unanswered request strands the
+server forever.
 
 Server notifications to expect: `notifications/message` (logging),
 `notifications/tools/list_changed`, `notifications/resources/list_changed`,
@@ -155,8 +170,9 @@ This trips people up because two of them look like success:
 
 1. **JSON-RPC error response** — `{"error": {"code", "message"}}`. `request()` raises
    `MCPProtocolError.from_error_response(error)`, which keeps the server's `code` and
-   `data` on the exception. `ws_bridge` forwards that code to the WebSocket client and
-   tags it `data.source = "mcp"`, so a backend `-32601` stays distinguishable from a
+   `data` on the exception. `errors.to_request_error` forwards that code to the ACP
+   client and tags it `data.source = "mcp"` (`errors.MCP_SOURCE`) with the original in
+   `data.mcpCode`, so a backend `-32601` stays distinguishable from a
    backend `-32602` — and from the bridge's own `-32601`. Only failures with no
    server-assigned code (timeout, transport death, a malformed `error` member) fall
    back to `-32603`.
@@ -204,11 +220,14 @@ Anything that adds or renames a module also triggers the `repo-docs-sync` skill.
 
 Real gaps, in rough priority order. Check beads before filing a duplicate.
 
-- `"capabilities": {}` is sent, so no server will ever exercise `on_server_request`.
-- `_SUPPORTED_MCP_PROTOCOL_VERSIONS` holds exactly one revision, so a server that has
-  moved past `2024-11-05` is refused rather than met halfway. Negotiation happens; the
-  accepted set is what is narrow.
-- Timeouts do not send `notifications/cancelled`.
+- `elicitation` is declarable but not declared: nothing forwards `elicitation/create` to
+  the ACP client yet (`pyacp-8bv.4`).
+- `roots.listChanged` is `false`, so a session whose roots could change could not say so.
+  Nothing can change them today, which makes it honest rather than a gap.
+- Nothing reads tool annotations, so `turn_mcp_router` asks permission for every tool
+  call. `2025-06-18` carries them; reading them is `pyacp-eg1.3`, and a server's own hint
+  about its tool is not a security boundary — a missing or false one must still land on
+  "ask".
 - `read_resource` forwards an `arguments` param that is not in the MCP spec —
   `resources/read` takes `uri` only. The mock server honors it; a real server will
   ignore it. Templated resources are meant to be expanded client-side into a concrete
@@ -216,12 +235,19 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
 
 ## Protocol version
 
-`"2024-11-05"` is the module-level `_MCP_PROTOCOL_VERSION` in `mcp_stdio.py`, and
-`_SUPPORTED_MCP_PROTOCOL_VERSIONS` is the set `initialize` will accept back. Change both
-together — proposing a revision we would then refuse is a handshake that always fails.
-The MCP version is unrelated to
-`_SUPPORTED_PROTOCOL_VERSION = 1` in `ws_bridge.py`, which is the ACP version. Two
-protocols, two version fields — do not "unify" them.
+`"2025-06-18"` is the module-level `_MCP_PROTOCOL_VERSION` in `mcp_stdio.py`, and
+`_SUPPORTED_MCP_PROTOCOL_VERSIONS` — `{"2025-06-18", "2024-11-05"}` — is the set
+`initialize` will accept back.
+
+**Proposed and accepted are deliberately different sets.** We ask for the newer revision
+because `elicitation` does not exist before it, and still accept a `2024-11-05`
+counter-offer because hanging up on one would drop every server that has not moved yet.
+Never propose a revision that is not also in the accepted set — that is a handshake which
+always fails.
+
+The MCP version is unrelated to `SUPPORTED_PROTOCOL_VERSIONS` in `capabilities.py`, which
+is the ACP version and an integer. Two protocols, two version fields — do not "unify"
+them.
 
 Before changing the pinned version, read [spec-versions.md](spec-versions.md) beside
 this file. The jump to `2026-07-28` is not a string swap: that revision makes MCP

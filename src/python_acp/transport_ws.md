@@ -110,13 +110,40 @@ different answers depending on how it connected.
 | `serve_websocket(websocket, mcp_client)` | Bind one already-accepted socket to a fresh agent and run until EOF |
 
 `serve_websocket` is split out from the server so a test — or a caller embedding this in
-its own HTTP server — can exercise the binding without a listening port. Every test in
-`tests/test_transport_ws.py` uses it that way.
+its own HTTP server — can exercise the binding without a listening port. Most tests in
+`tests/test_transport_ws.py` use it that way.
 
 Messages are capped at 50 MiB, matching the stdio binding. `websockets` defaults to
 1 MiB, and a client that exceeds the cap has its connection *closed* rather than being
 told, so the two transports must not disagree about the size of a message they will both
 be asked to carry.
+
+## Testing the parts a fake socket cannot reach
+
+A fake socket enters at `serve_websocket`, which is below the opening handshake, below the
+frame codec, and below `start()`. Those are the parts a client meets *first*, and the
+50 MiB cap in particular is only real once something encodes a frame — nothing else can
+tell whether `max_size` reached `serve()` at all.
+
+`pyacp-22w` covers them **without binding a port**, which matters because sandboxed
+environments and restricted CI runners deny `bind()` for `AF_INET` and `AF_UNIX` alike:
+
+1. Swap `loop.create_server` for the duration of `start()`. `serve()` calls it and keeps
+   the result, so this captures the real protocol factory and substitutes a stub for the
+   *listener* — the one part that needs `bind()` and the one part the tests do not care
+   about. The stub supplies `sockets`, `get_loop()`, `is_serving()`, `close()`, and
+   `wait_closed()`.
+2. `socket.socketpair()` for the connection, then
+   `loop.connect_accepted_socket(factory, server_sock)` — which is exactly what a real
+   accept would have done, and `ServerConnection.connection_made` starts the handler task
+   itself.
+3. `websockets.connect("ws://localhost/", sock=client_sock)` on the other end. The URI is
+   never resolved; it only supplies the `Host` header the handshake must send.
+
+Everything between those two sockets is the real library: the `101` response, the
+`Sec-WebSocket-Accept` computation, masking, and framing.
+
+See "The real WebSocket" in `tests/test_transport_ws.py`.
 
 ## Error mapping
 

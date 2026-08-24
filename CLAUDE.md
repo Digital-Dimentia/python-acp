@@ -151,9 +151,20 @@ committed file, which is worse than having no transcript at all. See
 
 Packaging targets:
 
-- `make container-image` — builds via podman or docker, whichever is on PATH.
-  **Exits 0 without building if neither is installed**, so a green run does not prove
-  an image exists. Check for `dist/python-acp-container.tar`.
+- `make container-image` — builds via podman or docker. **Exits 0 without building
+  whenever no engine is *usable*, so a green run does not prove an image exists.**
+  Check for `dist/python-acp-container.tar`. "Usable" is a probe, not a `PATH` lookup:
+  the logic lives in [scripts/container_image.py](scripts/container_image.py) and
+  reports three states, because being on `PATH` and being able to build are different
+  things. podman on macOS is a client for a Linux VM and docker is a client for a
+  daemon, so either binary runs happily while nothing behind it answers — the old
+  `command -v` check called that "available" and the build then died with exit 125.
+  Set **`REQUIRE_CONTAINER=1`** to turn any skip into a hard failure;
+  `publish-artifacts.yml` does, so a release cannot quietly ship without its image.
+  A failed build exports nothing *and deletes any tar an earlier run left*, so
+  `release-bundle` — which bundles that file whenever it merely exists — cannot pick up
+  a stale image. `tests/test_container_image.py` covers all of it, since a target whose
+  failure mode is silence needs the same treatment as `docs-check`.
 - `make package` — build + container image, tarred to
   `artifacts/python-acp-artifacts.tar.gz`.
 - `make release-bundle` — build only (no container build of its own; it includes the

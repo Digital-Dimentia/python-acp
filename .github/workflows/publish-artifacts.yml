@@ -22,7 +22,10 @@ jobs:
         run: |
           make venv
           make build
-          make container-image
+          # REQUIRE_CONTAINER=1: a release must not silently ship without its
+          # container image. Locally the target skips when no usable engine is
+          # present; here that skip is a build failure.
+          make container-image REQUIRE_CONTAINER=1
           mkdir -p artifacts
           tar -czf artifacts/python-acp-artifacts.tar.gz -C dist .
       - name: Publish release artifacts

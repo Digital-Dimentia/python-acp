@@ -14,6 +14,14 @@ VENV_STAMP := $(VENV_DIR)/.python-acp-venv.json
 VENV_BOOTSTRAP := scripts/venv_bootstrap.py
 BUILD_DIR := dist
 ARTIFACTS_DIR := artifacts
+CONTAINER_SCRIPT := scripts/container_image.py
+CONTAINER_TAG ?= python-acp:local
+
+# REQUIRE_CONTAINER=1 makes `container-image` fail rather than skip when no
+# usable engine is present. Empty by default so packaging works on a machine
+# without one; set in .github/workflows/publish-artifacts.yml.
+REQUIRE_CONTAINER ?=
+CONTAINER_FLAGS := $(if $(strip $(REQUIRE_CONTAINER)),--require,)
 DEMO_MCP_COMMAND ?= $(PYTHON_BIN) tests/fixtures/mock_mcp_server.py
 HOST ?= 127.0.0.1
 PORT ?= 8766
@@ -78,15 +86,19 @@ wheel: build
 sdist: build
 	@ls -1 $(BUILD_DIR)/*.tar.gz 2>/dev/null | head -n 1
 
+## Build the container image and export it to $(BUILD_DIR).
+## Skips -- exit 0, loud message -- when no engine is installed OR when one is
+## installed but its backend is unreachable (a stopped `podman machine`, a dead
+## docker daemon). REQUIRE_CONTAINER=1 turns any skip into a failure; the release
+## workflow sets it, because a release that ships without its image should not be
+## quiet about it. Logic lives in $(CONTAINER_SCRIPT), not here: see its docstring.
 container-image: venv
-	mkdir -p $(BUILD_DIR)
-	@ENGINE=$$(command -v podman || command -v docker || true); \
-	if [ -z "$$ENGINE" ]; then \
-		echo "Neither podman nor docker is installed; skipping container-image export." >&2; \
-		exit 0; \
-	fi; \
-	$$ENGINE build -t python-acp:local -f Containerfile .; \
-	$$ENGINE save -o $(BUILD_DIR)/python-acp-container.tar python-acp:local
+	$(PYTHON_BIN) $(CONTAINER_SCRIPT) \
+		--tag $(CONTAINER_TAG) \
+		--containerfile Containerfile \
+		--context . \
+		--output $(BUILD_DIR)/python-acp-container.tar \
+		$(CONTAINER_FLAGS)
 
 package: build container-image
 	mkdir -p $(ARTIFACTS_DIR)

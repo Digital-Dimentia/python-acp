@@ -232,9 +232,9 @@ member.
 | `initialize` | `initialize` | **live** — negotiates the version, stores `clientCapabilities`, returns the capability block from [capabilities.py](capabilities.md) | — |
 | `authenticate` | `authenticate` | **live** — refuses with `-32000 auth_required` | `pyacp-fln.1` |
 | `cancel` | `session/cancel` | **live** — cancels the session's running turn; silent for an unknown session and for an idle one | `pyacp-hnk.5` |
-| `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
+| `ext_notification` | `_<name>` | **live** — silent by contract | — |
 | `on_connect` | — | **live** — stores the `Client` facade | — |
-| `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
+| `ext_method` | `_<name>` | `-32601`, and **stays** that way — `pyacp-sld.2` declined to move the legacy MCP passthrough here | — |
 | `new_session` | `session/new` | **live** — registers a session with the executor's modes, opens its MCP servers with their roots and elicitation forwarder, rejects the transports `initialize` did not advertise | — |
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | **live** — replays the session's transcript, then returns its settings | — |

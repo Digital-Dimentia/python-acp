@@ -285,7 +285,7 @@ client is the one that asked — so a second client on the same session stays in
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
-| `announce-tools` | boolean | `true` | List the session's MCP tools each turn. Off also skips the `tools/list` behind it |
+| `announce-tools` | boolean | `true` | List the session's MCP tools each turn. Off saves the notification, not every `tools/list` — a turn still lists the servers it calls, because a tool call's `kind` comes from their annotations |
 | `on-tool-failure` | select | `continue` | `continue` runs the remaining calls; `stop` ends the turn at the failed one |
 
 A change is announced with `config_option_update`, carrying **every** option rather than
@@ -323,7 +323,7 @@ a `deprecated` block naming the replacement and the removal milestone:
   "tools": [{"name": "echo", "description": "Echoes text", "inputSchema": {}}],
   "deprecated": {
     "action": "list_tools",
-    "use": "tools/list",
+    "use": "session/new + session/prompt",
     "removedIn": "the ACP v1 migration (Phase 7)"
   }
 }
@@ -331,33 +331,39 @@ a `deprecated` block naming the replacement and the removal milestone:
 
 The block is purely additive: `ok`, `tools`, `result`, and `error` mean exactly what they
 meant before, so an existing client keeps working and can ignore the key. `use` is omitted
-for an action that does not exist. The server also logs a warning, once per action per
-connection.
+when there is nothing honest to name — an action that does not exist, or one with no ACP
+replacement. The server also logs a warning, once per action per connection.
 
 ### Migration table
 
-| Deprecated action | Send instead, today |
+**The JSON-RPC `tools/*`, `prompts/*`, and `resources/*` methods are going away too.**
+They are MCP method names on an ACP wire, they address the process-wide `--mcp-command`
+server, and that is precisely the arrangement ACP v1 replaced. An earlier plan was to
+rename them under a prefix on the SDK's `ext_method` escape hatch; that was **decided
+against**, because it would cost you a rename now and a deletion later for a surface being
+removed either way. Both halves go in one step.
+
+| Deprecated call | Migrate to |
 |---|---|
-| `{"action": "list_tools"}` | `{"method": "tools/list"}` |
-| `{"action": "call_tool"}` | `{"method": "tools/call"}` |
-| `{"action": "list_prompts"}` | `{"method": "prompts/list"}` |
-| `{"action": "get_prompt"}` | `{"method": "prompts/get"}` |
-| `{"action": "list_resources"}` | `{"method": "resources/list"}` |
-| `{"action": "read_resource"}` | `{"method": "resources/read"}` |
-| `{"action": "ping"}` | `{"method": "ping"}` |
+| `{"action": "list_tools"}` / `{"method": "tools/list"}` | `session/new` + `session/prompt` — the turn's first `available_commands` update is the tool list |
+| `{"action": "call_tool"}` / `{"method": "tools/call"}` | `session/new` + `session/prompt` |
+| `{"action": "list_prompts"}` / `{"method": "prompts/list"}` | **nothing** |
+| `{"action": "get_prompt"}` / `{"method": "prompts/get"}` | **nothing** |
+| `{"action": "list_resources"}` / `{"method": "resources/list"}` | **nothing** |
+| `{"action": "read_resource"}` / `{"method": "resources/read"}` | **nothing** |
+| `{"action": "ping"}` / `{"method": "ping"}` | **nothing** — ACP has no ping |
 
-The right-hand column is a **like-for-like step you can take now**, and it is the one the
-`deprecated` block names. Be aware that it is itself deprecated: those method names are
-MCP's, not ACP's, and a later change moves them under a namespaced prefix on the SDK's
-`ext_method` escape hatch. That prefix is not chosen yet, and whether the passthrough
-survives at all — as against tool access going exclusively through `session/prompt` — is
-still open. Watch this section.
+The ACP path is a different *shape of program*, not a method swap. You open a session with
+`session/new` naming your `mcpServers`, then send `session/prompt`; the agent calls tools
+on your behalf and streams `session/update` notifications back. See
+[the invocation convention](src/python_acp/turn_mcp_router.md) for what a prompt block
+looks like.
 
-If you want the ACP-native path instead of either, there is no direct equivalent: ACP has
-no method that lists tools. You open a session with `session/new` naming your
-`mcpServers`, then send `session/prompt`, and the agent calls tools on your behalf and
-streams `session/update` notifications back. That is a different shape of program, which
-is why the staged rename exists at all.
+**The rows marked "nothing" are not an oversight.** ACP has no method for reading an MCP
+prompt or resource — its model is that the *agent* uses them internally, rather than a
+client reaching through the agent to the server. When this surface goes, so does the
+ability to reach them through this bridge; a client that needs them should speak MCP to
+that server directly.
 
 Connect to `ws://127.0.0.1:8765` and send JSON messages.
 

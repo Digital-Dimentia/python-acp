@@ -667,16 +667,21 @@ class PythonAcpAgent:
             logger.debug("session/cancel for %s: no turn is running", session_id)
 
     # ------------------------------------------------------------------
-    # Extension methods — the legacy MCP passthrough lands here in Phase 7
+    # Extension methods — deliberately empty
     # ------------------------------------------------------------------
 
     @as_request_error
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Serve a `_`-prefixed extension request.
 
-        `pyacp-sld.2` carries the legacy MCP passthrough (`tools/*`, `prompts/*`,
-        `resources/*`) here during the D4 deprecation window. Until then there are no
-        extensions, and an unknown one is a genuine method-not-found.
+        There are no extensions, and an unknown one is a genuine method-not-found.
+
+        This was where the legacy MCP passthrough (`tools/*`, `prompts/*`, `resources/*`)
+        was to land under a namespaced prefix. `pyacp-sld.2` declined that move: the
+        passthrough addresses the process-wide `--mcp-command` server — the arrangement
+        ACP v1 inverted — so it is deleted with the rest of the deprecated surface rather
+        than carried onto the ACP one. Keeping this empty is the decision, not an
+        omission. See `legacy_ws.md`.
         """
         raise RequestError.method_not_found(f"_{method}")
 

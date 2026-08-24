@@ -16,9 +16,15 @@ The second is the one worth explaining. `tools/*`, `prompts/*`, and `resources/*
 **MCP methods on an ACP wire** — they are not ACP and never were, and `PythonAcpAgent`
 has no members for them. Once the socket is bound to the SDK they would answer `-32601`.
 That would delete a working surface with no replacement in the same release, which D4's
-promise does not allow, so they are carried here under their current names until
-`pyacp-sld.2` moves them onto `ext_method` as `_tools/call` and friends — a rename a
-client can be told about, rather than a disappearance.
+promise does not allow, so they are carried here under their current names for the length
+of the deprecation window.
+
+**They are not moving to `ext_method`, and that is settled.** `pyacp-sld.2` weighed the
+namespaced move — `_tools/call` and friends — and declined it: these methods address the
+process-wide `--mcp-command` server, which is the exact arrangement ACP v1 inverted, so
+carrying them forward under a prefix would preserve the old model behind a new name and
+hand clients two breaking changes instead of one. They are deleted with the action
+surface in `pyacp-sld.3`. See `legacy_ws.md` for what is lost with them.
 
 `ping` and `notifications/initialized` are here for the same reason: neither is an ACP
 method, and `notifications/initialized` is in fact an MCP-ism that arrived by copy.
@@ -44,24 +50,34 @@ logger = logging.getLogger(__name__)
 #: would put a commitment on the wire that nobody made.
 REMOVED_IN = "the ACP v1 migration (Phase 7)"
 
-#: The JSON-RPC method that does the same job as each deprecated action, **today**.
+#: What replaces each deprecated action, or `None` when nothing does.
 #:
-#: Every target is itself on the deprecated half of this module, which reads oddly until
-#: you look at what an ACP-native replacement would be: there is no ACP method that lists
-#: tools. The ACP path is `session/new` with `mcpServers` and then `session/prompt`, where
-#: the turn executor calls tools on the client's behalf — a different shape of program,
-#: not a method swap. So this table names the like-for-like step a client can take now,
-#: and `pyacp-sld.2` moves those targets under a namespaced prefix on `ext_method` as a
-#: second, smaller move — a prefix it has not chosen yet, and which it may decide against
-#: entirely. Staging it that way is the whole point of D4.
-ACTION_REPLACEMENTS: Mapping[str, str] = {
-    "list_tools": "tools/list",
-    "call_tool": "tools/call",
-    "list_prompts": "prompts/list",
-    "get_prompt": "prompts/get",
-    "list_resources": "resources/list",
-    "read_resource": "resources/read",
-    "ping": "ping",
+#: **These used to name the JSON-RPC passthrough form of the same call** — `list_tools`
+#: → `tools/list` — on the reasoning that those names would survive a move to a
+#: namespaced prefix on `ext_method`. `pyacp-sld.2` decided they will not: the
+#: passthrough addresses the process-wide `--mcp-command` server, which is the exact
+#: arrangement ACP v1 inverted, and it is deleted alongside the action surface rather
+#: than carried forward under a new name. Pointing a client at a target that dies in the
+#: same release is not a migration path; it is a second breaking change.
+#:
+#: So these name the **ACP** path, which is a different shape of program rather than a
+#: method swap: open a session with `session/new` naming the server in `mcpServers`, then
+#: drive it with `session/prompt`, where the turn executor calls tools on the client's
+#: behalf and the turn's first `available_commands` update is the tool list.
+#:
+#: `None` is not a gap to fill later. MCP prompts and resources have **no ACP path at
+#: all** — ACP's model is that the agent uses them internally, not that a client reaches
+#: through the agent to the server — and `ping` is MCP plumbing with no ACP counterpart.
+#: Naming something anyway would be inventing a migration. Every action has a key, so a
+#: new one cannot arrive without an answer; the answer is allowed to be "nothing".
+ACTION_REPLACEMENTS: Mapping[str, str | None] = {
+    "list_tools": "session/new + session/prompt",
+    "call_tool": "session/new + session/prompt",
+    "list_prompts": None,
+    "get_prompt": None,
+    "list_resources": None,
+    "read_resource": None,
+    "ping": None,
 }
 
 
@@ -73,9 +89,10 @@ def deprecation_notice(action: Any) -> dict[str, Any]:
     envelope, where a client is already parsing, and `logger.warning` is the operator's
     copy rather than the only copy.
 
-    `use` is omitted for an action that is not in `ACTION_REPLACEMENTS` — an unsupported
-    action is still a use of a deprecated surface and still earns the notice, but there
-    is no honest migration target to name for a method that never existed.
+    `use` is omitted in two cases that mean the same thing to a client: an action that is
+    not in `ACTION_REPLACEMENTS` at all (it never existed), and one whose entry is `None`
+    (it existed and has no ACP replacement — see the table). Either way there is nothing
+    honest to point at, and naming something anyway would invent a migration.
 
     A fresh dict per call: this ends up inside a reply the caller owns and may mutate,
     and a shared one would let a single mutation rewrite every later notice.
@@ -87,8 +104,9 @@ def deprecation_notice(action: Any) -> dict[str, Any]:
     return notice
 
 #: JSON-RPC methods this handler answers instead of the ACP agent. Every one is an MCP
-#: method or transport plumbing; none is in `acp.meta.AGENT_METHODS`. The set is closed —
-#: it shrinks as `pyacp-sld.2` moves entries to `ext_method`, and never grows.
+#: method or transport plumbing; none is in `acp.meta.AGENT_METHODS`. The set is closed:
+#: it never grows, and `pyacp-sld.3` empties it in one step rather than draining it —
+#: `pyacp-sld.2` decided against moving these onto `ext_method` first.
 LEGACY_METHODS = frozenset(
     {
         "ping",
@@ -177,8 +195,7 @@ class LegacyActionHandler:
         if key in self._warned:
             return
         self._warned.add(key)
-        replacement = ACTION_REPLACEMENTS.get(key)
-        if replacement is None:
+        if key not in ACTION_REPLACEMENTS:
             logger.warning(
                 "The WebSocket action surface is deprecated and is removed in %s; "
                 "%r is not one of its actions",
@@ -186,9 +203,20 @@ class LegacyActionHandler:
                 action,
             )
             return
+        replacement = ACTION_REPLACEMENTS[key]
+        if replacement is None:
+            # A real action with no ACP counterpart. Saying so is the useful thing: an
+            # operator reading this needs to know the capability goes away, not just the
+            # spelling. `pyacp-sld.2` records why.
+            logger.warning(
+                "The WebSocket action %r is deprecated and is removed in %s; it has no "
+                "ACP replacement, and the capability goes with it",
+                key,
+                REMOVED_IN,
+            )
+            return
         logger.warning(
-            "The WebSocket action %r is deprecated and is removed in %s; "
-            "send the JSON-RPC method %r instead",
+            "The WebSocket action %r is deprecated and is removed in %s; use %s instead",
             key,
             REMOVED_IN,
             replacement,

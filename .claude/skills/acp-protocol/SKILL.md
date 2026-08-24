@@ -1,6 +1,6 @@
 ---
 name: acp-protocol
-description: Use when changing python-acp's ACP surface — adding or modifying an Agent method, a capability literal, a session/update variant, an error response, or the deprecated action surface. Covers SDK-driven dispatch, the manifests that make advertisement match behaviour, the one error mapping, and the full checklist of files one change must touch. Trigger on work involving agent.py, capabilities.py, turns.py, errors.py, transport_ws.py, legacy_ws.py, ACP protocol compliance, or the ACP v1 plan in docs/full-apc-plan.md.
+description: Use when changing python-acp's ACP surface — adding or modifying an Agent method, a capability literal, a session/update variant, or an error response. Covers SDK-driven dispatch, the manifests that make advertisement match behaviour, the one error mapping, why the removed action surface must not come back, and the full checklist of files one change must touch. Trigger on work involving agent.py, capabilities.py, turns.py, errors.py, transport_ws.py, elicitation.py, ACP protocol compliance, or the ACP v1 plan in docs/full-apc-plan.md.
 ---
 
 # python-acp Wire Contract
@@ -176,24 +176,29 @@ elicitation is an MCP server's form-shaped `elicitation/create`, forwarded by
 `docs/acp-compliance-matrix.md` carries the reasoning; do not "fix" it back into a
 deferred row with a bead on it.
 
-## The deprecated surface
+## There is one surface, and it is ACP
 
-`legacy_ws.py` holds the `{"action": ...}` API **and** the MCP passthrough still carried
-on JSON-RPC (`tools/*`, `prompts/*`, `resources/*`, `ping`,
-`notifications/initialized`). `transport_ws.py` intercepts both in `receive()` before the
-SDK sees them; stdio never had either.
+`pyacp-sld.3` deleted `legacy_ws.py`: the `{"action": ...}` API, its `{"ok": bool}`
+envelope, and the MCP passthrough that rode the same socket (`tools/*`, `prompts/*`,
+`resources/*`, `ping`, `notifications/initialized`) are all gone, and `transport_ws.py`
+no longer intercepts anything before the SDK. Both transports carry the same one protocol.
 
-Decision **D4** keeps it working through the migration; **Phase 7** removes it
-(`pyacp-sld.3`), after Phase 8 proves parity. **Add nothing to it.** `LEGACY_METHODS` is a
-closed set that only shrinks.
+**Do not reintroduce any of it, under any name.** `pyacp-sld.2` specifically declined to
+move the passthrough onto `ext_method` under a prefix: those are MCP methods on an ACP
+wire, they addressed a process-wide server that no longer exists, and the ACP path is
+`session/new` + `session/prompt`. `ext_method` answers `-32601` by decision.
 
-`initialize` is deliberately **not** in it: that is ACP, the agent serves it, and a
-WebSocket client gets the same negotiated answer a stdio client gets.
+Two capabilities went with it and have no ACP replacement: reading an MCP **prompt** or
+**resource** through this bridge. ACP's model is that the agent uses those internally, not
+that a client reaches through it to the server. A request to "add resources/read back" is
+a request to reopen that decision, not a gap to fill.
 
-Framing errors are the transport's, because the SDK's `Transport` moves already-decoded
-dicts: malformed JSON is `-32700` and a non-object payload is `-32600`, both answered in
-`transport_ws.py`. The `{"ok": false}` envelope has no code field, so a mapped error is
-flattened back to its message for that shape only.
+`--mcp-command` went too (`pyacp-sld.4`), because the deprecated surface was its only
+consumer. Every MCP server is named by a client in `session/new`.
+
+Framing errors are still the transport's, because the SDK's `Transport` moves
+already-decoded dicts: malformed JSON is `-32700` and a non-object payload is `-32600`,
+both answered in `transport_ws.py`. Those are now the *only* two things answered there.
 
 ## Two SDK behaviours that will surprise you
 

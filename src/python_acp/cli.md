@@ -3,35 +3,40 @@
 ## Purpose
 
 `cli.py` is the process entrypoint. It parses startup arguments, initializes logging,
-starts the MCP backend connection, and hands the process to the selected client-facing
-transport. It owns no protocol logic of its own.
+builds the three process-wide registries, and hands the process to the selected
+client-facing transport. It owns no protocol logic of its own.
+
+**It starts no MCP server.** Every backend this process talks to is named by a client in
+`session/new` and lives and dies with its session.
 
 ## Key Responsibilities
 
 - Define command-line interface options, including `--transport`.
 - Configure runtime logging (`INFO` or `DEBUG`) **onto stderr**.
-- Start the MCP initialization handshake.
+- Construct the session, MCP-backend, and terminal registries, and wire `on_close`.
 - Start and hold whichever transport was selected.
 
 ## Main Symbols
 
-- `build_parser()`: defines `--mcp-command`, `--transport`, `--host`, `--port`, `--debug`.
+- `build_parser()`: defines `--transport`, `--host`, `--port`, `--debug`.
 - `configure_logging(debug)`: installs the root handler on `sys.stderr`.
 - `_run(args)`: async runtime bootstrap and service startup sequence.
 - `run()`: sync wrapper that parses args and runs `_run()` with `asyncio.run`.
 
 ## Transports
 
-`--transport` selects the client-facing wire. The MCP backend is unaffected by it —
-`--mcp-command` means the same thing either way.
+`--transport` selects the client-facing wire. Both serve the **same** agent: the same
+`initialize` negotiation, the same capability block, the same error codes.
 
 | Value | What it does | Notes |
 |---|---|---|
-| `ws` *(default)* | Binds `WebSocketAgentServer` on `--host`/`--port` | Serves the same agent as `stdio`, plus the deprecated surface in [legacy_ws.py](legacy_ws.md) (D4), which is why it stays the default for now. |
+| `ws` *(default)* | Binds `WebSocketAgentServer` on `--host`/`--port` | Stays the default because it is what existing deployments bind. Since `pyacp-sld.3` it carries nothing `stdio` does not. |
 | `stdio` | Serves ACP on this process's own stdin/stdout via [transport_stdio.py](transport_stdio.md) | How an editor spawns an agent (D2). `--host` and `--port` are ignored. |
 
-**The default flips to `stdio` when the action surface is removed** (`pyacp-sld.3`).
-Changing it earlier would break every existing WebSocket invocation for no gain.
+The default was to flip to `stdio` when the action surface went. It has not, and the
+reason is now inertia rather than capability: flipping it would break every existing
+WebSocket invocation for no gain, since the two are the same agent. Filed as its own
+decision rather than done silently here.
 
 ## stdout is reserved under `--transport stdio`
 
@@ -42,16 +47,6 @@ mode is what stops a banner from creeping back in later. `configure_logging` nam
 reason. `transport_stdio.py` adds a structural backstop on top of this discipline — see
 its docs.
 
-## The MCP backend starts in both modes
-
-`_run` starts and handshakes `MCPStdioClient` before selecting a transport, so a bad
-`--mcp-command` fails at startup rather than mid-session, and the flag means the same
-thing in both modes.
-
-Under `--transport stdio` **the agent cannot reach that client yet.** `PythonAcpAgent`
-holds no backend; per-session MCP backends are the Phase 2 registry (`pyacp-3rw.3`,
-`pyacp-db3`). Until then the handshake is a startup validation, not a wiring.
-
 ## Startup Flow
 
 ```mermaid
@@ -59,11 +54,8 @@ flowchart TD
     Start["process start"] --> Parse["build_parser + parse_args"]
     Parse --> AsyncRun["asyncio.run(_run)"]
     AsyncRun --> Log["configure_logging → stderr"]
-    Log --> MCPStart["start MCPStdioClient context"]
-    MCPStart --> Init["initialize MCP handshake"]
-    Init --> Version{"protocol version agreed?"}
-    Version -- no --> Abort["MCPProtocolError; MCP process stopped"]
-    Version -- yes --> Pick{"--transport"}
+    Log --> Registries["build sessions + backends + terminals, wire on_close"]
+    Registries --> Pick{"--transport"}
     Pick -- stdio --> Stdio["run_stdio(PythonAcpAgent())"]
     Pick -- ws --> BridgeStart["start WebSocketAgentServer"]
     BridgeStart --> Serve["serve_forever"]
@@ -74,11 +66,11 @@ flowchart TD
 ## Error and Shutdown Behavior
 
 - `KeyboardInterrupt` is caught in `run()` to allow clean interactive shutdown.
-- MCP process lifecycle is managed by `MCPStdioClient` context manager (`__aenter__` /
-  `__aexit__`), so the backend is torn down on either transport's exit.
-- A protocol-version mismatch during the handshake aborts startup: `initialize()` stops
-  the MCP subprocess and raises `MCPProtocolError`, so no transport is ever bound. See
-  [mcp_stdio.py docs](mcp_stdio.md).
+- MCP subprocesses belong to sessions, so they are torn down by `on_close` below and by
+  `sessions.close_all()` on the way out — not by anything this module holds directly.
+- A backend that cannot handshake fails its `session/new` with an error the client can
+  act on, rather than failing this process at startup. See
+  [mcp_registry.py docs](mcp_registry.md).
 - Under `--transport stdio`, the client closing the pipe ends `run_stdio` and the
   process exits normally.
 
@@ -116,15 +108,18 @@ transport does have one, and it forgets rather than releases — see
 See [sessions.py](sessions.md), [mcp_registry.py](mcp_registry.md),
 [terminals.py](terminals.md), and [transport_ws.py](transport_ws.md).
 
-## `--mcp-command` is optional
+## There is no `--mcp-command`, and that is the end of a two-step
 
-It starts a **process-wide** MCP server, handshaked before any listener binds so a bad
-command fails at startup rather than mid-session. Since `pyacp-db3` it is not required:
-ACP sessions carry their own servers in `session/new`, and that is what the agent uses.
+It started a **process-wide** MCP server, handshaked before any listener bound. `pyacp-db3`
+made it optional once ACP sessions carried their own servers in `session/new`; from then
+on its only consumer was the deprecated action surface, which predated sessions and had
+nowhere else to look. `pyacp-sld.3` deleted that surface and `pyacp-sld.4` deleted the
+flag with it.
 
-What still needs it is the deprecated action surface in [legacy_ws.py](legacy_ws.md),
-which predates sessions and has nowhere else to look. Without it, ACP works and the
-deprecated surface answers an error naming both ways out.
+The flag is not merely ignored — it is **rejected**, and
+`test_there_is_no_process_wide_backend_flag` asserts the rejection. A deployment that
+still passes it should fail loudly at startup rather than run while quietly never using
+the server it named.
 
 ## Related
 
@@ -132,5 +127,5 @@ deprecated surface answers an error naming both ways out.
 - [agent.py docs](agent.md)
 - [transport_stdio.py docs](transport_stdio.md)
 - [mcp_stdio.py docs](mcp_stdio.md)
+- [mcp_registry.py docs](mcp_registry.md)
 - [transport_ws.py docs](transport_ws.md)
-- [legacy_ws.py docs](legacy_ws.md)

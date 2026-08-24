@@ -61,7 +61,6 @@ from typing import Any
 import pytest
 from acp import PROTOCOL_VERSION
 
-from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.transport_ws import serve_websocket
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
@@ -150,15 +149,13 @@ class RecordingSocket:
 
 @contextlib.asynccontextmanager
 async def recording_socket() -> AsyncIterator[RecordingSocket]:
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        socket = RecordingSocket()
-        connection = asyncio.create_task(serve_websocket(socket, mcp_client))
-        try:
-            yield socket
-        finally:
-            socket.hang_up()
-            await asyncio.wait_for(connection, timeout=TIMEOUT)
+    socket = RecordingSocket()
+    connection = asyncio.create_task(serve_websocket(socket))
+    try:
+        yield socket
+    finally:
+        socket.hang_up()
+        await asyncio.wait_for(connection, timeout=TIMEOUT)
 
 
 # ---------------------------------------------------------------------------

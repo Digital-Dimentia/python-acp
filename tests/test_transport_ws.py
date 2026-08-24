@@ -1,4 +1,4 @@
-"""Tests for the WebSocket binding and the deprecated surface it shelters.
+"""Tests for the WebSocket binding.
 
 Most tests here drive a **fake socket** rather than a listening port. That is not only to
 dodge the sandbox's `bind()` denial: the thing under test is the message path from a frame
@@ -38,13 +38,6 @@ from websockets.protocol import State
 
 from python_acp import __version__
 from python_acp.capabilities import build_agent_capabilities
-from python_acp.legacy_ws import (
-    ACTION_REPLACEMENTS,
-    LEGACY_METHODS,
-    REMOVED_IN,
-    is_legacy,
-)
-from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
@@ -118,16 +111,63 @@ class FakeWebSocket:
 
 @contextlib.asynccontextmanager
 async def bound_socket() -> AsyncIterator[FakeWebSocket]:
-    """A fake socket bound to a live agent over a real MCP backend."""
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        websocket = FakeWebSocket()
-        connection = asyncio.create_task(serve_websocket(websocket, mcp_client))
-        try:
-            yield websocket
-        finally:
-            websocket.hang_up()
-            await asyncio.wait_for(connection, timeout=TIMEOUT)
+    """A fake socket bound to a live agent.
+
+    No MCP backend is passed in, because there is nowhere to pass one: `pyacp-sld.3`
+    removed the surface that used a process-wide server, and a session's servers arrive
+    in `session/new`. A test that needs a backend opens a session naming `FIXTURE_SERVER`
+    — see `open_session`.
+    """
+    websocket = FakeWebSocket()
+    connection = asyncio.create_task(serve_websocket(websocket))
+    try:
+        yield websocket
+    finally:
+        websocket.hang_up()
+        await asyncio.wait_for(connection, timeout=TIMEOUT)
+
+
+#: One MCP server spec, as `session/new` carries it. `env` is not optional on the wire:
+#: the SDK drops an entry that omits it (`pyacp-mej`).
+FIXTURE_SPEC = {
+    "name": "tools",
+    "command": sys.executable,
+    "args": [str(FIXTURE_SERVER)],
+    "env": [],
+}
+
+
+async def open_session(websocket: FakeWebSocket, request_id: int = 900) -> str:
+    """`initialize` + `session/new` + `auto-approve`, returning the session id.
+
+    The only way to reach a backend now, and therefore the preamble to every test about
+    what a backend failure looks like on the wire.
+
+    The mode matters: in the default `execute` mode the turn sends
+    `session/request_permission` and waits, and `FakeWebSocket` is a script rather than a
+    client — nobody would ever answer, so the turn would hang instead of failing.
+    `auto-approve` is the session saying the consent was given up front, which is exactly
+    what a test that is about *error codes* wants.
+    """
+    await websocket.ask(
+        {"jsonrpc": "2.0", "id": request_id, "method": "initialize",
+         "params": {"protocolVersion": PROTOCOL_VERSION}}
+    )
+    created = await websocket.ask(
+        {"jsonrpc": "2.0", "id": request_id + 1, "method": "session/new",
+         "params": {"cwd": "/work", "mcpServers": [FIXTURE_SPEC]}}
+    )
+    session_id = created["result"]["sessionId"]
+    await websocket.ask(
+        {"jsonrpc": "2.0", "id": request_id + 2, "method": "session/set_mode",
+         "params": {"sessionId": session_id, "modeId": "auto-approve"}}
+    )
+    return session_id
+
+
+def invocation(**payload: Any) -> dict[str, Any]:
+    """One prompt block in the tool-router's invocation convention."""
+    return {"type": "text", "text": json.dumps(payload)}
 
 
 # ---------------------------------------------------------------------------
@@ -208,33 +248,27 @@ async def test_sessions_outlive_the_connection_that_created_them() -> None:
     A per-connection registry would make `session/resume` meaningless, and the failure
     would look like a stale id rather than a design mistake.
     """
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        sessions = SessionRegistry()
+    sessions = SessionRegistry()
 
-        first = FakeWebSocket()
-        first_connection = asyncio.create_task(
-            serve_websocket(first, mcp_client, sessions=sessions)
-        )
-        created = await first.ask(
-            {"jsonrpc": "2.0", "id": 1, "method": "session/new",
-             "params": {"cwd": "/tmp", "mcpServers": []}}
-        )
-        first.hang_up()
-        await asyncio.wait_for(first_connection, timeout=TIMEOUT)
+    first = FakeWebSocket()
+    first_connection = asyncio.create_task(serve_websocket(first, sessions=sessions))
+    created = await first.ask(
+        {"jsonrpc": "2.0", "id": 1, "method": "session/new",
+         "params": {"cwd": "/tmp", "mcpServers": []}}
+    )
+    first.hang_up()
+    await asyncio.wait_for(first_connection, timeout=TIMEOUT)
 
-        second = FakeWebSocket()
-        second_connection = asyncio.create_task(
-            serve_websocket(second, mcp_client, sessions=sessions)
+    second = FakeWebSocket()
+    second_connection = asyncio.create_task(serve_websocket(second, sessions=sessions))
+    try:
+        prompted = await second.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+             "params": {"sessionId": created["result"]["sessionId"], "prompt": []}}
         )
-        try:
-            prompted = await second.ask(
-                {"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
-                 "params": {"sessionId": created["result"]["sessionId"], "prompt": []}}
-            )
-        finally:
-            second.hang_up()
-            await asyncio.wait_for(second_connection, timeout=TIMEOUT)
+    finally:
+        second.hang_up()
+        await asyncio.wait_for(second_connection, timeout=TIMEOUT)
 
     assert prompted["result"]["stopReason"] == "refusal"
 
@@ -266,30 +300,26 @@ async def test_unstable_methods_are_reachable_over_websocket() -> None:
 
 async def test_each_connection_gets_its_own_agent() -> None:
     """`on_connect` stores *the* client handle, so a shared agent would cross the wires."""
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        first, second = FakeWebSocket(), FakeWebSocket()
-        tasks = [
-            asyncio.create_task(serve_websocket(ws, mcp_client)) for ws in (first, second)
-        ]
-        try:
-            await first.ask(
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                 "params": {"protocolVersion": PROTOCOL_VERSION,
-                            "clientCapabilities": {"terminal": True}}}
-            )
-            await second.ask(
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                 "params": {"protocolVersion": PROTOCOL_VERSION}}
-            )
-            # Each connection answered its own initialize; a shared agent would have let
-            # the second overwrite the first's stored client handle.
-            assert first.sent[0]["id"] == second.sent[0]["id"] == 1
-            assert len(first.sent) == len(second.sent) == 1
-        finally:
-            for ws in (first, second):
-                ws.hang_up()
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=TIMEOUT)
+    first, second = FakeWebSocket(), FakeWebSocket()
+    tasks = [asyncio.create_task(serve_websocket(ws)) for ws in (first, second)]
+    try:
+        await first.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION,
+                        "clientCapabilities": {"terminal": True}}}
+        )
+        await second.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+        # Each connection answered its own initialize; a shared agent would have let
+        # the second overwrite the first's stored client handle.
+        assert first.sent[0]["id"] == second.sent[0]["id"] == 1
+        assert len(first.sent) == len(second.sent) == 1
+    finally:
+        for ws in (first, second):
+            ws.hang_up()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -367,109 +397,36 @@ async def test_the_transport_closes_the_socket_when_the_connection_ends() -> Non
 
 def test_the_transport_has_the_three_methods_the_sdk_calls() -> None:
     """Structural conformance is the whole contract; a missing method is a runtime error."""
-    transport = WebSocketMessageTransport(FakeWebSocket(), object())  # type: ignore[arg-type]
+    transport = WebSocketMessageTransport(FakeWebSocket())  # type: ignore[arg-type]
 
     assert all(callable(getattr(transport, name, None)) for name in ("send", "receive", "close"))
 
 
 # ---------------------------------------------------------------------------
-# The deprecated surface, intercepted before the SDK (legacy_ws.py)
+# Failure fidelity, now through the only path there is (pyacp-k5w, pyacp-tzd.6)
 # ---------------------------------------------------------------------------
-
-
-def test_only_non_acp_methods_are_claimed_as_legacy() -> None:
-    """Claiming an ACP method would shadow the agent; this is the guard on that set."""
-    assert is_legacy({"action": "list_tools"})
-    assert is_legacy({"method": "tools/call"})
-    assert not is_legacy({"method": "initialize"})
-    assert not is_legacy({"method": "session/new"})
-    assert "initialize" not in LEGACY_METHODS
-
-
-async def test_the_action_surface_still_serves_every_mcp_primitive() -> None:
-    async with bound_socket() as websocket:
-        tools = await websocket.ask({"action": "list_tools"})
-        called = await websocket.ask(
-            {"action": "call_tool", "name": "echo", "arguments": {"text": "from-ws"}}
-        )
-        prompts = await websocket.ask({"action": "list_prompts"})
-        prompt = await websocket.ask(
-            {"action": "get_prompt", "name": "greeting", "arguments": {"name": "Milo"}}
-        )
-        resources = await websocket.ask({"action": "list_resources"})
-        resource = await websocket.ask(
-            {"action": "read_resource", "name": "greeting://{name}", "arguments": {"name": "Nia"}}
-        )
-        missing = await websocket.ask({"action": "call_tool", "name": "missing"})
-
-    assert tools["ok"] is True and tools["tools"][0]["name"] == "echo"
-    assert called["ok"] is True and called["result"]["content"][0]["text"] == "from-ws"
-    assert prompts["ok"] is True and prompts["prompts"][0]["name"] == "greeting"
-    assert prompt["result"]["messages"][0]["content"]["text"] == "Hello, Milo!"
-    assert resources["ok"] is True and resources["resources"][0]["name"] == "greeting-resource"
-    assert resource["result"]["contents"][0]["text"] == "Hello, Nia!"
-    assert missing["ok"] is False
-
-
-async def test_the_mcp_passthrough_survives_the_rebind() -> None:
-    """`tools/list` is not ACP and the agent has no member for it.
-
-    Left to the SDK it would answer -32601, deleting a working surface in the release
-    that rebound the socket. D4 keeps the legacy API alive *through* the migration, so
-    `legacy_ws.py` carries it until `pyacp-sld.2` renames it onto `ext_method`.
-    """
-    async with bound_socket() as websocket:
-        listed = await websocket.ask({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        called = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-             "params": {"name": "echo", "arguments": {"text": "hi"}}}
-        )
-        pong = await websocket.ask({"jsonrpc": "2.0", "id": 3, "method": "ping"})
-
-    assert listed["result"]["tools"][0]["name"] == "echo"
-    assert called["result"]["content"][0]["text"] == "hi"
-    assert pong["result"] == {"pong": True}
-
-
-async def test_a_legacy_action_failure_keeps_the_ok_false_envelope() -> None:
-    """The action surface has no code field; a mapped error flattens back to its message."""
-    async with bound_socket() as websocket:
-        reply = await websocket.ask({"action": "no_such_action"})
-
-    assert reply["ok"] is False
-    assert "no_such_action" in reply["error"]
-
-
-async def test_a_failed_tool_is_not_ok_but_still_carries_its_result() -> None:
-    async with bound_socket() as websocket:
-        failed = await websocket.ask(
-            {"action": "call_tool", "name": "boom", "arguments": {}}
-        )
-        succeeded = await websocket.ask(
-            {"action": "call_tool", "name": "echo", "arguments": {"text": "fine"}}
-        )
-
-    assert failed["ok"] is False
-    assert failed["result"]["isError"] is True
-    assert failed["error"] == failed["result"]["content"][0]["text"]
-    assert succeeded["ok"] is True
-
-
-# ---------------------------------------------------------------------------
-# Failure fidelity across the rebind (pyacp-k5w, pyacp-tzd.6)
-# ---------------------------------------------------------------------------
+#
+# These used to drive the MCP passthrough — `{"method": "tools/call"}` straight at a
+# process-wide backend — because that reached a real MCP server in one hop.
+# `pyacp-sld.3` removed it, so they go through `session/new` + `session/prompt` instead.
+# The claim under test is unchanged and is the one that matters: a backend's own
+# JSON-RPC error code survives all the way to the client's wire, tagged `source: "mcp"`
+# so it stays distinguishable from a code this bridge produced. `tests/test_errors.py`
+# proves the mapping in isolation; only these prove it end to end over a socket.
 
 
 async def test_distinct_mcp_error_codes_stay_distinguishable() -> None:
     async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
         not_found = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-             "params": {"name": "rpc-error",
-                        "arguments": {"code": -32601, "message": "no such tool"}}}
+            {"jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": [invocation(
+                 tool="rpc-error", arguments={"code": -32601, "message": "no such tool"})]}}
         )
         bad_params = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-             "params": {"name": "rpc-error", "arguments": {"code": -32602, "message": "bad args"}}}
+            {"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": [invocation(
+                 tool="rpc-error", arguments={"code": -32602, "message": "bad args"})]}}
         )
 
     assert not_found["error"]["code"] == -32601
@@ -480,10 +437,11 @@ async def test_distinct_mcp_error_codes_stay_distinguishable() -> None:
 
 async def test_mcp_error_data_is_forwarded() -> None:
     async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-             "params": {"name": "rpc-error",
-                        "arguments": {"code": -32000, "data": {"retryAfter": 5}}}}
+            {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": [invocation(
+                 tool="rpc-error", arguments={"code": -32000, "data": {"retryAfter": 5}})]}}
         )
 
     assert reply["error"]["code"] == -32000
@@ -493,35 +451,39 @@ async def test_mcp_error_data_is_forwarded() -> None:
 async def test_a_codeless_backend_failure_never_claims_the_backend_produced_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failure *we* raised must never carry `source: "mcp"`. Not usually: never."""
     monkeypatch.setenv("MOCK_MCP_LIST_STUCK", "1")
     async with bound_socket() as websocket:
-        reply = await websocket.ask({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        session_id = await open_session(websocket)
+        # The turn's `available_commands` walks `tools/list`, which this fixture keeps
+        # handing the same cursor. The bridge gives up with a code of its own.
+        reply = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": [invocation(tool="echo")]}}
+        )
 
     assert reply["error"]["code"] == -32603
     assert "source" not in reply["error"].get("data", {})
 
 
 async def test_a_tool_error_is_a_successful_result_not_a_transport_error() -> None:
+    """`isError` is the tool failing, not the call. The turn still ends normally."""
     async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
         reply = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-             "params": {"name": "boom", "arguments": {}}}
+            {"jsonrpc": "2.0", "id": 5, "method": "session/prompt",
+             "params": {"sessionId": session_id, "prompt": [invocation(tool="boom")]}}
         )
 
     assert "error" not in reply
-    assert reply["result"]["isError"] is True
-
-
-async def test_a_legacy_backend_error_keeps_the_code_in_its_message() -> None:
-    """The `{"ok": false}` envelope has nowhere else to put it."""
-    async with bound_socket() as websocket:
-        reply = await websocket.ask(
-            {"action": "call_tool", "name": "rpc-error",
-             "arguments": {"code": -32601, "message": "no such tool"}}
-        )
-
-    assert reply["ok"] is False
-    assert "-32601" in reply["error"]
+    assert reply["result"]["stopReason"] == "end_turn"
+    # The failure is in the tool call's own update, where a client can read what failed.
+    failed = [
+        m for m in websocket.sent
+        if m.get("method") == "session/update"
+        and m["params"]["update"].get("status") == "failed"
+    ]
+    assert failed, "the failed tool call should have been streamed"
 
 
 async def test_requests_and_responses_are_logged_at_debug(
@@ -529,7 +491,10 @@ async def test_requests_and_responses_are_logged_at_debug(
 ) -> None:
     with caplog.at_level(logging.DEBUG, logger="python_acp.transport_ws"):
         async with bound_socket() as websocket:
-            await websocket.ask({"action": "list_tools"})
+            await websocket.ask(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": PROTOCOL_VERSION}}
+            )
 
     logged = "\n".join(record.message for record in caplog.records)
     assert "WebSocket request received" in logged
@@ -541,19 +506,17 @@ async def test_the_server_binds_each_accepted_socket_to_an_agent() -> None:
     fake socket reaches. The real handshake, real frames, and `start()`/`stop()` are
     covered without a listening port under "The real WebSocket" below (`pyacp-22w`).
     """
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        server = WebSocketAgentServer(mcp_client)
-        websocket = FakeWebSocket()
-        connection = asyncio.create_task(server._handle_client(websocket))
-        try:
-            reply = await websocket.ask(
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                 "params": {"protocolVersion": PROTOCOL_VERSION}}
-            )
-        finally:
-            websocket.hang_up()
-            await asyncio.wait_for(connection, timeout=TIMEOUT)
+    server = WebSocketAgentServer()
+    websocket = FakeWebSocket()
+    connection = asyncio.create_task(server._handle_client(websocket))
+    try:
+        reply = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+    finally:
+        websocket.hang_up()
+        await asyncio.wait_for(connection, timeout=TIMEOUT)
 
     assert reply["result"]["protocolVersion"] == PROTOCOL_VERSION
     assert websocket.closed is True
@@ -573,161 +536,21 @@ async def test_a_disconnect_hands_the_departed_client_to_the_terminal_registry()
             forgotten.append(client)
             return super().forget_client(client)
 
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        terminals = Watching()
-        websocket = FakeWebSocket()
-        connection = asyncio.create_task(
-            serve_websocket(websocket, mcp_client, terminals=terminals)
-        )
-        await websocket.ask(
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-             "params": {"protocolVersion": PROTOCOL_VERSION,
-                        "clientCapabilities": {"terminal": True}}}
-        )
-        websocket.hang_up()
-        await asyncio.wait_for(connection, timeout=TIMEOUT)
+    terminals = Watching()
+    websocket = FakeWebSocket()
+    connection = asyncio.create_task(serve_websocket(websocket, terminals=terminals))
+    await websocket.ask(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": PROTOCOL_VERSION,
+                    "clientCapabilities": {"terminal": True}}}
+    )
+    websocket.hang_up()
+    await asyncio.wait_for(connection, timeout=TIMEOUT)
 
     assert len(forgotten) == 1
     # The facade the SDK built for that socket, not None: `on_connect` ran.
     assert forgotten[0] is not None
     assert hasattr(forgotten[0], "create_terminal")
-
-
-# ---------------------------------------------------------------------------
-# Deprecation of the action surface (pyacp-sld.1). D4 keeps it working; every
-# use now says so, on a channel the client can actually read.
-# ---------------------------------------------------------------------------
-
-
-async def test_every_action_reply_names_its_replacement_and_the_removal() -> None:
-    """The notice is per *call*, because that is the signal a client can act on."""
-    requests = {
-        "list_tools": {"action": "list_tools"},
-        "call_tool": {"action": "call_tool", "name": "echo", "arguments": {"text": "hi"}},
-        "list_prompts": {"action": "list_prompts"},
-        "get_prompt": {"action": "get_prompt", "name": "greeting", "arguments": {"name": "A"}},
-        "list_resources": {"action": "list_resources"},
-        "read_resource": {"action": "read_resource", "name": "greeting://x"},
-        "ping": {"action": "ping"},
-    }
-    assert set(requests) == set(ACTION_REPLACEMENTS), "an action grew or vanished"
-
-    async with bound_socket() as websocket:
-        replies = {name: await websocket.ask(body) for name, body in requests.items()}
-
-    for name, reply in replies.items():
-        expected = {"action": name, "removedIn": REMOVED_IN}
-        # `use` is present only where an ACP path exists. `pyacp-sld.2` decided the MCP
-        # passthrough dies with this surface rather than moving to `ext_method`, so
-        # prompts, resources, and ping have nothing honest to point at — and an absent
-        # `use` says that, rather than naming a target that dies in the same release.
-        if ACTION_REPLACEMENTS[name] is not None:
-            expected["use"] = ACTION_REPLACEMENTS[name]
-        assert reply["deprecated"] == expected, name
-
-    assert [n for n, r in ACTION_REPLACEMENTS.items() if r is not None] == [
-        "list_tools",
-        "call_tool",
-    ]
-
-
-async def test_the_deprecation_notice_does_not_disturb_the_envelope() -> None:
-    """D4 promises the surface keeps *working*; everything but the new key is untouched."""
-    async with bound_socket() as websocket:
-        tools = await websocket.ask({"action": "list_tools"})
-        called = await websocket.ask(
-            {"action": "call_tool", "name": "echo", "arguments": {"text": "from-ws"}}
-        )
-
-    assert tools["ok"] is True and tools["tools"][0]["name"] == "echo"
-    assert called["ok"] is True and called["result"]["content"][0]["text"] == "from-ws"
-    assert set(tools) == {"ok", "tools", "deprecated"}
-    assert set(called) == {"ok", "result", "deprecated"}
-
-
-async def test_a_failed_action_carries_the_notice_too() -> None:
-    """A client whose call failed is no less on a surface that is going away."""
-    async with bound_socket() as websocket:
-        unsupported = await websocket.ask({"action": "no_such_action"})
-        failed_tool = await websocket.ask({"action": "call_tool", "name": "boom"})
-
-    # An unsupported action still earns the notice, but there is no honest migration
-    # target to name for a method that never existed.
-    assert unsupported["ok"] is False
-    assert "no_such_action" in unsupported["error"]
-    assert unsupported["deprecated"] == {
-        "action": "no_such_action",
-        "removedIn": REMOVED_IN,
-    }
-
-    # A failed *tool* is a normal reply, not an error envelope, and keeps both.
-    assert failed_tool["ok"] is False
-    assert failed_tool["result"]["isError"] is True
-    assert failed_tool["deprecated"]["use"] == "session/new + session/prompt"
-
-
-async def test_the_json_rpc_passthrough_carries_no_notice() -> None:
-    """`pyacp-sld.1` is scoped to the action surface.
-
-    The passthrough's fate is a *rename* onto `ext_method` (`pyacp-sld.2`), not a
-    removal, so it needs a different message — and injecting one into a JSON-RPC
-    `result` would change a payload clients parse today.
-    """
-    async with bound_socket() as websocket:
-        listed = await websocket.ask({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        called = await websocket.ask(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-             "params": {"name": "echo", "arguments": {"text": "hi"}}}
-        )
-
-    assert "deprecated" not in listed and "deprecated" not in listed["result"]
-    assert "deprecated" not in called and "deprecated" not in called["result"]
-
-
-async def test_the_server_log_warns_once_per_action_not_once_per_call(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The operator's copy is deduped; a client looping on `call_tool` must not bury it."""
-    with caplog.at_level(logging.WARNING, logger="python_acp.legacy_ws"):
-        async with bound_socket() as websocket:
-            for _ in range(3):
-                await websocket.ask({"action": "list_tools"})
-            await websocket.ask({"action": "ping"})
-
-    warnings = [record.getMessage() for record in caplog.records]
-    assert len(warnings) == 2, warnings
-    assert "'list_tools' is deprecated" in warnings[0]
-    assert "use session/new + session/prompt instead" in warnings[0]
-    assert REMOVED_IN in warnings[0]
-    # `ping` is a real action with no ACP counterpart, which the operator's copy says in
-    # so many words: the capability goes away, not just the spelling.
-    assert "'ping' is deprecated" in warnings[1]
-    assert "no ACP replacement" in warnings[1]
-
-
-async def test_an_unsupported_action_warns_without_naming_a_replacement(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.WARNING, logger="python_acp.legacy_ws"):
-        async with bound_socket() as websocket:
-            await websocket.ask({"action": "frobnicate"})
-
-    assert len(caplog.records) == 1
-    message = caplog.records[0].getMessage()
-    assert "action surface is deprecated" in message
-    assert REMOVED_IN in message
-    assert "'frobnicate' is not one of its actions" in message
-
-
-def test_the_notice_is_a_fresh_dict_each_time() -> None:
-    """It ends up inside a reply the caller owns and may mutate."""
-    from python_acp.legacy_ws import deprecation_notice
-
-    first = deprecation_notice("list_tools")
-    first["use"] = "smuggled"
-
-    assert deprecation_notice("list_tools")["use"] == "session/new + session/prompt"
 
 
 # ---------------------------------------------------------------------------
@@ -818,7 +641,7 @@ async def test_the_real_opening_handshake_completes() -> None:
     `websockets.connect` raises unless the server answers `101 Switching Protocols` with
     a correct `Sec-WebSocket-Accept`, so reaching OPEN is the assertion.
     """
-    async with listening_server(mcp_client=None) as (_server, accepting):
+    async with listening_server() as (_server, accepting):
         connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
         try:
             assert connection.protocol.state is State.OPEN
@@ -829,7 +652,7 @@ async def test_the_real_opening_handshake_completes() -> None:
 
 async def test_a_real_frame_round_trips_through_the_agent() -> None:
     """Text frames, encoded and decoded by `websockets`, not handed over as dicts."""
-    async with listening_server(mcp_client=None) as (_server, accepting):
+    async with listening_server() as (_server, accepting):
         connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
         try:
             await connection.send(
@@ -856,7 +679,7 @@ async def test_the_server_accepts_a_message_far_larger_than_the_websockets_defau
     read. Nothing but a real frame codec can prove the override reached `serve()`.
     """
     padding = "x" * (2 * 1024 * 1024)  # 2 MiB: over the default, under our 50 MiB cap.
-    async with listening_server(mcp_client=None) as (_server, accepting):
+    async with listening_server() as (_server, accepting):
         connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
         try:
             await connection.send(
@@ -874,7 +697,7 @@ async def test_the_server_accepts_a_message_far_larger_than_the_websockets_defau
 
 async def test_two_clients_are_served_at_once_each_with_its_own_agent() -> None:
     """One session registry, two connections: `on_connect` must not cross the wires."""
-    async with listening_server(mcp_client=None) as (_server, accepting):
+    async with listening_server() as (_server, accepting):
         first = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
         second = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
         try:
@@ -904,7 +727,7 @@ async def test_start_is_idempotent_and_stop_leaves_the_server_restartable() -> N
     socket — `test_the_server_binds_each_accepted_socket_to_an_agent` enters at
     `_handle_client`, below both of them.
     """
-    async with listening_server(mcp_client=None) as (server, _accepting):
+    async with listening_server() as (server, _accepting):
         assert server._server is not None
         already = server._server
         await server.start()

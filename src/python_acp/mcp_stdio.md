@@ -32,8 +32,9 @@ rather than only while one of our requests is in flight.
 - `MCPProtocolError.from_error_response()`: builds one from a JSON-RPC `error` member.
 - `MCPStdioClient.call_tool()`: invokes a tool; validates the result shape and
   normalizes the optional `isError` flag.
-- `tool_result_text()`: flattens a tool result's text blocks into one string, for
-  callers whose envelope has no room for structured content.
+- `tool_result_text()`: flattens a tool result's text blocks into one string. No
+  caller in `src/` since `pyacp-sld.3` removed the `{"ok": false}` envelope it served;
+  kept as a public utility and used by the tests.
 - `MCPStdioClient.start()` / `stop()`: subprocess and background task lifecycle.
 - `MCPStdioClient._shutdown_process()`: the close-stdin / SIGTERM / SIGKILL escalation.
 - `MCPStdioClient.initialize()`: sends MCP `initialize`, checks the version the

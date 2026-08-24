@@ -681,7 +681,7 @@ class PythonAcpAgent:
         passthrough addresses the process-wide `--mcp-command` server — the arrangement
         ACP v1 inverted — so it is deleted with the rest of the deprecated surface rather
         than carried onto the ACP one. Keeping this empty is the decision, not an
-        omission. See `legacy_ws.md`.
+        omission. `docs/acp-compliance-matrix.md` row 13 carries the reasoning.
         """
         raise RequestError.method_not_found(f"_{method}")
 

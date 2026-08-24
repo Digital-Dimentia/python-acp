@@ -12,7 +12,8 @@ sit near each other in this directory and mean opposite directions.
 > named the thing this project is ceasing to be — an MCP passthrough. What survived is
 > the server lifecycle; dispatch went to the SDK router, error codes to
 > [errors.py](errors.md), the capability block to [capabilities.py](capabilities.md), and
-> the deprecated surface to [legacy_ws.py](legacy_ws.md).
+> the deprecated surface to `legacy_ws.py` — which `pyacp-sld.3` has since deleted
+> outright, along with the passthrough that gave the old name its meaning.
 
 ## Not `acp.ws.server` (decision B4)
 
@@ -43,12 +44,9 @@ flowchart TD
     Frame["WebSocket frame"] --> Decode["_decode: json.loads"]
     Decode -- "not JSON" --> Parse["-32700 Parse error"]
     Decode -- "not an object" --> Invalid["-32600 Invalid request"]
-    Decode -- "dict" --> Legacy{"is_legacy?"}
-    Legacy -- "yes: action, or a non-ACP method" --> Handler["legacy_ws.LegacyActionHandler"]
-    Legacy -- "no" --> SDK["acp.run_agent + agent router"]
+    Decode -- "dict" --> SDK["acp.run_agent + agent router"]
     SDK --> Agent["agent.py PythonAcpAgent"]
-    Handler --> Send["transport.send"]
-    SDK --> Send
+    SDK --> Send["transport.send"]
     Parse --> Send
     Invalid --> Send
 ```
@@ -57,14 +55,15 @@ flowchart TD
 `dict`s, so everything below JSON — malformed text, a non-object payload — has no way to
 travel upward and must be answered here. Everything above it is the router's.
 
-`receive()` loops rather than returning once per frame, because a legacy request, a parse
-error, and a non-object payload all produce a reply *here* and leave the SDK with nothing
-to dispatch. Only a well-formed message that the deprecated surface does not claim is
-handed up. Returning `None` is EOF, and is how the SDK learns the client hung up.
+`receive()` loops rather than returning once per frame, because a parse error and a
+non-object payload both produce a reply *here* and leave the SDK with nothing to
+dispatch. Every well-formed message is handed up. Returning `None` is EOF, and is how the
+SDK learns the client hung up.
 
-Legacy requests are served inline, so a slow backend call delays the next read **on that
-socket**. The previous implementation behaved the same way, and each socket has its own
-task, so one client cannot stall another.
+**There is no third branch any more.** Until `pyacp-sld.3` this method also intercepted
+the deprecated `{"action": ...}` surface and the MCP passthrough before the SDK saw them;
+both are gone, and with them the only reason a frame could be answered from inside
+`receive` for any reason other than being unusable.
 
 ## One agent per socket, one session registry per process
 
@@ -80,8 +79,11 @@ failure would look like a stale id rather than a design mistake. `cli.py` constr
 one registry and hands it here;
 `test_sessions_outlive_the_connection_that_created_them` is the guard.
 
-The MCP backend *is* shared — one subprocess bound at startup from `--mcp-command` — and
-stays so until the Phase 2 per-session backend registry.
+**No MCP backend is shared, and there is no longer one to share.** A session's servers
+are named by the client in `session/new` and torn down with the session
+([mcp_registry.py](mcp_registry.md)); the process-wide subprocess this module used to
+carry went with `--mcp-command` in `pyacp-sld.4`, its only consumer having been the
+deprecated surface.
 
 ## A disconnect forgets terminals; it releases nothing
 
@@ -107,7 +109,7 @@ different answers depending on how it connected.
 |---|---|
 | `WebSocketMessageTransport` | One socket, shaped as the SDK's message-level `Transport`: `send` / `receive` / `close` |
 | `WebSocketAgentServer` | Server lifecycle — `start()` / `stop()` / `serve_forever()` |
-| `serve_websocket(websocket, mcp_client)` | Bind one already-accepted socket to a fresh agent and run until EOF |
+| `serve_websocket(websocket)` | Bind one already-accepted socket to a fresh agent and run until EOF |
 
 `serve_websocket` is split out from the server so a test — or a caller embedding this in
 its own HTTP server — can exercise the binding without a listening port. Most tests in
@@ -155,8 +157,6 @@ the SDK cannot produce:
 |---|---|
 | Malformed JSON | `-32700 Parse error` |
 | Payload is not an object | `-32600 Invalid request` |
-| A legacy `{"action": ...}` request failed | `{"ok": false, "error": "<message>", "deprecated": {...}}` — that envelope has no code field, and carries the same deprecation notice a successful one does |
-| A legacy JSON-RPC request failed | a real error object, via `to_request_error` |
 
 Everything else — `-32601` for an unimplemented ACP method, `-32602` for params the
 schema rejects, a forwarded MCP code with `data.source == "mcp"` — comes from the SDK and
@@ -174,8 +174,9 @@ validation means adopting it. Pinned by
 
 A tool that fails returns a **successful** result carrying `isError: true`. It is not
 converted into a JSON-RPC error — doing so would hide the content explaining the failure
-and make a broken tool look like an unreachable backend. Both legacy shapes honour that;
-see [legacy_ws.md](legacy_ws.md).
+and make a broken tool look like an unreachable backend. `turn_mcp_router.py` reports it
+as a `tool_call_update` with `status: "failed"` instead, and the turn still ends
+`end_turn`.
 
 ## Logging
 
@@ -186,6 +187,5 @@ connection lifecycle; `--debug` sets the level in `WebSocketAgentServer.__init__
 
 - [Repository architecture](../../ARCHITECTURE.md)
 - [agent.py docs](agent.md) — what the SDK dispatches to
-- [legacy_ws.py docs](legacy_ws.md) — the deprecated surface this shelters
 - [errors.py docs](errors.md), [capabilities.py docs](capabilities.md)
 - [cli.py docs](cli.md), [mcp_stdio.py docs](mcp_stdio.md)

@@ -4,8 +4,9 @@
 executable. The cases derive from one table, `CONFORMANCE`, and three structural tests
 walk the SDK — the `Agent` Protocol, the router's registered routes, and
 `acp.meta.AGENT_METHODS` — so that **a method with no coverage is a failure rather than
-a silence**. That is what the bead asks for, and it is what makes the Phase 7 removal of
-the legacy surface safe to attempt.
+a silence**. That is what the bead asks for, and it is what made the Phase 7 removal of
+the legacy surface safe to carry out (`pyacp-sld.3`): the ACP surface was proven complete
+before the surface it replaced was deleted.
 
 Adding an `Agent` member without adding a row here fails
 `test_the_table_covers_every_agent_protocol_member`. Adding a row for a member that does
@@ -119,8 +120,9 @@ CONFORMANCE: tuple[Case, ...] = (
         "ext_method",
         None,
         "not-a-wire-method",
-        why="Reached as `_<name>`; the router strips the underscore. pyacp-sld.2 puts the "
-        "legacy MCP passthrough here.",
+        why="Reached as `_<name>`; the router strips the underscore. Deliberately empty: "
+        "pyacp-sld.2 declined to put the legacy MCP passthrough here, and pyacp-sld.3 "
+        "deleted it instead.",
     ),
     Case("ext_notification", None, "not-a-wire-method", why="Same mechanism, notification side."),
     Case(

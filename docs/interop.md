@@ -139,8 +139,9 @@ command: /absolute/path/to/.venv/bin/python
 args:    ["-m", "python_acp.cli", "--transport", "stdio"]
 ```
 
-`--mcp-command` is optional; a session brings its own MCP servers through
-`session/new`'s `mcpServers`. Remember that this agent runs tools rather than reading
+There is no backend flag: a session brings its own MCP servers through
+`session/new`'s `mcpServers`, and `--mcp-command` was removed with the deprecated
+surface that was its only consumer (`pyacp-sld.4`). Remember that this agent runs tools rather than reading
 prose, so a prompt has to be a JSON invocation — see the convention in
 [turn_mcp_router.md](../src/python_acp/turn_mcp_router.md).
 

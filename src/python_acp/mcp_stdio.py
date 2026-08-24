@@ -159,9 +159,16 @@ class MCPProtocolError(RuntimeError):
 def tool_result_text(result: dict[str, Any]) -> str:
     """Flatten the text blocks of a `tools/call` result into one string.
 
-    Used to give the legacy `{"ok": false}` envelope, which has no room for
-    structured content, something human-readable to report. The JSON-RPC
-    surface forwards the full content array instead and does not need this.
+    **It has no caller in `src/` any more.** It existed for the legacy
+    `{"ok": false}` envelope, which had no room for structured content and
+    needed something human-readable to report; `pyacp-sld.3` deleted that
+    envelope. Kept as a public utility rather than removed with it: it is a
+    reasonable thing for an MCP client module to offer, the tests use it to
+    read a fixture's replies, and nothing about it was legacy-shaped.
+
+    Every path in `src/` wants the content array itself — `mcp_content.py`
+    maps it onto ACP blocks, and `rawOutput` carries the server's result
+    verbatim — so reach for one of those before reaching for this.
     """
     parts: list[str] = []
     for block in result.get("content", []):

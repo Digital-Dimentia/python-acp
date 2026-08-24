@@ -60,7 +60,6 @@ from typing import Any
 
 import pytest
 
-from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.transport_ws import serve_websocket
 from test_transport_ws import FakeWebSocket
 
@@ -71,15 +70,13 @@ TIMEOUT = 15
 @contextlib.asynccontextmanager
 async def wire() -> AsyncIterator[FakeWebSocket]:
     """A socket bound to a live agent, for driving bad input at it."""
-    async with MCPStdioClient([sys.executable, str(FIXTURE_SERVER)]) as mcp_client:
-        await mcp_client.initialize()
-        websocket = FakeWebSocket()
-        connection = asyncio.create_task(serve_websocket(websocket, mcp_client))
-        try:
-            yield websocket
-        finally:
-            websocket.hang_up()
-            await asyncio.wait_for(connection, timeout=TIMEOUT)
+    websocket = FakeWebSocket()
+    connection = asyncio.create_task(serve_websocket(websocket))
+    try:
+        yield websocket
+    finally:
+        websocket.hang_up()
+        await asyncio.wait_for(connection, timeout=TIMEOUT)
 
 
 async def error_for(request: dict[str, Any]) -> dict[str, Any]:

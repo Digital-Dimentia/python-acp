@@ -38,15 +38,13 @@ outlives the socket that created it — that is what `session/resume` means — 
 per-connection registry would make a reconnecting client's sessions vanish. `cli.py`
 constructs the one registry and hands it here.
 
-The MCP backend is shared too — one subprocess bound at startup — until the Phase 2
-per-session registry.
-
 ## Framing is ours, dispatch is not
 
 The SDK's `Transport` moves already-decoded `dict`s, so everything below JSON — malformed
 text, a non-object payload — is this module's to answer. Everything above it is the
-router's. The deprecated surface is intercepted in between, in `receive`, and never
-reaches the SDK; see `legacy_ws.py` for what "deprecated" covers and why.
+router's. There is nothing in between any more: `pyacp-sld.3` removed the deprecated
+surface this module used to intercept before the SDK saw it, so `receive` now hands up
+every well-formed message it reads.
 """
 
 from __future__ import annotations
@@ -59,10 +57,8 @@ from acp import RequestError, run_agent
 from websockets.asyncio.server import Server, ServerConnection, serve
 
 from python_acp.agent import PythonAcpAgent
-from python_acp.errors import to_error_object, to_request_error
-from python_acp.legacy_ws import LegacyActionHandler, deprecation_notice, is_legacy
+from python_acp.errors import to_error_object
 from python_acp.mcp_registry import McpBackendRegistry
-from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.turns import TurnExecutor
@@ -84,9 +80,8 @@ class WebSocketMessageTransport:
     how the SDK learns the client hung up.
     """
 
-    def __init__(self, websocket: ServerConnection, legacy: LegacyActionHandler) -> None:
+    def __init__(self, websocket: ServerConnection) -> None:
         self._websocket = websocket
-        self._legacy = legacy
 
     async def send(self, message: dict[str, Any]) -> None:
         logger.debug("WebSocket response sent to %s: %s", self._websocket.remote_address, message)
@@ -95,25 +90,17 @@ class WebSocketMessageTransport:
     async def receive(self) -> dict[str, Any] | None:
         """The next ACP message, after answering anything that is not one.
 
-        Loops rather than returning per frame because a legacy request, a parse error,
-        and a non-object payload all produce a reply *here* and leave the SDK with
-        nothing to dispatch. Only a well-formed message the deprecated surface does not
-        claim is handed up.
-
-        Legacy requests are served inline, so a slow backend call delays the next read on
-        this socket. That is what the previous implementation did too, and each socket
-        has its own task, so one client cannot stall another.
+        Loops rather than returning per frame because an unusable frame is answered
+        *here* and leaves the SDK with nothing to dispatch: a parse error and a
+        non-object payload are both replied to and skipped. Everything else goes up.
         """
         async for raw_message in self._websocket:
             logger.debug(
                 "WebSocket request received from %s: %s", self._websocket.remote_address, raw_message
             )
             message = await self._decode(raw_message)
-            if message is None:
-                continue
-            if not is_legacy(message):
+            if message is not None:
                 return message
-            await self._serve_legacy(message)
         return None
 
     async def close(self) -> None:
@@ -140,37 +127,6 @@ class WebSocketMessageTransport:
             return None
         return message
 
-    async def _serve_legacy(self, message: dict[str, Any]) -> None:
-        """Answer a deprecated request without the SDK ever seeing it.
-
-        The `{"action": ...}` surface signals failure with `{"ok": false, "error": str}`
-        and has no code field, so a mapped error is flattened back to its message for
-        that shape only. The JSON-RPC half gets a real error object.
-
-        The failure envelope carries the same `deprecated` block the success envelope
-        does, built here because this is where that envelope is built. A client whose
-        call failed is no less on a surface that is going away — and is arguably more
-        likely to be reading the reply closely.
-        """
-        try:
-            reply = await self._legacy.respond(message)
-        except Exception as exc:  # noqa: BLE001 — mapped, not swallowed
-            error = to_request_error(exc)
-            if "action" in message:
-                logger.debug("Legacy action error: %s", exc)
-                await self.send(
-                    {
-                        "ok": False,
-                        "error": str(exc),
-                        "deprecated": deprecation_notice(message.get("action")),
-                    }
-                )
-                return
-            await self._reject(message.get("id"), error)
-            return
-        if reply is not None:
-            await self.send(reply)
-
     async def _reject(self, request_id: Any, error: RequestError) -> None:
         await self.send({"jsonrpc": "2.0", "id": request_id, "error": to_error_object(error)})
 
@@ -185,7 +141,6 @@ class WebSocketAgentServer:
 
     def __init__(
         self,
-        mcp_client: MCPStdioClient | None,
         host: str = "127.0.0.1",
         port: int = 8765,
         debug: bool = False,
@@ -196,7 +151,6 @@ class WebSocketAgentServer:
         executor: TurnExecutor | None = None,
         use_unstable_protocol: bool = True,
     ) -> None:
-        self._mcp_client = mcp_client
         self._host = host
         self._port = port
         # One registry for every connection this server accepts — a session outlives the
@@ -238,7 +192,6 @@ class WebSocketAgentServer:
         try:
             await serve_websocket(
                 websocket,
-                self._mcp_client,
                 sessions=self._sessions,
                 backends=self._backends,
                 terminals=self._terminals,
@@ -251,7 +204,6 @@ class WebSocketAgentServer:
 
 async def serve_websocket(
     websocket: ServerConnection,
-    mcp_client: MCPStdioClient | None = None,
     *,
     sessions: SessionRegistry | None = None,
     backends: McpBackendRegistry | None = None,
@@ -270,7 +222,7 @@ async def serve_websocket(
     `method_not_found` without ever calling the agent. The two transports must agree, or
     the same client gets different answers depending on how it connected.
     """
-    transport = WebSocketMessageTransport(websocket, LegacyActionHandler(mcp_client))
+    transport = WebSocketMessageTransport(websocket)
     live_terminals = terminals if terminals is not None else TerminalRegistry()
     agent = PythonAcpAgent(
         sessions if sessions is not None else SessionRegistry(),

@@ -101,10 +101,12 @@ release-bundle: build
 	ls -l $(ARTIFACTS_DIR)
 
 run: venv
-	@printf 'Starting python-acp with demo MCP server...\n'
+	@printf 'Starting python-acp...\n'
 	@printf 'Connect to: ws://$(HOST):$(PORT)\n'
+	@printf 'Name your MCP servers in session/new; there is no process-wide one.\n'
+	@printf 'The demo server is: $(DEMO_MCP_COMMAND)\n'
 	@printf 'Press Ctrl+C to stop.\n'
-	$(PYTHON_BIN) -m python_acp.cli --mcp-command $(DEMO_MCP_COMMAND) --host $(HOST) --port $(PORT)
+	$(PYTHON_BIN) -m python_acp.cli --host $(HOST) --port $(PORT)
 
 clean:
 	rm -rf build dist artifacts *.egg-info .pytest_cache .ruff_cache $(VENV_DIR)

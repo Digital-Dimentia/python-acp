@@ -17,7 +17,7 @@ transport real ACP clients use) and WebSocket (the existing local-automation sur
 | D1 | Build on the **`agent-client-protocol` Python SDK** (PyPI `agent-client-protocol`, GitHub `agentclientprotocol/python-sdk`) | Schema models, JSON-RPC plumbing, and both transports come from the SDK. Adds a `pydantic>=2.7` runtime dependency. |
 | D2 | **Both transports, stdio-first** | stdio is primary so Zed/Neovim/any ACP client can connect; WebSocket is retained as a second binding. Core runtime is transport-agnostic. |
 | D3 | **Pluggable `TurnExecutor`, deterministic default** | `session/prompt` is served by a swappable executor. The shipped default is a deterministic MCP tool-router — no LLM, consistent with the project's stated architecture. An LLM-backed executor can be added later without reopening the design. |
-| D4 | **Deprecate the legacy `action` surface, then remove** | The `{"action": ...}` API keeps working with a deprecation warning through the migration, and is removed in a final cleanup once JSON-RPC has full parity. |
+| D4 | **Deprecate the legacy `action` surface, then remove** ✔ | The `{"action": ...}` API kept working with a deprecation warning through the migration, and was removed once Phase 8 proved parity (`pyacp-sld.1` → `pyacp-sld.3`). The MCP passthrough went with it rather than moving to `ext_method` — see 7.2. |
 | D5 | Runtime surface is **JSON-RPC only** at the end state | Terminal state of D4. |
 | D6 | MCP remains a **backend adapter**, not a protocol boundary | `mcp_stdio.py` serves the turn executor; it is not on the client-facing wire. |
 
@@ -153,13 +153,17 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
 
 ### Phase 7 — Legacy surface deprecation and removal *(replaces the old docs phase)*
 
-7.1. Emit deprecation warnings from the `action` surface.
+7.1. Emit deprecation warnings from the `action` surface. ✔ `pyacp-sld.1`
 7.2. Carry the legacy MCP passthrough methods on `ext_method` during the transition.
      **Declined by `pyacp-sld.2`:** the passthrough addresses the process-wide
      `--mcp-command` server — the arrangement ACP v1 inverted — so it is deleted with the
      action surface in 7.3 rather than renamed onto the ACP surface first. `ext_method`
      stays empty. MCP prompts and resources have no ACP replacement and go with it.
-7.3. Remove the `action` surface; rewrite the README's request documentation.
+7.3. Remove the `action` surface; rewrite the README's request documentation. ✔
+     `pyacp-sld.3` deleted `legacy_ws.py` whole — both halves, the `transport_ws`
+     interception, and the README sections — and `pyacp-sld.4` removed `--mcp-command`
+     with it, the deprecated surface having been its only consumer. What went with them
+     and has no ACP replacement: reading an MCP prompt or resource through this bridge.
 
 ### Phase 8 — Validation and conformance
 

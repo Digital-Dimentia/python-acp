@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
 import sys
-from collections.abc import AsyncIterator
 
 from python_acp.agent import PythonAcpAgent
 from python_acp.mcp_registry import McpBackendRegistry
-from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_stdio import run_stdio
@@ -23,24 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Expose MCP tools over ACP without an LLM.",
     )
     parser.add_argument(
-        "--mcp-command",
-        nargs="+",
-        default=None,
-        help=(
-            "Command used to start a process-wide MCP server (stdio transport). "
-            "Optional since ACP sessions carry their own servers in session/new; it is "
-            "still required by the deprecated WebSocket action surface, which predates "
-            "sessions and has nowhere else to look."
-        ),
-    )
-    parser.add_argument(
         "--transport",
         choices=("ws", "stdio"),
         default="ws",
         help=(
             "Client-facing transport. 'stdio' speaks ACP on this process's stdin/stdout, "
-            "which is how editors spawn an agent. 'ws' is the existing local-automation "
-            "surface and remains the default while it still carries the legacy actions."
+            "which is how editors spawn an agent. 'ws' is the local-automation surface, "
+            "and stays the default because that is what existing deployments bind."
         ),
     )
     parser.add_argument(
@@ -71,77 +57,66 @@ def configure_logging(debug: bool) -> None:
     )
 
 
-@contextlib.asynccontextmanager
-async def _startup_backend(command: list[str] | None) -> AsyncIterator[MCPStdioClient | None]:
-    """The process-wide MCP server, if one was asked for.
-
-    Started and handshaked before any listener binds, so a bad `--mcp-command` fails at
-    startup rather than mid-session. It is **not** what ACP sessions use — those carry
-    their own servers (`pyacp-db3`) — and exists only for the deprecated action surface.
-    """
-    if command is None:
-        yield None
-        return
-    async with MCPStdioClient(command) as mcp_client:
-        await mcp_client.initialize()
-        yield mcp_client
-
-
 async def _run(args: argparse.Namespace) -> None:
+    """Build the process-wide registries and bind them to one transport.
+
+    **No process-wide MCP server is started, and there is no flag to ask for one.**
+    `--mcp-command` and the `MCPStdioClient` it built existed for the deprecated action
+    surface, which predated sessions and had nowhere else to look; `pyacp-sld.3` removed
+    that surface and `pyacp-sld.4` removed this with it. Every MCP server this process
+    talks to is now named by a client in `session/new` and lives and dies with its
+    session — which is the arrangement ACP v1 asks for, and now the only one.
+    """
     configure_logging(args.debug)
 
-    async with _startup_backend(args.mcp_command) as mcp_client:
-        # Both registries are process-wide, and both are created here because this is
-        # the only place that constructs both: a session must outlive the connection
-        # that created it (`session/resume`), and its MCP servers must be torn down when
-        # it closes. `on_close` is the seam between them (decision B6a) and wiring it
-        # anywhere else would leave subprocesses behind.
-        backends = McpBackendRegistry()
-        terminals = TerminalRegistry()
+    # Both registries are process-wide, and both are created here because this is the
+    # only place that constructs both: a session must outlive the connection that
+    # created it (`session/resume`), and its MCP servers must be torn down when it
+    # closes. `on_close` is the seam between them (decision B6a) and wiring it anywhere
+    # else would leave subprocesses behind.
+    backends = McpBackendRegistry()
+    terminals = TerminalRegistry()
 
-        async def release_session(session_id: str) -> None:
-            """Everything bound to one session's lifetime, in the one hook there is.
+    async def release_session(session_id: str) -> None:
+        """Everything bound to one session's lifetime, in the one hook there is.
 
-            `SessionRegistry` takes a single `on_close`, and both registries need it, so
-            the composition lives here for the same reason the wiring does: this is the
-            only place that constructs all three.
+        `SessionRegistry` takes a single `on_close`, and both registries need it, so the
+        composition lives here for the same reason the wiring does: this is the only
+        place that constructs all three.
 
-            Terminals go first. They are requests over a live connection and the client
-            is waiting on `session/close`; MCP teardown is local subprocess work that
-            nobody is watching.
-            """
-            await terminals.close(session_id)
-            await backends.close(session_id)
+        Terminals go first. They are requests over a live connection and the client is
+        waiting on `session/close`; MCP teardown is local subprocess work that nobody is
+        watching.
+        """
+        await terminals.close(session_id)
+        await backends.close(session_id)
 
-        sessions = SessionRegistry(on_close=release_session)
+    sessions = SessionRegistry(on_close=release_session)
 
-        try:
-            if args.transport == "stdio":
-                # No disconnect hook here on purpose: over stdio the client going away
-                # *is* this process ending, so the shutdown path below is the same event.
-                await run_stdio(
-                    PythonAcpAgent(sessions, backends=backends, terminals=terminals)
-                )
-                return
+    try:
+        if args.transport == "stdio":
+            # No disconnect hook here on purpose: over stdio the client going away *is*
+            # this process ending, so the shutdown path below is the same event.
+            await run_stdio(PythonAcpAgent(sessions, backends=backends, terminals=terminals))
+            return
 
-            server = WebSocketAgentServer(
-                mcp_client,
-                args.host,
-                args.port,
-                debug=args.debug,
-                sessions=sessions,
-                backends=backends,
-                terminals=terminals,
-            )
-            await server.start()
-            # Never print(): under --transport stdio that corrupts the wire, and one
-            # logging path in every mode is what keeps it from creeping back.
-            logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
-            await server.serve_forever()
-        finally:
-            # Sessions the client never closed still own subprocesses and, if a turn was
-            # cut short, terminals. `close_all` fires the hook above for each of them.
-            await sessions.close_all()
+        server = WebSocketAgentServer(
+            args.host,
+            args.port,
+            debug=args.debug,
+            sessions=sessions,
+            backends=backends,
+            terminals=terminals,
+        )
+        await server.start()
+        # Never print(): under --transport stdio that corrupts the wire, and one logging
+        # path in every mode is what keeps it from creeping back.
+        logger.info("python-acp listening on ws://%s:%s", args.host, args.port)
+        await server.serve_forever()
+    finally:
+        # Sessions the client never closed still own subprocesses and, if a turn was cut
+        # short, terminals. `close_all` fires the hook above for each of them.
+        await sessions.close_all()
 
 
 def run() -> None:

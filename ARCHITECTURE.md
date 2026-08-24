@@ -13,7 +13,6 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Agent runtime (`agent.py`): the `acp.interfaces.Agent` implementation. Every routed method is live except `session/set_mode` and `session/set_config_option` (`pyacp-fln.2`, `pyacp-fln.3`).
 - Capability manifest (`capabilities.py`): what `initialize` may advertise, and the version handshake.
 - Error mapping (`errors.py`): one translation from our exception types to `acp.RequestError`.
-- Deprecated surface (`legacy_ws.py`): the `{"action": ...}` API and the MCP passthrough, intercepted before the SDK and removed in Phase 7.
 - Path constraints (`paths.py`): the absolute-path rule, and the containment boundary a session's `cwd` plus `additionalDirectories` define. Phase 4.2's `fs/*` calls are its first consumer.
 - Session registry (`sessions.py`): the `Session` record — metadata, config state, transcript, in-flight turn — and the registry that creates, forks, resumes, pages, and closes them. One per process, shared by every connection.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
@@ -31,7 +30,6 @@ flowchart LR
     CLI["cli.py<br/>runtime bootstrap"]
     TStdio["transport_stdio.py"]
     TWs["transport_ws.py<br/>WebSocketMessageTransport"]
-    Legacy["legacy_ws.py<br/>(deprecated)"]
     SDK["acp.run_agent<br/>+ agent router"]
     Agent["agent.py<br/>PythonAcpAgent"]
     Caps["capabilities.py"]
@@ -45,7 +43,6 @@ flowchart LR
     Elicit["elicitation.py<br/>MCP question &rarr; ACP question"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess<br/>one per session server")]
-    StartupProc[("--mcp-command subprocess<br/>optional, deprecated surface only")]
 
     Editor <--> TStdio
     WsClient <--> TWs
@@ -55,7 +52,6 @@ flowchart LR
     CLI --> Backends
     TStdio --> SDK
     TWs --> SDK
-    TWs --> Legacy
     TWs --> Errors
     SDK <--> Agent
     Agent --> Caps
@@ -76,8 +72,6 @@ flowchart LR
     MCPClient -. "elicitation/create" .-> Elicit
     Elicit -. "asks the connected client" .-> SDK
     MCPClient <--> MCPProc
-    Legacy --> StartupProc
-    CLI -.-> StartupProc
 ```
 
 One arrow runs the other way from all the others: `mcp_stdio.py` reaches
@@ -85,11 +79,12 @@ One arrow runs the other way from all the others: `mcp_stdio.py` reaches
 request — the backend asking us a question — and it is the only path in the process where
 traffic starts at the MCP end.
 
-Two more things are worth reading off that diagram. `legacy_ws.py` is the only thing still
-bound to the process-wide `--mcp-command` subprocess — that is what Phase 7 deletes, and
-why `--mcp-command` is now optional for everyone else. And `sessions.py` reaches
-`mcp_registry.py` only through the dotted `on_close` edge: it never imports MCP, so
-`cli.py` wiring that hook is the entire coupling (decision B6a).
+One more thing is worth reading off that diagram, and one thing worth noticing is
+**absent**. `sessions.py` reaches `mcp_registry.py` only through the dotted `on_close`
+edge: it never imports MCP, so `cli.py` wiring that hook is the entire coupling (decision
+B6a). And there is no process-wide MCP subprocess anywhere on it — `pyacp-sld.3` removed
+the deprecated surface that was its only consumer and `pyacp-sld.4` removed
+`--mcp-command` with it, so every backend on this diagram belongs to a session.
 
 ## Target Subsystems (ACP v1)
 
@@ -112,10 +107,9 @@ that will flip it, and a row cannot be turned on without a test proving the feat
 behind it runs. See [capabilities.py](src/python_acp/capabilities.md).
 
 The WebSocket path is rebound (`pyacp-tzd.3`): under `--transport ws` a client reaches
-the same agent through the same router. What is left of the old path is the deprecated
-surface in `legacy_ws.py`, intercepted before the SDK — see
-[Request Lifecycle](#request-lifecycle) below. Everything else in this section is decided
-and not yet built.
+the same agent through the same router, and since `pyacp-sld.3` nothing else. The
+deprecated surface that used to be intercepted before the SDK is gone — see
+[Request Lifecycle](#request-lifecycle) below.
 
 ```mermaid
 sequenceDiagram
@@ -153,22 +147,21 @@ flowchart LR
     CLI["cli.py"]
     TStdio["transport_stdio.py"]
     TWs["transport_ws.py"]
-    Legacy["legacy_ws.py<br/>(deprecated)"]
     SDK["acp.run_agent<br/>+ agent router"]
     Agent["agent.py<br/>PythonAcpAgent"]
     Caps["capabilities.py<br/>capability manifest"]
     Errors["errors.py"]
+    Paths["paths.py"]
     Sessions["sessions.py"]
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
-    Router["turn_mcp_router.py"]
+    Tools["mcp_tools.py"]
     Registry["mcp_registry.py"]
     MCPClient["mcp_stdio.py"]
     MCPProc[("MCP server subprocess")]
 
     Editor <--> TStdio
     WsClient <--> TWs
-    WsClient <--> Legacy
     CLI --> TStdio
     CLI --> TWs
     TStdio --> SDK
@@ -181,11 +174,8 @@ flowchart LR
     Agent --> Turns
     Turns -.implemented by.-> Router
     Router --> Tools
-    Router --> Backends
-    Turns -.implemented by.-> Router
-    Legacy --> Registry
     Router --> Registry
-    Sessions --> Registry
+    Sessions -. "on_close" .-> Registry
     Registry --> MCPClient
     MCPClient <--> MCPProc
     Router -. "session/update via Client handle" .-> SDK
@@ -197,38 +187,43 @@ which transport is underneath.
 
 ## Request Lifecycle
 
-Every inbound WebSocket frame takes one of two paths, and which one is decided before
-the SDK sees it.
+**Every inbound frame takes one path.** It used to take one of two: `pyacp-sld.3`
+deleted the deprecated branch, so the only thing decided before the SDK sees a frame is
+whether it is usable at all.
 
 ```mermaid
 sequenceDiagram
-    participant C as WebSocket Client
+    participant C as ACP client
     participant T as transport_ws.py
-    participant L as legacy_ws.py
     participant SDK as acp.run_agent + router
     participant A as agent.py
+    participant X as turn_mcp_router.py
     participant M as MCPStdioClient
-    participant S as MCP Server
+    participant S as MCP server
 
     C->>T: JSON frame
-    T->>T: decode; -32700 / -32600 answered here
-    alt deprecated surface (action, or a non-ACP method)
-        T->>L: respond(message)
-        L->>M: tools/*, prompts/*, resources/*
-        M->>S: JSON-RPC over stdio
-        alt server returns an error
-            S-->>M: JSON-RPC error
-            M-->>L: MCPProtocolError (code preserved)
-            L-->>T: raises
-            T-->>C: mapped error, MCP code forwarded
-        else server returns a result
-            S-->>M: JSON-RPC result
-            L-->>T: reply payload
-            T-->>C: success payload
-        end
-    else ACP request
-        T-->>SDK: decoded message
+    alt unusable frame
+        T-->>C: -32700 parse error, or -32600 invalid request
+    else well-formed message
+        T-->>SDK: decoded dict
         SDK->>A: routed method
+        opt session/prompt
+            A->>X: execute(context, prompt)
+            X->>C: session/request_permission
+            C-->>X: selected option
+            X->>M: tools/call
+            M->>S: JSON-RPC over stdio
+            alt server returns an error
+                S-->>M: JSON-RPC error
+                M-->>X: MCPProtocolError (code preserved)
+                X-->>A: raises
+                A-->>SDK: mapped error, MCP code forwarded
+            else server returns a result
+                S-->>M: JSON-RPC result
+                X->>C: session/update (tool_call_update)
+                X-->>A: TurnResult
+            end
+        end
         A-->>SDK: response model or RequestError
         SDK-->>C: JSON-RPC result or error
     end
@@ -236,17 +231,19 @@ sequenceDiagram
 
 Three things the diagram is drawn to make visible:
 
-- **The deprecated branch never reaches the SDK.** `is_legacy` decides on the way in, so
-  `tools/list` and `{"action": ...}` are answered without the agent being consulted. That
-  branch is what Phase 7 deletes.
 - **Framing errors are answered by the transport.** The SDK's `Transport` moves decoded
-  dicts, so malformed JSON has no way to travel upward.
+  dicts, so malformed JSON has no way to travel upward — it is answered in `receive()` or
+  not at all.
 - **A `tools/call` result carrying `isError: true` is not an error.** It is a tool
-  failure, not a request failure, and travels the success path with its content intact.
-  A backend *protocol* error is the other branch, and keeps the MCP server's own code.
+  failure, not a request failure, and becomes a `tool_call_update` with
+  `status: "failed"` while the turn still ends `end_turn`. A backend *protocol* error is
+  the other branch, and keeps the MCP server's own code all the way to the client.
+- **The backend is reached only from inside a turn.** There is no path from a client
+  frame to an MCP server that does not go through `session/prompt` and its executor —
+  which is what the removal of the passthrough bought.
 
-Under `--transport stdio` the same picture holds with the deprecated branch removed —
-there is no legacy surface on stdio, and never was.
+Under `--transport stdio` the picture is identical: same router, same agent, same
+executor. The only difference was the deprecated branch, and there is no longer one.
 
 ### Cancelling a turn
 
@@ -437,7 +434,6 @@ sequenceDiagram
 - [ACP agent module](src/python_acp/agent.md)
 - [Capability manifest module](src/python_acp/capabilities.md)
 - [Error mapping module](src/python_acp/errors.md)
-- [Deprecated WebSocket surface module](src/python_acp/legacy_ws.md)
 - [Path constraints module](src/python_acp/paths.md)
 - [Session registry module](src/python_acp/sessions.md)
 - [Client terminal registry module](src/python_acp/terminals.md)
@@ -488,11 +484,10 @@ update-emission path.
 
 ## Notes
 
-- The WebSocket transport accepts two request styles. Only the first is ACP:
-  - JSON-RPC ACP methods (`method` field) — dispatched by the SDK router to `agent.py`.
-  - The deprecated surface — `{"action": ...}` messages, and the MCP passthrough
-    (`tools/*`, `prompts/*`, `resources/*`, `ping`) still carried on JSON-RPC. Both live
-    in [legacy_ws.py](src/python_acp/legacy_ws.md) and are removed in Phase 7.
+- **The WebSocket transport accepts ACP and nothing else.** `pyacp-sld.3` removed the
+  `{"action": ...}` surface and the MCP passthrough (`tools/*`, `prompts/*`,
+  `resources/*`, `ping`) that used to ride the same socket. Both transports now carry the
+  same one protocol.
 - An ACP method with no implementation yet returns `-32601` from the SDK router.
 - Error codes from the MCP backend are forwarded rather than collapsed into
   `-32603`, tagged with `data.source = "mcp"` to mark whose namespace they are

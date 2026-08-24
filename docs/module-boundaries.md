@@ -103,7 +103,7 @@ pre-empt that matrix; it only places boundaries.
 | `mcp_stdio.py` | **Unchanged role.** One MCP server subprocess: stdio framing, `initialize` handshake, stderr drain, request correlation, `MCPProtocolError` | Knowing about ACP, sessions, or more than one server | `MCPStdioClient`, `MCPProtocolError` | already exists; hardened by `pyacp-eg1.1`, `pyacp-z3y`, `pyacp-pb7`, `pyacp-a92`, `pyacp-k5w`, `pyacp-ua1`, `pyacp-x8l` |
 | `transport_stdio.py` | Binding the agent to the process's own stdin/stdout via the SDK's stdio helpers, and the listen/shutdown loop | Argument parsing; anything agent-shaped | `run_stdio(agent, ...)` | `pyacp-tzd.2` |
 | `transport_ws.py` | Binding the agent to a WebSocket. Server lifecycle, a `Transport`-shaped message adapter over the `websockets` library, and the framing errors the SDK cannot express. **One `AgentSideConnection` and one `PythonAcpAgent` per socket.** | Dispatch, error codes, capability blocks — all of which moved to the SDK router, `errors.py`, and `capabilities.py` | `WebSocketMessageTransport`, `WebSocketAgentServer`, `serve_websocket(...)` | `pyacp-tzd.3` ✔ |
-| `legacy_ws.py` | The deprecated `{"action": ...}` surface and its `{"ok": bool}` envelope, **and the MCP passthrough still carried on JSON-RPC** (`tools/*`, `prompts/*`, `resources/*`, `ping`, `notifications/initialized`), plus the deprecation warning, for exactly as long as D4 keeps it alive | Anything the ACP surface needs; `initialize`, which is ACP and belongs to the agent | `is_legacy(message)`, `LEGACY_METHODS`, `LegacyActionHandler` | `pyacp-tzd.3` ✔; warning by `pyacp-sld.1`; **deleted by `pyacp-sld.3`** |
+| ~~`legacy_ws.py`~~ | ~~The deprecated `{"action": ...}` surface and its `{"ok": bool}` envelope, **and the MCP passthrough still carried on JSON-RPC**, plus the deprecation warning, for exactly as long as D4 keeps it alive~~ | — | ~~`is_legacy`, `LEGACY_METHODS`, `LegacyActionHandler`~~ | `pyacp-tzd.3` ✔; warning by `pyacp-sld.1` ✔; **deleted by `pyacp-sld.3` ✔** — the row is kept struck through rather than dropped, because the module's whole life is a decision this document made |
 | `paths.py` | The absolute-path rule ACP requires, and the containment rule it does not: normalising a session's declared roots, and deciding whether a candidate path lies inside them with symlinks followed | Reading or writing anything; deciding *when* to check — that is the caller's | `normalize_roots`, `is_contained`, `require_contained`, `PathConstraintError` | `pyacp-3rw.4` ✔; first consumer `pyacp-8bv.2` |
 | `mcp_content.py` | Translating MCP result content into ACP content blocks, in one table: the five MCP types, annotations, and the placeholder that stands in for anything else | Deciding *when* content is sent, or what a tool call means | `to_content_block`, `to_tool_call_content`, `MAPPED_TYPES` | `pyacp-eg1.1` ✔ |
 | `errors.py` | Translating our exception types (`MCPProtocolError`, `ValueError`, cancellation) into `acp.RequestError`, one mapping in one place | Defining new error codes the SDK already defines | `to_request_error(exc)` | `pyacp-tzd.6` |
@@ -149,8 +149,9 @@ or deleting it outright, since `PythonAcpAgent` has no member for it and the SDK
 would answer `-32601`. Either way a working surface disappears in the release that rebound
 the socket, which is not what D4 promises.
 
-**So `legacy_ws.py` carries the JSON-RPC passthrough too, under its current method
-names**, for the length of the deprecation window.
+**So `legacy_ws.py` carried the JSON-RPC passthrough too, under its current method
+names**, for the length of the deprecation window. That window closed with
+`pyacp-sld.3`.
 
 **It never reaches `ext_method`.** `pyacp-sld.2` revisited the plan and declined the move:
 the passthrough addresses the process-wide `--mcp-command` server, which is the exact
@@ -159,7 +160,7 @@ architecture behind a new name — and would cost clients a rename now plus a de
 later. `pyacp-sld.3` deletes it with the action surface instead. `LEGACY_METHODS` is a
 closed set that never grows and empties in one step. What goes with it — MCP prompts and
 resources, which have no ACP replacement — is recorded in
-[legacy_ws.md](../src/python_acp/legacy_ws.md).
+the README's migration table (the doc itself went with the module).
 
 Two smaller deviations from the plan as written:
 
@@ -290,7 +291,8 @@ content-block typing, and a `TurnResult` carrying usage.
 
 The bead says the per-session registry replaces "the single `MCPStdioClient` held by
 `ACPWebSocketBridge`". It replaces it for **ACP**, but not entirely: the deprecated
-surface in `legacy_ws.py` predates sessions and has nowhere else to look for a backend.
+surface in `legacy_ws.py` predated sessions and had nowhere else to look for a backend.
+(Both are gone: `pyacp-sld.3` deleted the surface and `pyacp-sld.4` the flag.)
 
 **Decision:** keep the process-wide client, make `--mcp-command` optional, and have
 `LegacyActionHandler` say so when it is absent. Leaving it required would mean a client
@@ -332,7 +334,7 @@ wherever it was first needed.
 
 `acp.RequestError` already supplies the codes, so `errors.py` is roughly one function. It
 still gets its own module because three unrelated callers need the same mapping —
-`agent.py`, `turn_mcp_router.py`, and `legacy_ws.py` — and the alternative is the mapping
+`agent.py`, `turn_mcp_router.py`, and the since-deleted `legacy_ws.py` — and the alternative is the mapping
 living wherever it was first needed. `pyacp-tzd.6` is its own bead for the same reason.
 
 ## Documentation plan
@@ -353,7 +355,7 @@ docs" in `README.md`.
 | `turns.md` | **create** | `pyacp-hnk.1` | `TurnExecutor` contract and `stopReason` table. |
 | `turn_mcp_router.md` | **create** | `pyacp-hnk.2` | |
 | `mcp_registry.md` | **create** | `pyacp-3rw.3` | |
-| `legacy_ws.md` | **create, then retire** | created `pyacp-sld.1`, deleted `pyacp-sld.3` | Created carrying a "this surface is deprecated and dated for removal" banner. Deleted with the module. |
+| `legacy_ws.md` | **create, then retire** ✔ | created `pyacp-sld.1`, deleted `pyacp-sld.3` | Created carrying a "this surface is deprecated and dated for removal" banner. Deleted with the module, as planned. |
 
 Net at end state: `agent.md`, `cli.md`, `errors.md`, `mcp_registry.md`, `mcp_stdio.md`,
 `sessions.md`, `transport_stdio.md`, `transport_ws.md`, `turn_mcp_router.md`, `turns.md`.
@@ -369,9 +371,15 @@ reconciliation pass.
 
 `README.md`'s "WebSocket actions" section and its "Features" action list are rewritten by
 `pyacp-sld.3`, when the action surface is actually removed — not before, because the
-actions keep working until then (D4).
+actions keep working until then (D4). **Done:** `pyacp-sld.3` deleted both sections.
 
 ## Target shape
+
+> **This diagram is the shape as ratified, and `legacy_ws.py` is on it because the plan
+> put it there.** It has since been deleted (`pyacp-sld.3`), along with the
+> `--mcp-command` subprocess it was the only consumer of (`pyacp-sld.4`). The diagram is
+> left as drawn rather than quietly corrected: this document records what was decided,
+> and [ARCHITECTURE.md](../ARCHITECTURE.md) is where the delivered shape lives.
 
 ```mermaid
 flowchart LR

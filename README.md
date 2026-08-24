@@ -6,16 +6,11 @@
 
 - Serves ACP over **stdio** (how an editor spawns an agent) and over **WebSocket**, both
   binding the same agent through the `agent-client-protocol` SDK.
-- Connects to an MCP server over stdio.
-- Initializes the server and forwards MCP messages.
-- Exposes MCP tools, prompts, and resources through the deprecated WebSocket actions
-  (every reply carries a `deprecated` block naming its replacement):
-  - `list_tools`
-  - `call_tool`
-  - `list_prompts`
-  - `get_prompt`
-  - `list_resources`
-  - `read_resource`
+- Runs the MCP servers a client names in `session/new`, one set per session, over stdio.
+- Routes each prompt block to a tool call and streams the result back as
+  `session/update` — no LLM anywhere in the runtime.
+- Asks the client's permission before every tool call, reads and writes files through the
+  client, and runs commands in the client's terminals.
 - Works with a repo-local virtual environment.
 - Includes a `Containerfile` for containerized runs.
 - Ships with a Makefile for local build, test, lint, packaging, and release-bundle generation.
@@ -28,7 +23,6 @@
   - [agent.py](src/python_acp/agent.md)
   - [capabilities.py](src/python_acp/capabilities.md)
   - [errors.py](src/python_acp/errors.md)
-  - [legacy_ws.py](src/python_acp/legacy_ws.md)
   - [paths.py](src/python_acp/paths.md)
   - [sessions.py](src/python_acp/sessions.md)
   - [terminals.py](src/python_acp/terminals.md)
@@ -79,12 +73,15 @@ verification. Prefer `PIP_CERT=/path/to/proxy-ca.pem` when you have the proxy's 
 ## Run the bridge
 
 ```bash
-python-acp --mcp-command python /path/to/your_mcp_server.py --host 127.0.0.1 --port 8765
+python-acp --host 127.0.0.1 --port 8765
 ```
 
-`--mcp-command` starts a **process-wide** MCP server and is **optional**. ACP sessions
-carry their own servers in `session/new`, so an agent does not need one; what still does
-is the deprecated action surface below, which predates sessions.
+**There is no flag for an MCP server, and that is the design.** A client names the servers
+it wants in `session/new`, and they live and die with that session — see
+[Sessions bring their own MCP servers](#sessions-bring-their-own-mcp-servers) below.
+`--mcp-command` used to start a process-wide one for the deprecated action surface; both
+were removed in the ACP v1 migration, and passing the flag now fails at startup rather
+than being ignored.
 
 ### As an ACP agent over stdio
 
@@ -115,8 +112,10 @@ codes a stdio client gets:
 {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
 ```
 
-`ws` remains the default transport because it also carries the deprecated surface below,
-which stdio never had. See [transport_ws.py](src/python_acp/transport_ws.md).
+`ws` remains the default transport, though the two now carry exactly the same agent —
+same negotiation, same capability block, same methods, same error codes. The default is
+inertia rather than capability: changing it would break every existing WebSocket
+invocation for no gain. See [transport_ws.py](src/python_acp/transport_ws.md).
 
 ### Sessions bring their own MCP servers
 
@@ -304,111 +303,6 @@ output, the remaining calls still run, and the turn ends normally.
 
 See [turn_mcp_router.py](src/python_acp/turn_mcp_router.md).
 
-## WebSocket actions (deprecated)
-
-The `{"action": ...}` API and the MCP passthrough on JSON-RPC (`tools/*`, `prompts/*`,
-`resources/*`, `ping`) are **deprecated**. They keep working through the ACP v1 migration
-and are removed in Phase 7; the passthrough methods move to `_`-prefixed extension
-methods first. New work should use the ACP surface above. See
-[legacy_ws.py](src/python_acp/legacy_ws.md).
-
-### Every action reply says so
-
-Since the deprecation landed, every `{"action": ...}` reply — successful or not — carries
-a `deprecated` block naming the replacement and the removal milestone:
-
-```json
-{
-  "ok": true,
-  "tools": [{"name": "echo", "description": "Echoes text", "inputSchema": {}}],
-  "deprecated": {
-    "action": "list_tools",
-    "use": "session/new + session/prompt",
-    "removedIn": "the ACP v1 migration (Phase 7)"
-  }
-}
-```
-
-The block is purely additive: `ok`, `tools`, `result`, and `error` mean exactly what they
-meant before, so an existing client keeps working and can ignore the key. `use` is omitted
-when there is nothing honest to name — an action that does not exist, or one with no ACP
-replacement. The server also logs a warning, once per action per connection.
-
-### Migration table
-
-**The JSON-RPC `tools/*`, `prompts/*`, and `resources/*` methods are going away too.**
-They are MCP method names on an ACP wire, they address the process-wide `--mcp-command`
-server, and that is precisely the arrangement ACP v1 replaced. An earlier plan was to
-rename them under a prefix on the SDK's `ext_method` escape hatch; that was **decided
-against**, because it would cost you a rename now and a deletion later for a surface being
-removed either way. Both halves go in one step.
-
-| Deprecated call | Migrate to |
-|---|---|
-| `{"action": "list_tools"}` / `{"method": "tools/list"}` | `session/new` + `session/prompt` — the turn's first `available_commands` update is the tool list |
-| `{"action": "call_tool"}` / `{"method": "tools/call"}` | `session/new` + `session/prompt` |
-| `{"action": "list_prompts"}` / `{"method": "prompts/list"}` | **nothing** |
-| `{"action": "get_prompt"}` / `{"method": "prompts/get"}` | **nothing** |
-| `{"action": "list_resources"}` / `{"method": "resources/list"}` | **nothing** |
-| `{"action": "read_resource"}` / `{"method": "resources/read"}` | **nothing** |
-| `{"action": "ping"}` / `{"method": "ping"}` | **nothing** — ACP has no ping |
-
-The ACP path is a different *shape of program*, not a method swap. You open a session with
-`session/new` naming your `mcpServers`, then send `session/prompt`; the agent calls tools
-on your behalf and streams `session/update` notifications back. See
-[the invocation convention](src/python_acp/turn_mcp_router.md) for what a prompt block
-looks like.
-
-**The rows marked "nothing" are not an oversight.** ACP has no method for reading an MCP
-prompt or resource — its model is that the *agent* uses them internally, rather than a
-client reaching through the agent to the server. When this surface goes, so does the
-ability to reach them through this bridge; a client that needs them should speak MCP to
-that server directly.
-
-Connect to `ws://127.0.0.1:8765` and send JSON messages.
-
-### List tools
-
-```json
-{"action": "list_tools"}
-```
-
-### Call a tool
-
-```json
-{"action": "call_tool", "name": "echo", "arguments": {"text": "hello"}}
-```
-
-### List prompts
-
-```json
-{"action": "list_prompts"}
-```
-
-### Get a prompt
-
-```json
-{"action": "get_prompt", "name": "greeting", "arguments": {"name": "Alice"}}
-```
-
-### List resources
-
-```json
-{"action": "list_resources"}
-```
-
-### Read a resource
-
-```json
-{"action": "read_resource", "name": "config://settings", "arguments": {"path": "/tmp/example"}}
-```
-
-### Ping
-
-```json
-{"action": "ping"}
-```
-
 ## Failure responses
 
 Two different things can go wrong, and they are reported differently.
@@ -452,9 +346,10 @@ through that way so the content explaining the failure is not lost:
 }}
 ```
 
-On the legacy `action` surface the same tool failure comes back as
-`{"ok": false, "error": "file not found", "result": {...}}` — the `result` is
-still included.
+Inside a turn the same failure becomes a `tool_call_update` with `status: "failed"`
+carrying that content, and the turn still ends `end_turn` — the turn finished, one tool
+did not. Set the `on-tool-failure` config option to `stop` if a failed tool should end
+the turn instead.
 
 ## Make targets
 

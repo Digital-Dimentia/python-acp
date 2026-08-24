@@ -27,15 +27,9 @@ from python_acp.transport_stdio import _stdout_reserved
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
-AGENT_ARGV = [
-    "-m",
-    "python_acp.cli",
-    "--transport",
-    "stdio",
-    "--mcp-command",
-    sys.executable,
-    str(FIXTURE_SERVER),
-]
+#: How an editor spawns this agent. No backend flag: since `pyacp-sld.4` there is none
+#: to pass, and every MCP server arrives in `session/new`.
+AGENT_ARGV = ["-m", "python_acp.cli", "--transport", "stdio"]
 
 
 class _NullClient:
@@ -238,11 +232,17 @@ def test_stray_prints_land_on_stderr_not_the_wire() -> None:
         assert "corrupt the stream" in captured.getvalue()
 
 
-def test_mcp_command_is_optional() -> None:
-    """ACP sessions carry their own servers now; only the deprecated surface needs one."""
-    args = build_parser().parse_args(["--transport", "stdio"])
+def test_there_is_no_process_wide_backend_flag() -> None:
+    """`--mcp-command` is gone with the surface that was its only consumer.
 
-    assert args.mcp_command is None
+    Asserted as a *rejection* rather than by reading the namespace: the flag being
+    unparseable is what stops a deployment silently keeping a dead option in its command
+    line and wondering why the server it named is never used.
+    """
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--mcp-command", "echo"])
+
+    assert not hasattr(build_parser().parse_args([]), "mcp_command")
 
 
 async def test_the_agent_serves_a_session_with_no_process_wide_backend() -> None:
@@ -302,7 +302,7 @@ async def test_a_session_whose_server_will_not_start_is_refused() -> None:
 
 
 def test_ws_stays_the_default_transport() -> None:
-    args = build_parser().parse_args(["--mcp-command", "echo"])
+    args = build_parser().parse_args([])
 
     assert args.transport == "ws"
     assert args.host == "127.0.0.1"
@@ -310,7 +310,7 @@ def test_ws_stays_the_default_transport() -> None:
 
 
 def test_stdio_is_selectable() -> None:
-    args = build_parser().parse_args(["--mcp-command", "echo", "--transport", "stdio"])
+    args = build_parser().parse_args(["--transport", "stdio"])
 
     assert args.transport == "stdio"
 

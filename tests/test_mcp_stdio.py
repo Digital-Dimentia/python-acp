@@ -27,7 +27,7 @@ FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
 
 def test_build_parser_accepts_debug_flag() -> None:
-    args = build_parser().parse_args(["--mcp-command", "python", "script.py", "--debug"])
+    args = build_parser().parse_args(["--debug"])
     assert args.debug is True
 
 

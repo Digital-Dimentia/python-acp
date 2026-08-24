@@ -183,8 +183,13 @@ class ConformanceClient:
 
 
 def make_router(*, unstable: bool = True):
+    # `on_close` wired as `cli.py` wires it. It is the entire coupling between the two
+    # registries (decision B6a), so a harness that builds both and forgets it closes
+    # sessions while their MCP subprocesses keep running -- invisible until 3.11 reports
+    # the transport being finalized after its loop (`pyacp-6k5`).
+    backends = McpBackendRegistry()
     agent = PythonAcpAgent(
-        SessionRegistry(), backends=McpBackendRegistry(), unstable=unstable
+        SessionRegistry(on_close=backends.close), backends=backends, unstable=unstable
     )
     agent.on_connect(ConformanceClient())  # type: ignore[arg-type]
     return build_agent_router(agent, use_unstable_protocol=unstable)

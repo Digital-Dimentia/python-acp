@@ -38,6 +38,7 @@ from websockets.protocol import State
 
 from python_acp import __version__
 from python_acp.capabilities import build_agent_capabilities
+from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
@@ -118,13 +119,21 @@ async def bound_socket() -> AsyncIterator[FakeWebSocket]:
     in `session/new`. A test that needs a backend opens a session naming `FIXTURE_SERVER`
     — see `open_session`.
     """
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry(on_close=backends.close)
     websocket = FakeWebSocket()
-    connection = asyncio.create_task(serve_websocket(websocket))
+    connection = asyncio.create_task(
+        serve_websocket(websocket, sessions=sessions, backends=backends)
+    )
     try:
         yield websocket
     finally:
         websocket.hang_up()
         await asyncio.wait_for(connection, timeout=TIMEOUT)
+        # A disconnect deliberately does **not** close sessions, so hanging up leaves
+        # every backend a test opened still running. This is what `cli.py` does on the
+        # way out, and the reason it has to (`pyacp-6k5`).
+        await sessions.close_all()
 
 
 #: One MCP server spec, as `session/new` carries it. `env` is not optional on the wire:

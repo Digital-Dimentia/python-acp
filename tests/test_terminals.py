@@ -222,10 +222,12 @@ async def test_one_failing_release_does_not_strand_the_rest(tmp_path: Path) -> N
 
     class Awkward(TerminalClient):
         async def release_terminal(self, session_id: str, terminal_id: str, **kw: Any) -> None:
-            self.released.append(terminal_id)
+            # Through `super()` first, so the process this double started is still
+            # reaped: what is being simulated is a client that answers `-32603`, not one
+            # that walks away from its own subprocess.
+            await super().release_terminal(session_id, terminal_id, **kw)
             if terminal_id == "terminal-1":
                 raise RequestError(-32603, "no")
-            return None
 
     client = Awkward()
     context = context_for(SessionRegistry(), client, str(tmp_path))
@@ -469,8 +471,28 @@ class SlowCreateClient(TerminalClient):
     async def create_terminal(self, **kwargs: Any):
         response = await super().create_terminal(**kwargs)
         self.creating.set()
-        await self.reply.wait()
+        try:
+            await self.reply.wait()
+        except asyncio.CancelledError:
+            # The process is already running; if the reply is never let through, this
+            # double is the only thing that still knows about it. A real client would
+            # own it either way — a *test* double that leaked it would leave a 30-second
+            # sleeper behind and, on 3.11, a `PytestUnraisableExceptionWarning` from a
+            # transport finalized after its loop (`pyacp-6k5`).
+            await self.reap(response.terminal_id)
+            raise
         return response
+
+    async def reap(self, terminal_id: str) -> None:
+        """Kill and wait a process this double started, without pretending to release."""
+        process = self._live.pop(terminal_id, None)
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        reader = self._readers.pop(terminal_id, None)
+        if reader is not None:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
 
 
 async def test_a_terminal_created_after_the_cancel_is_still_given_back(

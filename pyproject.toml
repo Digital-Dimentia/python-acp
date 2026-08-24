@@ -71,6 +71,17 @@ where = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
+# A subprocess this suite started and never reaped is otherwise invisible: nothing
+# raises, and only CPython 3.11 even mentions it, as an unraisable from
+# `BaseSubprocessTransport.__del__` finalized after its loop closed. `pyacp-6k5` traced
+# three separate causes behind one such warning, so it is an error rather than a note.
+#
+# **The test it is reported against is not the test that leaked.** It fires wherever the
+# garbage collector happened to run. To find the real one, drop a conftest that wraps
+# `asyncio.create_subprocess_exec`, keeps a *strong* reference to every process (a weak
+# one hides exactly the case that warns), and at `pytest_sessionfinish` reports any whose
+# `_transport._closed` is False along with the test that created it. See CLAUDE.md.
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.ruff]
 line-length = 100

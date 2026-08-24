@@ -193,6 +193,24 @@ picture rather than an error), and every production module has a sibling `.md` w
 orphans. It is in CI and in `tests/test_check_docs.py`, because a gate that reports
 success by finding nothing fails open.
 
+**No test may leave a subprocess behind.** `tests/conftest.py` wraps
+`asyncio.create_subprocess_exec`, keeps a strong reference to every process the suite
+starts, and fails the run at session finish if any of their transports were never closed —
+naming the test that created each one. It exists because the alternative signal is
+useless: CPython **3.11 only** reports such a leak, once, as a
+`PytestUnraisableExceptionWarning` from a transport finalized after its loop, it fires only
+when the GC happens to run, and it names whichever test was executing rather than the one
+that leaked. `pyacp-6k5` found three unrelated leaks behind one such warning.
+
+When that guard fails, the cause is almost always one of:
+
+1. a `SessionRegistry` built without `on_close=backends.close` — that hook is the entire
+   coupling between sessions and their MCP subprocesses (decision B6a), so forgetting it
+   closes sessions while their servers keep running;
+2. a harness that hangs up without `sessions.close_all()` — a disconnect deliberately does
+   not close sessions;
+3. a test double that walks away from a process it started.
+
 **Golden transcripts.** `tests/transcripts/*.json` record the whole JSON-RPC conversation
 for four flows — initialize, session lifecycle, streaming, cancellation — in order and in
 both directions, so an ordering regression surfaces as a diff. They are *recorded*, never

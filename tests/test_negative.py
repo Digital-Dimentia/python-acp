@@ -60,6 +60,8 @@ from typing import Any
 
 import pytest
 
+from python_acp.mcp_registry import McpBackendRegistry
+from python_acp.sessions import SessionRegistry
 from python_acp.transport_ws import serve_websocket
 from test_transport_ws import FakeWebSocket
 
@@ -69,14 +71,30 @@ TIMEOUT = 15
 
 @contextlib.asynccontextmanager
 async def wire() -> AsyncIterator[FakeWebSocket]:
-    """A socket bound to a live agent, for driving bad input at it."""
+    """A socket bound to a live agent, for driving bad input at it.
+
+    The registries are built here rather than left to `serve_websocket`'s defaults, and
+    for the reason `cli.py` builds them: a session's MCP servers are torn down by the
+    `on_close` hook, and nothing else torn down. A disconnect deliberately does **not**
+    close sessions ([sessions.md]), so a harness that only hangs up leaves every backend
+    this test started running until the process exits — which on 3.11 surfaces as
+    `PytestUnraisableExceptionWarning` from a transport finalized after its loop
+    (`pyacp-6k5`).
+    """
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry(on_close=backends.close)
     websocket = FakeWebSocket()
-    connection = asyncio.create_task(serve_websocket(websocket))
+    connection = asyncio.create_task(
+        serve_websocket(websocket, sessions=sessions, backends=backends)
+    )
     try:
         yield websocket
     finally:
         websocket.hang_up()
         await asyncio.wait_for(connection, timeout=TIMEOUT)
+        # What `cli.py` does on the way out, and for the same reason: sessions the
+        # client never closed still own subprocesses.
+        await sessions.close_all()
 
 
 async def error_for(request: dict[str, Any]) -> dict[str, Any]:

@@ -279,8 +279,10 @@ class TerminalClient(RecordingClient):
 
     async def release_terminal(self, session_id: str, terminal_id: str, **kw: Any) -> None:
         self.released.append(terminal_id)
-        if self.release_error is not None:
-            raise self.release_error
+        # The process is reaped **before** a simulated failure, not after. `release_error`
+        # models a client that answers `terminal/release` with an error; it does not model
+        # one that walks away from a process it started, which no real client does and
+        # which would leave this suite with a live subprocess per such test.
         process = self._live.pop(terminal_id, None)
         if process is not None and process.returncode is None:
             process.kill()
@@ -289,6 +291,8 @@ class TerminalClient(RecordingClient):
         if reader is not None:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
+        if self.release_error is not None:
+            raise self.release_error
         return None
 
 

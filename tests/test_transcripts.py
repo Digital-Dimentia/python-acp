@@ -61,6 +61,8 @@ from typing import Any
 import pytest
 from acp import PROTOCOL_VERSION
 
+from python_acp.mcp_registry import McpBackendRegistry
+from python_acp.sessions import SessionRegistry
 from python_acp.transport_ws import serve_websocket
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
@@ -149,13 +151,25 @@ class RecordingSocket:
 
 @contextlib.asynccontextmanager
 async def recording_socket() -> AsyncIterator[RecordingSocket]:
+    """One socket bound to a live agent, with the registries wired as `cli.py` wires them.
+
+    Explicit rather than left to `serve_websocket`'s defaults because a session's MCP
+    subprocesses are torn down by the `on_close` hook and by nothing else, and a
+    disconnect deliberately does not close sessions. See `wire()` in
+    `tests/test_negative.py` — same harness, same reason (`pyacp-6k5`).
+    """
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry(on_close=backends.close)
     socket = RecordingSocket()
-    connection = asyncio.create_task(serve_websocket(socket))
+    connection = asyncio.create_task(
+        serve_websocket(socket, sessions=sessions, backends=backends)
+    )
     try:
         yield socket
     finally:
         socket.hang_up()
         await asyncio.wait_for(connection, timeout=TIMEOUT)
+        await sessions.close_all()
 
 
 # ---------------------------------------------------------------------------

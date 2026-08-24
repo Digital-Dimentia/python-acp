@@ -214,12 +214,42 @@ the backends are told they may send `elicitation/create`; `None` means they neve
 will put on the wire. What the forwarder reads *later* is whoever is connected then, and
 [elicitation.md](elicitation.md) records why those can differ.
 
-**One hazard is inherited and cannot be refused here.**
+### A dropped `mcpServers` entry is accepted, and that is a decision
+
 `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
-that fails validation — a stdio server missing the required `env`, say — is silently
-dropped from the list before the agent sees it. The client gets a session whose server is
-simply absent, with no error. Pinned by
-`test_a_malformed_mcp_server_is_dropped_before_we_see_it`.
+that fails validation is removed from the list **before the agent is called**. All four of
+`name`, `command`, `args`, and `env` are required with no defaults, so
+`{"name": "tools", "command": "/bin/echo"}` — which looks perfectly reasonable — is
+dropped. The client gets a session backed by fewer servers than it asked for, with no
+error.
+
+`pyacp-mej` weighed refusing it and decided **not to**. The reasoning, because it is not
+the obvious answer:
+
+**This is ACP's own rule, not an SDK quirk.** `skip_invalid_items` restores the schema's
+`x-deserialize-skip-invalid-items` annotation, and the schema carries it on **35 fields** —
+`mcpServers` on all four session methods, plus `additionalDirectories`, `availableModes`,
+`configOptions`, `content`, `locations`, `authMethods`, and more — beside 84 fields marked
+`x-deserialize-default-on-error`. Taken together that is a deliberate protocol-wide
+posture: *drop what you cannot parse rather than failing the message*. Refusing here would
+not close a gap; it would be one agent opting out of that rule on one field, and doing it
+consistently would mean opting out on all 35.
+
+**And there is nowhere to do it anyway.** The agent is handed the survivors and never
+learns what was sent — `acp.router` validates inside its own wrapper, so no ACP method can
+see raw params. The only place holding the original dict is `transport_ws.receive()`,
+which would have to know which method carries which list, and would fix nothing on stdio,
+where the SDK owns the read loop. A bug fixed on one transport and not the other is worse
+than a documented one, because the behaviour then depends on how a client connected.
+
+**What is done instead.** The one place the client feels it — naming an absent server in a
+prompt — no longer reads like the client's own typo:
+[turn_mcp_router.py](turn_mcp_router.md)'s refusal names the dropped-entry possibility and
+the four fields an entry needs. That is the whole of what this side can do, and it is done.
+
+Pinned by `test_a_malformed_mcp_server_entry_is_dropped_not_refused` and
+`test_an_entry_missing_only_args_and_env_is_dropped_too`, which stay so that an SDK bump
+that stops salvaging re-opens the decision deliberately rather than by surprise.
 
 ## Method surface
 

@@ -2131,3 +2131,32 @@ async def test_a_server_that_annotates_nothing_labels_nothing(monkeypatch: Any) 
         await harness.run(block(tool="handshake-report"))
 
     assert harness.of("tool_call")[0].kind == "other"
+
+
+async def test_an_absent_server_names_the_dropped_entry_as_a_cause() -> None:
+    """The one place a `skip-invalid-items` casualty becomes visible (`pyacp-mej`).
+
+    Nothing in `src/` can detect that an `mcpServers` entry was dropped — the agent is
+    handed the survivors and never learns what was sent. What it *can* do is stop the
+    eventual refusal from reading like the client's own typo, since "this session opened
+    ['tools']" is equally consistent with a misspelled name and with an entry ACP threw
+    away before we saw it.
+    """
+    async with Harness("tools") as harness:
+        result = await harness.run(block(tool="echo", server="missing"))
+
+    assert result.stop_reason == "refusal"
+    refusal = harness.refusal()
+    assert "'missing'" in refusal and "['tools']" in refusal
+    for required in ("'name'", "'command'", "'args'", "'env'"):
+        assert required in refusal, required
+
+
+async def test_a_session_with_no_servers_says_the_same_thing() -> None:
+    """The other half: every entry dropped leaves a session that opened nothing."""
+    async with Harness() as harness:
+        result = await harness.run(block(tool="echo"))
+
+    assert result.stop_reason == "refusal"
+    assert "opened no MCP servers" in harness.refusal()
+    assert "'env'" in harness.refusal()

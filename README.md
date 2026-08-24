@@ -89,7 +89,7 @@ than being ignored.
 editor spawns an agent. It is not run by hand — the client launches it:
 
 ```bash
-python-acp --transport stdio --mcp-command python /path/to/your_mcp_server.py
+python-acp --transport stdio
 ```
 
 `--host` and `--port` are ignored in this mode, **stdout carries the JSON-RPC wire and
@@ -132,9 +132,20 @@ session closes:
 }}
 ```
 
-`name`, `command`, `args`, and `env` are all **required** by the schema — an entry
-missing one is silently dropped before the agent sees it. `env` is added on top of the
-agent's own environment rather than replacing it.
+`env` is added on top of the agent's own environment rather than replacing it.
+
+> **All four of `name`, `command`, `args`, and `env` are required, and an entry missing
+> any of them is dropped before this agent ever sees it** — including one as plausible as
+> `{"name": "tools", "command": "/bin/echo"}`. You get a `sessionId` back, no error, and a
+> session backed by fewer servers than you asked for.
+>
+> That is ACP's own rule rather than a choice made here: the schema marks `mcpServers`
+> `skip-invalid-items`, one of 35 fields it marks that way, so an unparseable entry is
+> dropped instead of failing the whole message. The agent is handed the survivors and
+> cannot tell that anything was removed, which is why it cannot warn you at `session/new`.
+> It shows up when you name the missing server in a prompt, and the refusal says so.
+>
+> **Send all four fields, `args` and `env` as `[]` when there is nothing to put in them.**
 
 Only **stdio** servers are accepted. `initialize` advertises
 `mcpCapabilities: {http: false, sse: false, acp: false}`, so an `http` or `sse` entry is
@@ -384,15 +395,25 @@ The release bundle includes the built Python artifacts and, when available, the 
 
 ```bash
 podman build -t python-acp -f Containerfile .
-podman run --rm -p 8765:8765 python-acp --mcp-command python /app/mock_mcp_server.py
+podman run --rm -p 8765:8765 python-acp --host 0.0.0.0
 ```
 
 Or with Docker:
 
 ```bash
 docker build -t python-acp -f Containerfile .
-docker run --rm -p 8765:8765 python-acp --mcp-command python /app/mock_mcp_server.py
+docker run --rm -p 8765:8765 python-acp --host 0.0.0.0
 ```
+
+`--host 0.0.0.0` rather than the default `127.0.0.1`, which inside a container is
+reachable only from inside it.
+
+**The image contains the agent and nothing else** — `Containerfile` copies `src/` and
+installs the package. It starts no MCP server, and a client's `session/new` names servers
+that must be executable *inside the container*, so a useful image is normally this one
+plus your own servers layered on top. (The example here used to pass
+`--mcp-command python /app/mock_mcp_server.py`; that path was never copied into the image,
+so it had been broken independently of the flag's removal.)
 
 ## CI/CD
 

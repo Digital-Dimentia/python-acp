@@ -398,15 +398,47 @@ async def test_a_junk_protocol_version_is_salvaged_instead_of_refused() -> None:
 async def test_a_malformed_mcp_server_entry_is_dropped_not_refused() -> None:
     """`skip_invalid_items` on the list: the entry never reaches the agent.
 
-    This one has teeth — the session comes back with an id whose tools silently do not
-    exist, which is the failure `mcp_registry`'s all-or-nothing opening exists to prevent,
-    arriving by a route that module cannot see. Pinned here because a test is the only
-    place it is visible at all.
+    **This is accepted behaviour, not an unfixed bug** — `pyacp-mej` settled it. ACP's
+    schema annotates `mcpServers` `skip-invalid-items`, one of 35 fields it marks that way
+    beside 84 more marked `default-on-error`, so dropping an unparseable entry rather than
+    failing the message is what the protocol asks for. Refusing here would not be fixing a
+    gap; it would be one agent unilaterally opting out of ACP's robustness rule on one
+    field. `agent.md` carries the reasoning and what it costs.
+
+    The test stays because the behaviour is invisible everywhere else: nothing in `src/`
+    can even detect it, since the agent is handed the survivors and never learns what was
+    sent. If an SDK bump stops salvaging, this fails and the decision gets re-opened
+    deliberately rather than by surprise.
     """
     async with wire() as websocket:
         reply = await asyncio.wait_for(
             websocket.ask(
                 request("session/new", {"cwd": "/tmp", "mcpServers": [{"nope": 1}]})
+            ),
+            timeout=TIMEOUT,
+        )
+
+    assert "error" not in reply
+    assert reply["result"]["sessionId"]
+
+
+async def test_an_entry_missing_only_args_and_env_is_dropped_too() -> None:
+    """The shape a real client actually gets wrong, as against `{"nope": 1}`.
+
+    All four of `name`, `command`, `args`, and `env` are required with no defaults, so the
+    plausible-looking entry below is dropped exactly like nonsense is. That is why the
+    refusal a client eventually hits names all four.
+    """
+    async with wire() as websocket:
+        reply = await asyncio.wait_for(
+            websocket.ask(
+                request(
+                    "session/new",
+                    {
+                        "cwd": "/tmp",
+                        "mcpServers": [{"name": "tools", "command": "/bin/echo"}],
+                    },
+                )
             ),
             timeout=TIMEOUT,
         )

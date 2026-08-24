@@ -811,19 +811,32 @@ class McpToolRouterExecutor:
 
     @staticmethod
     def _server(index: int, payload: dict[str, Any], backends: Any) -> str | None:
-        """Which backend runs this call, refusing to guess when guessing could be wrong."""
+        """Which backend runs this call, refusing to guess when guessing could be wrong.
+
+        **This is where a dropped `mcpServers` entry surfaces**, and the only place it
+        can. ACP's schema marks that field `skip-invalid-items`, so an entry that does not
+        validate is removed before `session/new` is ever called and the agent cannot know
+        it was asked for — see `agent.md`. The client's first sign is a server it named
+        being absent here, which reads like its own typo. Saying both possibilities out
+        loud is the whole of what this side can do about it (`pyacp-mej`).
+        """
         named = payload.get("server")
         if named is not None:
             if not isinstance(named, str) or named not in backends:
                 raise PromptConventionError(
                     f"Prompt block {index} names server {named!r}; this session opened "
-                    f"{sorted(backends) or 'none'}."
+                    f"{sorted(backends) or 'none'}. If you did name it in session/new, "
+                    "the entry was dropped before this agent saw it: ACP skips "
+                    "mcpServers entries that do not validate, and every entry needs all "
+                    "four of 'name', 'command', 'args', and 'env'."
                 )
             return named
         if not backends:
             raise PromptConventionError(
                 f"Prompt block {index} names a tool, but this session opened no MCP "
-                "servers to run it against."
+                "servers to run it against. If session/new did name one, check that its "
+                "entry carried all four of 'name', 'command', 'args', and 'env' — ACP "
+                "skips mcpServers entries that do not validate."
             )
         if len(backends) > 1:
             raise PromptConventionError(

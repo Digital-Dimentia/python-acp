@@ -39,12 +39,17 @@ and the failure surfaces as a broken turn far from the omission. `TurnContext.ga
 answers the question once, per connection, in the vocabulary of the methods rather than
 of the schema.
 
-Three shapes of gate, and they are not interchangeable:
+Four shapes of gate, and they are not interchangeable:
 
 * **`fs` has two independent booleans.** Read may be permitted while write is not, so a
   `require(Gate.WRITE_TEXT_FILE)` must never be satisfied by a read grant.
 * **`terminal` is one boolean for all five `terminal/*` methods.** No per-method
   granularity exists; check it once and treat the family as all-or-nothing.
+* **`elicitation` is a container of two independent markers, not a marker itself.**
+  `ElicitationCapabilities` carries `form` and `url`, and a client may send
+  `elicitation: {}` — advertising the object while supporting neither mode. So the outer
+  object is never a gate; `ELICITATION_FORM` and `ELICITATION_URL` are, and each is a
+  presence check on its own sub-model.
 * **`plan` gates *update variants*, not a method.** `session/update` itself is ungated —
   `ClientCapabilities` has no field for it and every ACP client must accept it — so a
   plan-less client means suppressing the `agent_plan_*` variants, never skipping `emit`.
@@ -324,7 +329,8 @@ class Gate(str, Enum):
     READ_TEXT_FILE = "fs/read_text_file"
     WRITE_TEXT_FILE = "fs/write_text_file"
     TERMINAL = "terminal/*"
-    ELICITATION = "elicitation/*"
+    ELICITATION_FORM = "elicitation/create:form"
+    ELICITATION_URL = "elicitation/create:url"
     PLAN_UPDATES = "session/update:agent_plan_*"
 
 
@@ -353,7 +359,8 @@ class ClientGates:
     read_text_file: bool = False
     write_text_file: bool = False
     terminal: bool = False
-    elicitation: bool = False
+    elicitation_form: bool = False
+    elicitation_url: bool = False
     plan_updates: bool = False
 
     @classmethod
@@ -361,14 +368,19 @@ class ClientGates:
         if capabilities is None:
             return cls()
         fs = capabilities.fs
+        elicitation = capabilities.elicitation
         return cls(
             read_text_file=bool(fs and fs.read_text_file),
             write_text_file=bool(fs and fs.write_text_file),
             terminal=bool(capabilities.terminal),
-            # `plan` and `elicitation` are advertised by **presence**, not by a boolean —
-            # they are marker models, so `is not None` is the check and `bool(...)` on the
-            # model itself would be wrong for an empty one.
-            elicitation=capabilities.elicitation is not None,
+            # `elicitation` is a **container**, not a marker: its own presence promises
+            # nothing, and the two modes inside it are the markers. A client may advertise
+            # `elicitation: {}` and support neither, so each mode is read separately and
+            # the outer object is never a gate of its own.
+            elicitation_form=elicitation is not None and elicitation.form is not None,
+            elicitation_url=elicitation is not None and elicitation.url is not None,
+            # `plan` really is an empty marker model, so `is not None` is the check and
+            # `bool(...)` on the model itself would be wrong for an empty one.
             plan_updates=capabilities.plan is not None,
         )
 
@@ -385,7 +397,8 @@ _GATE_FIELDS: dict[Gate, str] = {
     Gate.READ_TEXT_FILE: "read_text_file",
     Gate.WRITE_TEXT_FILE: "write_text_file",
     Gate.TERMINAL: "terminal",
-    Gate.ELICITATION: "elicitation",
+    Gate.ELICITATION_FORM: "elicitation_form",
+    Gate.ELICITATION_URL: "elicitation_url",
     Gate.PLAN_UPDATES: "plan_updates",
 }
 

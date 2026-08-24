@@ -14,6 +14,7 @@ import pytest
 from python_acp.cli import build_parser
 from python_acp.mcp_stdio import (
     _MCP_PROTOCOL_VERSION,
+    MalformedServerRequest,
     MCPClientCapabilities,
     MCPProtocolError,
     MCPStdioClient,
@@ -259,6 +260,51 @@ async def test_on_server_request_handler_supplies_the_result() -> None:
     reply = json.loads(result["content"][0]["text"])
     assert seen == ["roots/list"]
     assert reply["result"]["roots"][0]["name"] == "tmp"
+
+
+@pytest.mark.asyncio
+async def test_a_handler_can_answer_bad_params_without_claiming_we_broke() -> None:
+    """The third answer a handler needs: not a result, not -32601, and not our fault."""
+
+    async def handler(method: str, params: dict) -> dict:
+        raise MalformedServerRequest("requestedSchema is not an object")
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_server_request=handler) as client:
+        await client.initialize()
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "elicitation/create"}), timeout=10
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert reply["error"]["code"] == -32602
+    assert "requestedSchema" in reply["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_handler_does_not_stop_the_read_loop() -> None:
+    """A handler may wait on a human, so it must not be awaited by the reader.
+
+    `tests/test_elicitation.py` proves the same property through the real forwarder;
+    this pins it as `mcp_stdio`'s own contract, where the decision lives.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(method: str, params: dict) -> dict:
+        entered.set()
+        await release.wait()
+        return {"roots": []}
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_server_request=handler) as client:
+        await client.initialize()
+        sent = await asyncio.wait_for(
+            client.call_tool("provoke-detached", {"server_method": "roots/list"}), timeout=10
+        )
+        assert sent["content"][0]["text"] == "sent"
+        assert entered.is_set()
+        release.set()
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,10 @@ rather than only while one of our requests is in flight.
   proposed, and the set that may be accepted in reply.
 - `MCPClientCapabilities`: the frozen block `initialize` promises. `roots`,
   `roots_list_changed`, `elicitation` — and deliberately no `sampling` field.
+- `UnsupportedServerRequest` / `MalformedServerRequest`: the two things an
+  `on_server_request` handler can say other than "here is your result" — `-32601`
+  "we never offered this", and `-32602` "you sent that badly". Everything else it
+  raises is `-32603`, which says *we* broke.
 - `MCPStdioClient.client_capabilities`: what this client will declare. Empty by
   default.
 - `MCPStdioClient._declared_capabilities()`: builds the block and refuses to send
@@ -94,8 +98,9 @@ sequenceDiagram
         Loop->>Client: resolve pending future
         Client-->>Caller: result dict or MCPProtocolError
     else server-initiated request
-        Loop->>Loop: ping, on_server_request, or -32601
-        Loop->>Proc: write reply
+        Loop->>Loop: spawn a task; keep reading
+        Note over Loop: the handler may wait on a human
+        Loop->>Proc: write reply, when the task finishes
     else notification
         Loop->>Loop: on_notification, if set
     end
@@ -117,8 +122,19 @@ waiting on us — the failure this design exists to prevent.
 - With no handler set, the reply is `-32601` naming the method.
 - A handler that raises `UnsupportedServerRequest` also produces `-32601` — the
   same answer, because it means the same thing.
+- A handler that raises `MalformedServerRequest` produces `-32602`: the server
+  used a capability we really do declare, with params we cannot read.
 - A handler that raises anything else produces `-32603` carrying the exception
   text; the read loop keeps running.
+
+**The read loop answers nothing itself.** Each server request is dispatched into a
+task of its own, because a handler may take arbitrarily long — `elicitation/create`
+is forwarded to the ACP client and waits on a person — and a loop awaiting one would
+stop reading everything else on the connection, including the response to the very
+call that provoked the request. Replies may therefore leave out of arrival order,
+which JSON-RPC allows: the id is what matches them. `stop()` cancels whatever is
+still in flight before the subprocess goes, and tells the server nothing, because a
+reply written into a closing stdin is no better than silence.
 
 **Why the two error codes are not interchangeable.** `-32603` says *we broke*;
 `-32601` says *we never offered this*. One callable stands behind every declared
@@ -128,10 +144,11 @@ server its request failed when the truth is that it was never on offer, and the
 distinction is what makes the capability block above mean anything on the wire.
 
 `on_server_request` is where ACP integration hooks in.
-[mcp_registry.py](mcp_registry.md) installs one per backend today, answering
-`roots/list` from the session's roots. MCP's `elicitation/create` maps onto ACP's
-`session/request_permission` and lands in `pyacp-8bv.4`;
-`sampling/createMessage` has no answer here because this runtime has no LLM.
+[mcp_registry.py](mcp_registry.md) installs one per backend, composing two answers
+behind the single callable this module accepts: `roots/list` from the session's
+roots, and `elicitation/create` forwarded to the ACP client by
+[elicitation.py](elicitation.md). `sampling/createMessage` has no answer here
+because this runtime has no LLM.
 
 ## Client Capabilities
 
@@ -156,7 +173,7 @@ for.
 |---|---|---|
 | `roots` | `"roots": {"listChanged": <bool>}` | `mcp_registry.roots_responder`, from the session's `cwd` + `additionalDirectories` |
 | `roots_list_changed` | the `listChanged` flag | nothing — `false` today, because a session's roots are fixed for its lifetime |
-| `elicitation` | `"elicitation": {}` | nobody yet; `pyacp-8bv.4` forwards it to ACP `session/request_permission` |
+| `elicitation` | `"elicitation": {}` | [elicitation.py](elicitation.md), by forwarding the question to the ACP client and handing its answer back |
 | *(no field)* | `"sampling": {}` | **never.** There is no LLM in this runtime |
 
 `sampling` has no field on purpose. Leaving it out means the block cannot be
@@ -189,7 +206,7 @@ propose `2025-06-18` and accept either it or `2024-11-05`:
 
 | | Revision | Why |
 |---|---|---|
-| proposed | `2025-06-18` | `elicitation` — the client capability that maps onto ACP `session/request_permission` — does not exist before it |
+| proposed | `2025-06-18` | `elicitation` — the client capability [elicitation.py](elicitation.md) forwards to the ACP client — does not exist before it |
 | also accepted | `2024-11-05` | a server pinned there must counter with it, and hanging up on that counter would drop every server that has not moved yet |
 
 Nothing in this module changed to make the bump: the framing, the handshake, and
@@ -197,7 +214,8 @@ the shutdown sequence are identical across the two, the result fields
 `2025-06-18` adds (`structuredContent`, resource links) are passed through
 untouched, and JSON-RPC batching — the one thing it removes — was never used
 here. Every method this client calls exists in both. Only `elicitation/create`
-is newer, and a server that countered with `2024-11-05` will never send one.
+is newer, and a server that countered with `2024-11-05` will never send one —
+which loses nothing, because it is the *server* that would have asked.
 
 Widening the accepted set further is a claim that this client can speak that
 revision; read

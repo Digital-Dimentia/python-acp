@@ -55,6 +55,11 @@ _stall_initialize = os.environ.get("MOCK_MCP_STALL_INITIALIZE") == "1"
 _stalled_ids = []
 _cancellations = []
 
+# Replies to server-initiated requests, in arrival order. `provoke-detached` sends
+# a request and does not wait for its answer, so this is where the answer is kept
+# until a test asks for it with `provoke-report`.
+_server_replies = []
+
 # The params of the initialize request as they actually arrived, handed back by the
 # `handshake-report` tool. A capability block is a promise made on the wire, so a test
 # that wants to check it should read what this process received rather than the
@@ -158,6 +163,13 @@ while True:
     method = req.get("method")
     req_id = req.get("id")
 
+    # A reply to a request *we* sent: an id and no method. Recorded rather than
+    # allowed to fall through to "method not found", which would put an error on
+    # the wire addressed to an id the client is not waiting on.
+    if method is None:
+        _server_replies.append(req)
+        continue
+
     if method == "notifications/initialized":
         continue
 
@@ -225,9 +237,44 @@ while True:
                 },
             }
         )
+    # Send a server-initiated request and answer the tools/call WITHOUT waiting for
+    # the reply. A client whose read loop blocks inside its own request handler
+    # cannot deliver this result, so a test that gets it has proved the loop is free.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "provoke-detached":
+        args = req.get("params", {}).get("arguments", {}) or {}
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": "srv-detached",
+                "method": args.get("server_method", "roots/list"),
+                "params": args.get("server_params") or {},
+            }
+        )
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": [{"type": "text", "text": "sent"}], "isError": False},
+            }
+        )
+    # Hand back every reply to a server-initiated request received so far.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "provoke-report":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(_server_replies)}],
+                    "isError": False,
+                },
+            }
+        )
     elif method == "tools/call" and req.get("params", {}).get("name") == "provoke":
         args = req.get("params", {}).get("arguments", {}) or {}
         server_method = args.get("server_method", "roots/list")
+        # The params the provoked request carries. `roots/list` takes none, but
+        # `elicitation/create` is only itself with a message and a schema.
+        server_params = args.get("server_params") or {}
         # A notification the client should route to its notification handler.
         write(
             {
@@ -238,7 +285,14 @@ while True:
         )
         # A server-initiated request. The client must answer it; we echo whatever
         # it sends back so the test can assert on the reply it actually produced.
-        write({"jsonrpc": "2.0", "id": "srv-1", "method": server_method, "params": {}})
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": "srv-1",
+                "method": server_method,
+                "params": server_params,
+            }
+        )
         reply = sys.stdin.readline()
         write(
             {

@@ -62,13 +62,19 @@ answer `-32601`, and the failure then surfaces as a broken turn far from the omi
 methods rather than of the schema: an executor asks "may I write a file", not "is
 `clientCapabilities.fs.writeTextFile` true".
 
-Three gate shapes, and they are **not** interchangeable:
+Four gate shapes, and they are **not** interchangeable:
 
 | Gate | Shape | The mistake it prevents |
 |---|---|---|
 | `READ_TEXT_FILE`, `WRITE_TEXT_FILE` | two independent booleans under `fs` | a read grant quietly satisfying a write |
 | `TERMINAL` | one boolean for all five `terminal/*` methods | inventing per-method granularity the schema does not have |
-| `ELICITATION`, `PLAN_UPDATES` | advertised by **presence** — empty marker models | checking `bool(model)` instead of `is not None` |
+| `ELICITATION_FORM`, `ELICITATION_URL` | two independent presence markers **inside** a container that is itself no promise | reading `elicitation` the way `plan` is read, and asking a form of a client that sent `elicitation: {}` |
+| `PLAN_UPDATES` | advertised by **presence** — an empty marker model | checking `bool(model)` instead of `is not None` |
+
+`ElicitationCapabilities` is the one that looks like a marker and is not. It carries
+`form` and `url`, either of which may be absent, so the outer object being present says
+only that the client had an opinion — not what it was. [elicitation.py](elicitation.md)
+uses `ELICITATION_FORM`, because an MCP question is always a form.
 
 `PLAN_UPDATES` gates *update variants*, not a method. `session/update` itself is ungated,
 so a plan-less client means `pyacp-hnk.4` suppresses the `agent_plan_*` variants — never

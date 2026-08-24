@@ -21,6 +21,8 @@ from acp.schema import (
     AgentMessageChunk,
     ClientCapabilities,
     ElicitationCapabilities,
+    ElicitationFormCapabilities,
+    ElicitationUrlCapabilities,
     FileSystemCapabilities,
     PlanCapabilities,
     TextContentBlock,
@@ -90,18 +92,36 @@ def test_terminal_is_one_gate_for_the_whole_family() -> None:
     assert not ClientGates.of(ClientCapabilities(terminal=False)).allows(Gate.TERMINAL)
 
 
-@pytest.mark.parametrize(
-    ("capabilities", "gate"),
-    [
-        (ClientCapabilities(plan=PlanCapabilities()), Gate.PLAN_UPDATES),
-        (ClientCapabilities(elicitation=ElicitationCapabilities()), Gate.ELICITATION),
-    ],
-)
-def test_marker_capabilities_are_advertised_by_presence(
-    capabilities: ClientCapabilities, gate: Gate
-) -> None:
-    """`plan` and `elicitation` are empty models; `bool(model)` would be the wrong check."""
-    assert ClientGates.of(capabilities).allows(gate)
+def test_a_marker_capability_is_advertised_by_presence() -> None:
+    """`plan` is an empty model; `bool(model)` would be the wrong check."""
+    assert ClientGates.of(ClientCapabilities(plan=PlanCapabilities())).allows(Gate.PLAN_UPDATES)
+
+
+def test_elicitation_is_a_container_of_markers_not_a_marker() -> None:
+    """`elicitation: {}` advertises the object and supports neither mode.
+
+    The easy mistake is to read the outer model the way `plan` is read. A client that
+    sends it empty would then be asked a question it cannot render.
+    """
+    empty = ClientGates.of(ClientCapabilities(elicitation=ElicitationCapabilities()))
+
+    assert not empty.allows(Gate.ELICITATION_FORM)
+    assert not empty.allows(Gate.ELICITATION_URL)
+
+
+def test_the_two_elicitation_modes_are_independent() -> None:
+    """A URL grant must never satisfy a form question, and neither implies the other."""
+    form_only = ClientGates.of(
+        ClientCapabilities(elicitation=ElicitationCapabilities(form=ElicitationFormCapabilities()))
+    )
+    url_only = ClientGates.of(
+        ClientCapabilities(elicitation=ElicitationCapabilities(url=ElicitationUrlCapabilities()))
+    )
+
+    assert form_only.allows(Gate.ELICITATION_FORM)
+    assert not form_only.allows(Gate.ELICITATION_URL)
+    assert url_only.allows(Gate.ELICITATION_URL)
+    assert not url_only.allows(Gate.ELICITATION_FORM)
 
 
 def test_an_ungated_call_is_our_bug_not_a_bad_parameter() -> None:

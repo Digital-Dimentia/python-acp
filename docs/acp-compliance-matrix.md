@@ -149,8 +149,8 @@ that must be checked before the call.
 | 7 | `release_terminal` | `terminal/release` | `terminal` | **call, gated** | `pyacp-8bv.3` |
 | 8 | `wait_for_terminal_exit` | `terminal/wait_for_exit` | `terminal` | **call, gated** | `pyacp-8bv.3` |
 | 9 | `kill_terminal` | `terminal/kill` | `terminal` | **call, gated** | `pyacp-8bv.3` |
-| 10 | `create_elicitation` | `elicitation/create` | `elicitation` (**UNSTABLE**) | **call, gated** | `pyacp-8bv.4` |
-| 11 | `complete_elicitation` | `elicitation/complete` | `elicitation` (**UNSTABLE**) | **call, gated** | `pyacp-8bv.4` |
+| 10 | `create_elicitation` | `elicitation/create` | `elicitation.form` (**UNSTABLE**) | **call, gated** | `pyacp-8bv.4` |
+| 11 | `complete_elicitation` | `elicitation/complete` | `elicitation.url` (**UNSTABLE**) | **do not call** — structural | — |
 | 12 | `ext_method` | `_<name>` | none | **do not call** | — |
 | 13 | `ext_notification` | `_<name>` | none | **do not call** | — |
 | 14 | `on_connect` | — | none | **not ours** | — |
@@ -168,8 +168,22 @@ Notes that the table cannot carry:
 - **The `plan` gate belongs to `session_update`, not to a method.** `clientCapabilities.plan`
   governs whether the client accepts `agent_plan_*` *update variants*. `pyacp-hnk.4` must
   suppress those variants rather than skip the `session_update` call.
-- **Elicitation is UNSTABLE in the schema.** `pyacp-8bv.4` is P3 for that reason; it may be
-  removed by an SDK bump, and nothing else may depend on it.
+- **Elicitation is UNSTABLE in the schema.** `pyacp-8bv.4` was P3 for that reason; it may
+  still be removed by an SDK bump, and nothing else may depend on it.
+- **`clientCapabilities.elicitation` is a container, not a marker.** It carries `form` and
+  `url`, either of which may be absent, so `elicitation: {}` advertises the object and
+  supports neither mode. Reading the outer object the way `plan` is read is the mistake;
+  `Gate.ELICITATION_FORM` and `Gate.ELICITATION_URL` are separate for that reason.
+- **`create_elicitation` is called by `elicitation.py`, not by the executor.** The only
+  source of a question here is an MCP server sending us `elicitation/create`, which is
+  forwarded to the client as `ElicitationFormSessionMode` — form, because that is MCP's
+  only shape, and session-scoped, because a backend belongs to a session.
+- **`complete_elicitation` is declined for a structural reason, not deferred.** It is
+  addressed by `elicitationId`, and that field exists **only** on the two URL variants of
+  `ElicitationMode`. A form elicitation has no id to name, and nothing in this runtime
+  creates a URL elicitation — an MCP `requestedSchema` cannot become an out-of-band flow.
+  Changing this would take a new source of URL-mode elicitations, not new plumbing. See
+  [../src/python_acp/elicitation.md](../src/python_acp/elicitation.md).
 - **Ungated calls are a conformance bug, not a runtime error.** A client that never advertised
   `terminal` is entitled to answer `-32601`; the failure surfaces as a broken turn, so
   `pyacp-6ni.3` tests the gate, not the recovery.

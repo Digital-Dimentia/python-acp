@@ -206,6 +206,14 @@ the session with it**: if any server fails to come up, the session created a lin
 is closed before the error propagates, because handing back an id whose tools silently do
 not exist is the failure this whole path avoids.
 
+**A session's backends are also told whether they may ask the human a question.**
+`_elicit_for` reads `Gate.ELICITATION_FORM` *now*, when the subprocesses are spawned,
+because that is when the MCP capability block — a promise — is written. A forwarder means
+the backends are told they may send `elicitation/create`; `None` means they never are.
+`session/fork` builds the child its own, because a forwarder carries the session id it
+will put on the wire. What the forwarder reads *later* is whoever is connected then, and
+[elicitation.md](elicitation.md) records why those can differ.
+
 **One hazard is inherited and cannot be refused here.**
 `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
 that fails validation — a stdio server missing the required `env`, say — is silently
@@ -227,7 +235,7 @@ member.
 | `ext_notification` | `_<name>` | **live** — silent by contract | `pyacp-sld.2` |
 | `on_connect` | — | **live** — stores the `Client` facade | — |
 | `ext_method` | `_<name>` | `-32601` | `pyacp-sld.2` |
-| `new_session` | `session/new` | **live** — registers a session with the executor's modes, opens its MCP servers, rejects the transports `initialize` did not advertise | — |
+| `new_session` | `session/new` | **live** — registers a session with the executor's modes, opens its MCP servers with their roots and elicitation forwarder, rejects the transports `initialize` did not advertise | — |
 | `prompt` | `session/prompt` | **live** — runs a turn as a task and returns its `stopReason` | `pyacp-hnk.2` |
 | `load_session` | `session/load` | **live** — replays the session's transcript, then returns its settings | — |
 | `list_sessions` | `session/list` | **live** — one keyset-paginated page, most recently active first | — |
@@ -268,7 +276,8 @@ so an unsupported version is logged, not raised.
 **Stores `clientCapabilities`.** Whatever the client declared is kept for the life of
 the connection and read back through `PythonAcpAgent.client_capabilities`. Phase 4 gates
 every `fs/*`, `terminal/*`, and `elicitation/*` call on it; a call made without checking
-is a conformance bug the client is entitled to answer `-32601` to. `None` means the
+is a conformance bug the client is entitled to answer `-32601` to. The one gate read
+outside a turn is `ELICITATION_FORM`, at `session/new` — see below. `None` means the
 handshake has not happened and is deliberately not collapsed with a `ClientCapabilities`
 that declares nothing.
 

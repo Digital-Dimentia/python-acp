@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from acp.schema import EnvVariable, McpServerStdio
 
+from python_acp.elicitation import Forwarder
 from python_acp.mcp_registry import (
     McpBackendRegistry,
     UnknownBackendError,
@@ -55,11 +56,20 @@ class FakeConnector:
         #: The roots each connect was handed, in order. What a backend is told its
         #: session's roots are is part of the handshake, so it is worth observing.
         self.roots: list[tuple[str, ...]] = []
+        #: The elicitation forwarder each connect was handed, for the same reason: it
+        #: decides whether the handshake promises `elicitation` at all.
+        self.elicit: list[Forwarder | None] = []
 
-    async def __call__(self, server: McpServerStdio, roots: Sequence[str] = ()) -> FakeClient:
+    async def __call__(
+        self,
+        server: McpServerStdio,
+        roots: Sequence[str] = (),
+        elicit: Forwarder | None = None,
+    ) -> FakeClient:
         if server.name in self.fail_on:
             raise MCPProtocolError(f"{server.name} refused to start")
         self.roots.append(tuple(roots))
+        self.elicit.append(elicit)
         client = FakeClient(server.name)
         self.opened.append(client)
         return client
@@ -188,7 +198,7 @@ async def test_one_server_that_will_not_stop_does_not_strand_the_rest() -> None:
     connector = FakeConnector()
     registry = McpBackendRegistry(connect=connector)
 
-    async def connect(server: McpServerStdio, roots: Sequence[str] = ()):
+    async def connect(server: McpServerStdio, roots: Sequence[str] = (), elicit=None):
         client = Stubborn(server.name) if server.name == "bad" else FakeClient(server.name)
         connector.opened.append(client)
         return client

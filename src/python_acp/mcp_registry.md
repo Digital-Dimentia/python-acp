@@ -34,28 +34,38 @@ disturb another.
 
 ## The session's roots are what we can answer
 
-MCP is bidirectional, and `roots/list` is the one **client** primitive this process can
-serve today. The answer already exists: a session's `cwd` plus its
-`additionalDirectories` is exactly what MCP calls a root. So `open` hands those roots to
-every backend it starts, each one declares `roots` in its `initialize` capability block,
-and `roots_responder` answers `roots/list` from them as `file://` URIs.
+MCP is bidirectional, and `roots/list` is the **client** primitive whose answer this
+process already has: a session's `cwd` plus its `additionalDirectories` is exactly what
+MCP calls a root. (The other primitive a backend may reach here, `elicitation/create`,
+is not answered so much as forwarded — see [elicitation.md](elicitation.md).)
+
+So `open` hands those roots to every backend it starts, each one declares `roots` in its
+`initialize` capability block, and `roots_responder` answers `roots/list` from them as
+`file://` URIs.
 
 Declaring and answering are one decision, not two — see the capability section of
-[mcp_stdio.md](mcp_stdio.md). A backend given no roots therefore gets no handler *and*
-no declaration; `connect_stdio(spec)` with the default empty `roots` is that case, and it
-is what every direct caller in the tests takes.
+[mcp_stdio.md](mcp_stdio.md). A backend given no roots and no forwarder therefore gets no
+handler *and* no declaration; `connect_stdio(spec)` with both defaults is that case, and
+it is what every direct caller in the tests takes.
 
 | Capability | Declared here? | Why |
 |---|---|---|
 | `roots` | yes, whenever the session has roots | `cwd` + `additionalDirectories` is the answer |
 | `roots.listChanged` | no (`false`) | a session's roots are fixed when it is created — `session/prompt` and `session/resume` both validate a `cwd` they then do not apply — so there is nothing to notify |
-| `elicitation` | not yet | `pyacp-8bv.4` is where forwarding it to the ACP client lands; declaring it first would strand a server on a request nothing answers |
+| `elicitation` | yes, whenever `open` is handed a forwarder | [elicitation.py](elicitation.md) answers it by forwarding to the ACP client, and [agent.py](agent.md) supplies a forwarder only when the connected client advertised form-mode elicitation |
 | `sampling` | never | there is no LLM in this runtime |
 
-`roots_responder` raises `UnsupportedServerRequest` for anything else, which becomes
-`-32601`. That matters because it is the *only* handler a backend has: without it a
-`sampling/createMessage` we never declared would come back as `-32603`, saying "we broke"
-instead of "we never offered that".
+`MCPStdioClient` takes exactly one `on_server_request`, so `backend_responder` composes
+the two primitives into it: `roots/list` to `roots_responder`, `elicitation/create` to the
+forwarder, and `UnsupportedServerRequest` — `-32601` — for anything else. That fallthrough
+is what keeps a `sampling/createMessage` we never declared from coming back as `-32603`,
+saying "we broke" instead of "we never offered that". A backend with neither roots nor a
+forwarder gets **no handler at all**, which is what lets `initialize` refuse to send a
+capability block nothing stands behind.
+
+A forwarder is bound to one session id, so a fork never inherits its parent's: the caller
+builds the child's. Roots do inherit, because a fork that names none means "the same
+recipe as the parent"; a session id has no such reading.
 
 Roots are stored per session alongside the specs, and for the same reason: a fork that
 names no roots of its own reuses the parent's recipe. A fork that does name its own —
@@ -115,7 +125,8 @@ problem.
 |---|---|
 | `McpBackendRegistry` | `open` / `fork` / `backends` / `get` / `close` / `close_all`, keyed by session id then name |
 | `connect_stdio(server, roots)` | Spawn one server and complete its handshake — the default `Connector` |
-| `roots_responder(roots)` | The `on_server_request` handler a backend gets: answers `roots/list`, raises `UnsupportedServerRequest` for anything else |
+| `roots_responder(roots)` | Answers `roots/list`, and raises `UnsupportedServerRequest` for anything else |
+| `backend_responder(roots, elicit)` | The single `on_server_request` handler a backend gets, composing `roots_responder` with the elicitation forwarder. `None` when there is nothing to answer |
 | `Connector` | The injection point; `tests/test_mcp_registry.py` drives lifetime and failure handling through it without spawning anything |
 | `UnknownBackendError` | A server name the session did not open |
 

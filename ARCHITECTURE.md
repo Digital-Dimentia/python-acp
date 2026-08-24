@@ -19,6 +19,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
 - MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
 - MCP content mapping (`mcp_content.py`): the seam between MCP's content model and ACP's. Unmappable content becomes a visible placeholder rather than a gap.
+- MCP elicitation forwarding (`elicitation.py`): an MCP server's `elicitation/create` becomes an ACP one, so a question from a backend reaches the only human in the system.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
 
@@ -39,6 +40,7 @@ flowchart LR
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
+    Elicit["elicitation.py<br/>MCP question &rarr; ACP question"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
     MCPProc[("MCP server subprocess<br/>one per session server")]
     StartupProc[("--mcp-command subprocess<br/>optional, deprecated surface only")]
@@ -66,12 +68,21 @@ flowchart LR
     Turns -. "session/update via the Client handle" .-> SDK
     Turns -. "gated client calls (Phase 4)" .-> SDK
     Backends --> MCPClient
+    Backends -. "elicitation forwarder" .-> Elicit
+    Agent --> Elicit
+    MCPClient -. "elicitation/create" .-> Elicit
+    Elicit -. "asks the connected client" .-> SDK
     MCPClient <--> MCPProc
     Legacy --> StartupProc
     CLI -.-> StartupProc
 ```
 
-Two things are worth reading off that diagram. `legacy_ws.py` is the only thing still
+One arrow runs the other way from all the others: `mcp_stdio.py` reaches
+`elicitation.py`, which reaches back out through the SDK. That is a *server-initiated*
+request — the backend asking us a question — and it is the only path in the process where
+traffic starts at the MCP end.
+
+Two more things are worth reading off that diagram. `legacy_ws.py` is the only thing still
 bound to the process-wide `--mcp-command` subprocess — that is what Phase 7 deletes, and
 why `--mcp-command` is now optional for everyone else. And `sessions.py` reaches
 `mcp_registry.py` only through the dotted `on_close` edge: it never imports MCP, so
@@ -371,6 +382,52 @@ sequenceDiagram
 - **A command that exits non-zero means the tool is never called**, the same asymmetry as
   a failed read: its argument would have to be invented.
 
+### An MCP server asking the human a question
+
+Every other flow starts at the ACP client. This one starts at the far end: a backend the
+session opened sends **us** an `elicitation/create`, and the only person anywhere is on
+the ACP connection. The bridge forwards rather than answers.
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant A as agent.py
+    participant R as mcp_registry.py
+    participant S as mcp_stdio.py
+    participant E as elicitation.py
+    participant M as MCP server
+
+    C->>A: session/new
+    Note over A: Gate.ELICITATION_FORM decides whether a forwarder exists at all
+    A->>R: open(session, servers, roots, elicit)
+    R->>S: initialize (capabilities: elicitation only if elicit is not None)
+    S->>M: initialize
+    M-->>S: result
+    Note over C,M: later, mid-tool-call
+    M->>S: elicitation/create {message, requestedSchema}
+    S->>E: forwarded in a task of its own
+    Note over S: the read loop keeps reading — the handler may wait on a human
+    alt somebody is connected and can be asked
+        E->>C: elicitation/create (form, session-scoped)
+        C-->>E: accept | decline | cancel
+        E-->>S: {action, content?}
+    else nobody, or no elicitation.form
+        E-->>S: {action: cancel}
+    end
+    S-->>M: result
+    M-->>S: tools/call result
+```
+
+- **The promise and the answer are one decision.** A backend is told it may elicit only
+  when a forwarder exists, and a forwarder exists only when the client that created the
+  session advertised form-mode elicitation.
+- **The read loop answers nothing itself.** Each server request is handled in its own
+  task, because this one waits on a person — and a loop parked inside it could not read
+  the response to the very call that provoked the question.
+- **`cancel` is not an error**, and neither is a client that never advertised the
+  capability. [elicitation.md](src/python_acp/elicitation.md) has the table of what is
+  answered when there is no human to ask.
+
 ## Module Documentation
 
 - [ACP agent module](src/python_acp/agent.md)
@@ -383,6 +440,7 @@ sequenceDiagram
 - [Turn executor seam module](src/python_acp/turns.md)
 - [MCP tool-router executor module](src/python_acp/turn_mcp_router.md)
 - [CLI module](src/python_acp/cli.md)
+- [MCP elicitation forwarding module](src/python_acp/elicitation.md)
 - [MCP content mapping module](src/python_acp/mcp_content.md)
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)

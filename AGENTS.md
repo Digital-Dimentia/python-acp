@@ -289,13 +289,23 @@ Read that top row before panicking about the bottom two: **our own wheel is unaf
 — a dependency only adds `Requires-Dist` lines to `METADATA`. The sdist delta is almost
 entirely the new test file, not the dependency. The real cost is what gets *installed*:
 `pydantic-core` (4.4 MiB) and `pydantic` (4.3 MiB) together are ~85% of it; the `acp`
-package itself is ~1.0 MiB. The last row is the honest proxy for the container layer,
-since `Containerfile` builds on `python:3.11-slim` and pulls manylinux wheels;
-`pydantic-core` alone is 2.0 MiB of it because it ships a compiled Rust extension.
+package itself is ~1.0 MiB. The last row was the closest available proxy for the
+container layer, since `Containerfile` builds on `python:3.11-slim` and pulls manylinux
+wheels; `pydantic-core` alone is 2.0 MiB of it because it ships a compiled Rust
+extension. The image is now measured directly — see below, and note the two disagree.
 
-The container *image* delta was **not measured** — neither podman nor docker is
-installed on the development machine, and `make container-image` exits 0 without
-building in that case. Tracked in bead `pyacp-8ub`.
+The container *image* delta is **+10,380,287 B (~9.90 MiB)**, taking the image from
+194,680,353 B to 205,060,640 B — a 5.3% increase on a 185.7 MiB image, of which podman
+reports ~155 MB is the `python:3.11-slim` base. Measured under bead `pyacp-8ub` with
+podman 6.1.0 by building `Containerfile` — byte-identical at both commits — at `e28395f^`
+and `e28395f`, the commit that added the pin, so the dependency is the only variable.
+It is a native `linux/arm64` build (no `--platform`, on an arm64 host); an `amd64` image
+will differ somewhat, because `pydantic-core` ships a per-architecture compiled extension.
+
+Mind the gap against the last row of the table: **+2.60 MiB of wheel downloads becomes
++9.90 MiB of image**, roughly 3.8×. Wheels are compressed archives and the image stores
+them unpacked, so the two measure different things — the download figure tracks pull
+bandwidth, the image figure tracks disk footprint. Do not substitute one for the other.
 
 ## Architecture Overview
 

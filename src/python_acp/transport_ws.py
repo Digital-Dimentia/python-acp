@@ -60,7 +60,7 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 
 from python_acp.agent import PythonAcpAgent
 from python_acp.errors import to_error_object, to_request_error
-from python_acp.legacy_ws import LegacyActionHandler, is_legacy
+from python_acp.legacy_ws import LegacyActionHandler, deprecation_notice, is_legacy
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
@@ -146,6 +146,11 @@ class WebSocketMessageTransport:
         The `{"action": ...}` surface signals failure with `{"ok": false, "error": str}`
         and has no code field, so a mapped error is flattened back to its message for
         that shape only. The JSON-RPC half gets a real error object.
+
+        The failure envelope carries the same `deprecated` block the success envelope
+        does, built here because this is where that envelope is built. A client whose
+        call failed is no less on a surface that is going away — and is arguably more
+        likely to be reading the reply closely.
         """
         try:
             reply = await self._legacy.respond(message)
@@ -153,7 +158,13 @@ class WebSocketMessageTransport:
             error = to_request_error(exc)
             if "action" in message:
                 logger.debug("Legacy action error: %s", exc)
-                await self.send({"ok": False, "error": str(exc)})
+                await self.send(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "deprecated": deprecation_notice(message.get("action")),
+                    }
+                )
                 return
             await self._reject(message.get("id"), error)
             return

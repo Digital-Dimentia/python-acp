@@ -128,7 +128,7 @@ the SDK cannot produce:
 |---|---|
 | Malformed JSON | `-32700 Parse error` |
 | Payload is not an object | `-32600 Invalid request` |
-| A legacy `{"action": ...}` request failed | `{"ok": false, "error": "<message>"}` — that envelope has no code field |
+| A legacy `{"action": ...}` request failed | `{"ok": false, "error": "<message>", "deprecated": {...}}` — that envelope has no code field, and carries the same deprecation notice a successful one does |
 | A legacy JSON-RPC request failed | a real error object, via `to_request_error` |
 
 Everything else — `-32601` for an unimplemented ACP method, `-32602` for params the

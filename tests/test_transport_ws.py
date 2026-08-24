@@ -29,7 +29,12 @@ from acp import PROTOCOL_VERSION
 
 from python_acp import __version__
 from python_acp.capabilities import build_agent_capabilities
-from python_acp.legacy_ws import LEGACY_METHODS, is_legacy
+from python_acp.legacy_ws import (
+    ACTION_REPLACEMENTS,
+    LEGACY_METHODS,
+    REMOVED_IN,
+    is_legacy,
+)
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
@@ -578,3 +583,128 @@ async def test_a_disconnect_hands_the_departed_client_to_the_terminal_registry()
     # The facade the SDK built for that socket, not None: `on_connect` ran.
     assert forgotten[0] is not None
     assert hasattr(forgotten[0], "create_terminal")
+
+
+# ---------------------------------------------------------------------------
+# Deprecation of the action surface (pyacp-sld.1). D4 keeps it working; every
+# use now says so, on a channel the client can actually read.
+# ---------------------------------------------------------------------------
+
+
+async def test_every_action_reply_names_its_replacement_and_the_removal() -> None:
+    """The notice is per *call*, because that is the signal a client can act on."""
+    requests = {
+        "list_tools": {"action": "list_tools"},
+        "call_tool": {"action": "call_tool", "name": "echo", "arguments": {"text": "hi"}},
+        "list_prompts": {"action": "list_prompts"},
+        "get_prompt": {"action": "get_prompt", "name": "greeting", "arguments": {"name": "A"}},
+        "list_resources": {"action": "list_resources"},
+        "read_resource": {"action": "read_resource", "name": "greeting://x"},
+        "ping": {"action": "ping"},
+    }
+    assert set(requests) == set(ACTION_REPLACEMENTS), "an action grew or vanished"
+
+    async with bound_socket() as websocket:
+        replies = {name: await websocket.ask(body) for name, body in requests.items()}
+
+    for name, reply in replies.items():
+        assert reply["deprecated"] == {
+            "action": name,
+            "removedIn": REMOVED_IN,
+            "use": ACTION_REPLACEMENTS[name],
+        }, name
+
+
+async def test_the_deprecation_notice_does_not_disturb_the_envelope() -> None:
+    """D4 promises the surface keeps *working*; everything but the new key is untouched."""
+    async with bound_socket() as websocket:
+        tools = await websocket.ask({"action": "list_tools"})
+        called = await websocket.ask(
+            {"action": "call_tool", "name": "echo", "arguments": {"text": "from-ws"}}
+        )
+
+    assert tools["ok"] is True and tools["tools"][0]["name"] == "echo"
+    assert called["ok"] is True and called["result"]["content"][0]["text"] == "from-ws"
+    assert set(tools) == {"ok", "tools", "deprecated"}
+    assert set(called) == {"ok", "result", "deprecated"}
+
+
+async def test_a_failed_action_carries_the_notice_too() -> None:
+    """A client whose call failed is no less on a surface that is going away."""
+    async with bound_socket() as websocket:
+        unsupported = await websocket.ask({"action": "no_such_action"})
+        failed_tool = await websocket.ask({"action": "call_tool", "name": "boom"})
+
+    # An unsupported action still earns the notice, but there is no honest migration
+    # target to name for a method that never existed.
+    assert unsupported["ok"] is False
+    assert "no_such_action" in unsupported["error"]
+    assert unsupported["deprecated"] == {
+        "action": "no_such_action",
+        "removedIn": REMOVED_IN,
+    }
+
+    # A failed *tool* is a normal reply, not an error envelope, and keeps both.
+    assert failed_tool["ok"] is False
+    assert failed_tool["result"]["isError"] is True
+    assert failed_tool["deprecated"]["use"] == "tools/call"
+
+
+async def test_the_json_rpc_passthrough_carries_no_notice() -> None:
+    """`pyacp-sld.1` is scoped to the action surface.
+
+    The passthrough's fate is a *rename* onto `ext_method` (`pyacp-sld.2`), not a
+    removal, so it needs a different message — and injecting one into a JSON-RPC
+    `result` would change a payload clients parse today.
+    """
+    async with bound_socket() as websocket:
+        listed = await websocket.ask({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        called = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "echo", "arguments": {"text": "hi"}}}
+        )
+
+    assert "deprecated" not in listed and "deprecated" not in listed["result"]
+    assert "deprecated" not in called and "deprecated" not in called["result"]
+
+
+async def test_the_server_log_warns_once_per_action_not_once_per_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator's copy is deduped; a client looping on `call_tool` must not bury it."""
+    with caplog.at_level(logging.WARNING, logger="python_acp.legacy_ws"):
+        async with bound_socket() as websocket:
+            for _ in range(3):
+                await websocket.ask({"action": "list_tools"})
+            await websocket.ask({"action": "ping"})
+
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 2, warnings
+    assert "'list_tools' is deprecated" in warnings[0]
+    assert "'tools/list' instead" in warnings[0]
+    assert REMOVED_IN in warnings[0]
+    assert "'ping' is deprecated" in warnings[1]
+
+
+async def test_an_unsupported_action_warns_without_naming_a_replacement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="python_acp.legacy_ws"):
+        async with bound_socket() as websocket:
+            await websocket.ask({"action": "frobnicate"})
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "action surface is deprecated" in message
+    assert REMOVED_IN in message
+    assert "'frobnicate' is not one of its actions" in message
+
+
+def test_the_notice_is_a_fresh_dict_each_time() -> None:
+    """It ends up inside a reply the caller owns and may mutate."""
+    from python_acp.legacy_ws import deprecation_notice
+
+    first = deprecation_notice("list_tools")
+    first["use"] = "smuggled"
+
+    assert deprecation_notice("list_tools")["use"] == "tools/list"

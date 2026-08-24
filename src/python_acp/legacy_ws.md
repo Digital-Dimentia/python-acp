@@ -10,10 +10,10 @@ serves.
 
 ## Two shapes, one deprecation
 
-| Request | Reply |
-|---|---|
-| `{"action": "list_tools", ...}` | `{"ok": true, ...}` / `{"ok": false, "error": "..."}` |
-| `{"method": "tools/call", ...}` | JSON-RPC result / error |
+| Request | Reply | Says so on the wire? |
+|---|---|---|
+| `{"action": "list_tools", ...}` | `{"ok": true, ...}` / `{"ok": false, "error": "..."}` | yes — a `deprecated` block on every reply (`pyacp-sld.1`) |
+| `{"method": "tools/call", ...}` | JSON-RPC result / error | not yet — `pyacp-sld.2` |
 
 The second is the one that needs explaining. `tools/*`, `prompts/*`, and `resources/*`
 are **MCP methods on an ACP wire** — they are not ACP and never were, and
@@ -32,6 +32,62 @@ WebSocket client now gets the same negotiated answer a stdio client gets. That i
 point of `pyacp-tzd.3`, and
 `tests/test_transport_ws.py::test_only_non_acp_methods_are_claimed_as_legacy` is the
 guard: a method claimed here would shadow the agent's.
+
+## Saying so on a channel the client can read
+
+`pyacp-sld.1` is D4's first step: the surface keeps working, and every use of it now says
+it is going away. The notice goes **in the reply**, because a log line is invisible to the
+person who needs it — they are at the other end of a WebSocket and the server's stdout is
+not theirs to read.
+
+```json
+{
+  "ok": true,
+  "tools": [...],
+  "deprecated": {
+    "action": "list_tools",
+    "use": "tools/list",
+    "removedIn": "the ACP v1 migration (Phase 7)"
+  }
+}
+```
+
+Four decisions worth not re-deriving:
+
+| Decision | Why |
+|---|---|
+| The notice is per **call**; the log line is per **action per connection** | The envelope is the signal a client acts on, so it must never be deduped. The log is the operator's copy, and a client looping on `call_tool` would otherwise bury every other line in one repeated sentence. No action is silent; none repeats |
+| `removedIn` names a **phase**, not a version | `pyacp-sld.3` is gated on Phase 8 proving parity, so no release has been promised this surface. Inventing a version here would put a commitment on the wire that nobody made |
+| The **failure** envelope carries it too | A client whose call failed is no less on a surface that is going away, and is arguably reading the reply more closely. Built in `transport_ws.py`, because that is where that envelope is built |
+| An unsupported action gets a notice **without** `use` | Using a surface that is going away is the thing worth saying, and getting the action name wrong does not make it less true — but there is no honest migration target for a method that never existed |
+
+**Everything else about the envelope is untouched.** D4 promises the surface keeps
+*working*, so `ok`, `tools`, `result`, and `error` mean exactly what they meant before and
+`deprecated` is purely additive.
+
+### What `use` points at, and why it is another deprecated thing
+
+Every target in `ACTION_REPLACEMENTS` is on the other half of this module, which reads
+oddly until you ask what an ACP-native replacement would be: **there is no ACP method that
+lists tools.** The ACP path is `session/new` with `mcpServers` and then `session/prompt`,
+where the turn executor calls tools on the client's behalf — a different shape of program,
+not a method swap.
+
+So the table names the like-for-like step a client can take *now*, and `pyacp-sld.2`
+moves those targets under a namespaced prefix on `ext_method` as a second, smaller move.
+Staging it is the whole point of D4. The prefix is not chosen yet, and that bead also owns
+deciding whether the passthrough survives removal at all — so this table names only what
+works today and makes no promise about the name it will have.
+
+| Action | `use` |
+|---|---|
+| `list_tools` | `tools/list` |
+| `call_tool` | `tools/call` |
+| `list_prompts` | `prompts/list` |
+| `get_prompt` | `prompts/get` |
+| `list_resources` | `resources/list` |
+| `read_resource` | `resources/read` |
+| `ping` | `ping` |
 
 ## It needs `--mcp-command`, and nothing else does
 
@@ -73,13 +129,22 @@ A tool that fails returns a **successful** MCP result carrying `isError: true`.
 |---|---|
 | `is_legacy(message)` | Whether a message belongs to this surface rather than to ACP. Called on every inbound frame before the SDK sees it |
 | `LEGACY_METHODS` | The closed set of JSON-RPC methods this handler answers |
-| `LegacyActionHandler` | Serves both shapes for one connection; where `pyacp-sld.1` will put the deprecation warning |
+| `LegacyActionHandler` | Serves both shapes for one connection, and carries the per-connection set of actions already warned about |
+| `LegacyActionHandler.warn_deprecated(action)` | The operator's copy of the notice, logged once per action per connection |
+| `deprecation_notice(action)` | The `deprecated` block that rides on every action reply. A fresh dict each call — it ends up inside a reply the caller owns |
+| `ACTION_REPLACEMENTS` | Action → the JSON-RPC method that does the same job today |
+| `REMOVED_IN` | The milestone every notice names |
 
 ## Tests
 
-`tests/test_transport_ws.py`, under "The deprecated surface". They run through the real
-transport rather than calling the handler directly, because interception order — legacy
-before SDK — is half of what makes the surface work.
+`tests/test_transport_ws.py`, under "The deprecated surface" and "Deprecation of the
+action surface". They run through the real transport rather than calling the handler
+directly, because interception order — legacy before SDK — is half of what makes the
+surface work, and because the failure envelope is built on the transport's side.
+
+`test_every_action_reply_names_its_replacement_and_the_removal` asserts its request table
+against `ACTION_REPLACEMENTS`, so an action that grows or vanishes fails there rather than
+going unnoticed.
 
 ## Related
 

@@ -7,6 +7,19 @@ interface. This module is what makes that a design choice rather than a dead end
 is the same seam the original plan's "backend abstraction for non-MCP executors" asked
 for, satisfied once.
 
+**That claim is now checked rather than asserted.** `pyacp-eg1.2` asked for proof, and
+`tests/test_executor_neutrality.py` is it: a complete executor that has never heard of
+MCP serves a whole session through the SDK's router — create, set a mode, prompt, stream
+updates, close — while an AST walk holds `sessions.py`, `capabilities.py`, and this
+module free of any backend import, and the capability builder's signature is pinned so
+the advertisement cannot start describing one.
+
+Two things that look like leaks and are not, recorded so the next reader does not
+re-litigate them: `session/new` opens the client's `mcpServers` whatever executor is
+wired in — `mcpServers` is an ACP *request parameter*, and an LLM-backed executor would
+want those servers too — and `agentCapabilities.mcpCapabilities` is an ACP-defined field
+every agent must answer. Neither is this module's business, and neither reaches a turn.
+
 ## One method, and nothing it forecloses
 
 ```python

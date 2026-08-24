@@ -1,0 +1,332 @@
+[
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": true,
+          "promptCapabilities": {
+            "image": false,
+            "audio": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false,
+            "acp": false
+          },
+          "sessionCapabilities": {
+            "list": {},
+            "additionalDirectories": {},
+            "fork": {},
+            "resume": {},
+            "close": {}
+          },
+          "auth": {}
+        },
+        "authMethods": [],
+        "agentInfo": {
+          "name": "python-acp",
+          "version": "0.1.0"
+        }
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/tmp",
+        "mcpServers": [
+          {
+            "name": "tools",
+            "command": "/Users/dave/dev/other/python-acp/.venv/bin/python",
+            "args": [
+              "/Users/dave/dev/other/python-acp/tests/fixtures/mock_mcp_server.py"
+            ],
+            "env": []
+          }
+        ]
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "<session-1>",
+        "modes": {
+          "currentModeId": "execute",
+          "availableModes": [
+            {
+              "id": "execute",
+              "name": "Execute",
+              "description": "Run each tool, asking first."
+            },
+            {
+              "id": "dry-run",
+              "name": "Dry run",
+              "description": "Report which tools would run, with their arguments, and run none."
+            },
+            {
+              "id": "auto-approve",
+              "name": "Auto-approve",
+              "description": "Run each tool without asking. Choosing this mode is the consent."
+            }
+          ]
+        },
+        "configOptions": [
+          {
+            "currentValue": true,
+            "id": "announce-tools",
+            "name": "Announce available tools",
+            "description": "List the session's MCP tools at the start of every turn. Costs one tools/list per server per turn; turn it off for a client that already knows.",
+            "type": "boolean"
+          },
+          {
+            "currentValue": "continue",
+            "options": [
+              {
+                "value": "continue",
+                "name": "Continue",
+                "description": "Run the remaining calls."
+              },
+              {
+                "value": "stop",
+                "name": "Stop",
+                "description": "End the turn at the failed call."
+              }
+            ],
+            "id": "on-tool-failure",
+            "name": "On tool failure",
+            "description": "What to do when a tool reports isError.",
+            "type": "select"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "<session-1>",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "{\"tool\": \"echo\", \"arguments\": {\"text\": \"transcript\"}}"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "content": {
+            "text": "{\"tool\": \"echo\", \"arguments\": {\"text\": \"transcript\"}}",
+            "type": "text"
+          },
+          "sessionUpdate": "user_message_chunk"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "availableCommands": [
+            {
+              "name": "tools/echo",
+              "description": "Echoes text"
+            }
+          ],
+          "sessionUpdate": "available_commands_update"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "toolCallId": "<tool-call-1>",
+          "title": "tools/echo",
+          "kind": "other",
+          "status": "pending",
+          "rawInput": {
+            "text": "transcript"
+          },
+          "sessionUpdate": "tool_call"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "session/request_permission",
+      "params": {
+        "sessionId": "<session-1>",
+        "toolCall": {
+          "toolCallId": "<tool-call-1>",
+          "kind": "other",
+          "status": "pending",
+          "title": "tools/echo",
+          "content": [
+            {
+              "content": {
+                "text": "Run the MCP tool tools/echo",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "rawInput": {
+            "text": "transcript"
+          }
+        },
+        "options": [
+          {
+            "optionId": "approve",
+            "name": "Approve",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "approve_for_session",
+            "name": "Approve for session",
+            "kind": "allow_always"
+          },
+          {
+            "optionId": "reject",
+            "name": "Reject",
+            "kind": "reject_once"
+          },
+          {
+            "optionId": "reject_for_session",
+            "name": "Reject for session",
+            "kind": "reject_always"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "approve"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "toolCallId": "<tool-call-1>",
+          "status": "in_progress",
+          "rawInput": {
+            "text": "transcript"
+          },
+          "sessionUpdate": "tool_call_update"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "toolCallId": "<tool-call-1>",
+          "status": "completed",
+          "content": [
+            {
+              "content": {
+                "text": "transcript",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "rawOutput": {
+            "content": [
+              {
+                "type": "text",
+                "text": "transcript"
+              }
+            ],
+            "isError": false
+          },
+          "sessionUpdate": "tool_call_update"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    }
+  }
+]

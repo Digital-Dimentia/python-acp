@@ -456,6 +456,7 @@ make sync
 make install
 make lint
 make test
+make transcripts
 make build
 make wheel
 make sdist
@@ -464,6 +465,10 @@ make package
 make release-bundle
 make clean
 ```
+
+`make transcripts` re-records the golden JSON-RPC transcripts in `tests/transcripts/` and
+prints the diff; read it before committing, since an unreviewed regeneration turns a wire
+regression into a committed expectation.
 
 The release bundle includes the built Python artifacts and, when available, the exported container image archive.
 

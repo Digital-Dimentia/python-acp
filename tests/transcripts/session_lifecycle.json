@@ -1,0 +1,197 @@
+[
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": true,
+          "promptCapabilities": {
+            "image": false,
+            "audio": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false,
+            "acp": false
+          },
+          "sessionCapabilities": {
+            "list": {},
+            "additionalDirectories": {},
+            "fork": {},
+            "resume": {},
+            "close": {}
+          },
+          "auth": {}
+        },
+        "authMethods": [],
+        "agentInfo": {
+          "name": "python-acp",
+          "version": "0.1.0"
+        }
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/tmp",
+        "mcpServers": []
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "sessionId": "<session-1>",
+        "modes": {
+          "currentModeId": "execute",
+          "availableModes": [
+            {
+              "id": "execute",
+              "name": "Execute",
+              "description": "Run each tool, asking first."
+            },
+            {
+              "id": "dry-run",
+              "name": "Dry run",
+              "description": "Report which tools would run, with their arguments, and run none."
+            },
+            {
+              "id": "auto-approve",
+              "name": "Auto-approve",
+              "description": "Run each tool without asking. Choosing this mode is the consent."
+            }
+          ]
+        },
+        "configOptions": [
+          {
+            "currentValue": true,
+            "id": "announce-tools",
+            "name": "Announce available tools",
+            "description": "List the session's MCP tools at the start of every turn. Costs one tools/list per server per turn; turn it off for a client that already knows.",
+            "type": "boolean"
+          },
+          {
+            "currentValue": "continue",
+            "options": [
+              {
+                "value": "continue",
+                "name": "Continue",
+                "description": "Run the remaining calls."
+              },
+              {
+                "value": "stop",
+                "name": "Stop",
+                "description": "End the turn at the failed call."
+              }
+            ],
+            "id": "on-tool-failure",
+            "name": "On tool failure",
+            "description": "What to do when a tool reports isError.",
+            "type": "select"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "<session-1>",
+        "prompt": []
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "availableCommands": [],
+          "sessionUpdate": "available_commands_update"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "content": {
+            "text": "The prompt is empty, so it names no tool to run. Each text block must be a JSON object naming an MCP tool: {\"tool\": \"<name>\", \"arguments\": {...}, \"server\": \"<name>\"}. \"arguments\" defaults to {}; \"server\" may be omitted only when the session opened exactly one MCP server.",
+            "type": "text"
+          },
+          "sessionUpdate": "agent_message_chunk"
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "refusal"
+      }
+    }
+  },
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/close",
+      "params": {
+        "sessionId": "<session-1>"
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {}
+    }
+  }
+]

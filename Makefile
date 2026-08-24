@@ -31,7 +31,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint test build wheel sdist container-image package release-bundle run clean
+.PHONY: venv sync install lint test transcripts build wheel sdist container-image package release-bundle run clean
 
 venv: $(VENV_STAMP)
 
@@ -53,6 +53,13 @@ lint: venv
 
 test: venv
 	$(PYTHON_BIN) -m pytest tests
+
+## Re-record the golden JSON-RPC transcripts in tests/transcripts/, then READ THE DIFF.
+## A regeneration nobody looked at is worse than no transcript: it launders a wire
+## regression into a committed file. See tests/test_transcripts.py.
+transcripts: venv
+	PYTHON_ACP_RECORD_TRANSCRIPTS=1 $(PYTHON_BIN) -m pytest tests/test_transcripts.py
+	@git --no-pager diff --stat tests/transcripts/ || true
 
 build: venv
 	mkdir -p $(BUILD_DIR)

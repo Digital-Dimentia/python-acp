@@ -1,0 +1,55 @@
+[
+  {
+    "dir": "client->agent",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": 1,
+        "agentCapabilities": {
+          "loadSession": true,
+          "promptCapabilities": {
+            "image": false,
+            "audio": false,
+            "embeddedContext": false
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false,
+            "acp": false
+          },
+          "sessionCapabilities": {
+            "list": {},
+            "additionalDirectories": {},
+            "fork": {},
+            "resume": {},
+            "close": {}
+          },
+          "auth": {}
+        },
+        "authMethods": [],
+        "agentInfo": {
+          "name": "python-acp",
+          "version": "0.1.0"
+        }
+      }
+    }
+  }
+]

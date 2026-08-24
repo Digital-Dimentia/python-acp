@@ -49,6 +49,24 @@ behind it has no such method".
 An already-mapped `RequestError` passes through untouched. Re-wrapping would bury a
 deliberate `-32000 auth_required` under a generic `-32603`.
 
+### Not every `-32602` on the wire comes from here
+
+This module never sees a request whose *params do not parse*. The SDK validates against
+the schema before the agent method is called, and answers `-32602` itself with pydantic's
+own report — `data.errors`, a list carrying `loc` and `type` — rather than the `{reason}`
+this table describes. So a client sees two different `data` shapes under one code, and
+which one it gets says which layer refused:
+
+| `data` key | Refused by | Looks like |
+|---|---|---|
+| `errors` | the SDK's schema | `{"errors": [{"type": "missing", "loc": ["cwd"], ...}]}` |
+| `reason` | a `ValueError` raised in this process | `{"reason": "cwd must be an absolute path, got 'rel'"}` |
+| `source` | the MCP backend, forwarded | `{"source": "mcp", "mcpCode": -32601}` |
+
+Never more than one of them. `tests/test_negative.py::test_data_names_the_layer_that_refused`
+is the guard, and the rest of that file is where the whole mapping is asserted as one
+coherent table rather than case by case.
+
 ## `@as_request_error` is load-bearing, not defensive
 
 `acp.Connection._run_request` catches a non-`RequestError` from an agent method and

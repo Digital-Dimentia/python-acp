@@ -14,7 +14,7 @@ logger = logging.getLogger("python_acp.mcp_stdio")
 # version, an int, on the other side of the bridge. Two protocols, two fields.
 #
 # `2025-06-18` rather than `2024-11-05` because `elicitation` is the client
-# capability that maps onto ACP `session/request_permission`, and it does not
+# capability that `elicitation.py` forwards to the ACP client, and it does not
 # exist before that revision. Nothing else in this module changed to get here:
 # the framing, the handshake, and the shutdown sequence are identical, and the
 # result fields the revision adds (`structuredContent`, resource links) are
@@ -29,7 +29,8 @@ _MCP_PROTOCOL_VERSION = "2025-06-18"
 # propose: a server pinned to it must counter with it, and hanging up on that
 # counter would drop every server that has not moved yet. Everything this client
 # calls exists in both revisions; only `elicitation/create` is newer, and a
-# server that countered with `2024-11-05` will never send one.
+# server that countered with `2024-11-05` will never send one -- which is safe
+# rather than lossy, because it is the server that would have asked.
 _SUPPORTED_MCP_PROTOCOL_VERSIONS: frozenset[str] = frozenset(
     {_MCP_PROTOCOL_VERSION, "2024-11-05"}
 )
@@ -53,6 +54,20 @@ class UnsupportedServerRequest(Exception):
     """
 
 
+class MalformedServerRequest(Exception):
+    """An `on_server_request` handler's way of saying "your params are wrong".
+
+    The third answer a handler needs, and the only one it cannot express without
+    this: a result means yes, `UnsupportedServerRequest` means "we never offered
+    this", and every other exception means "we broke". A server that sent a
+    request we *do* serve, with params we cannot read, is none of those — it is
+    the server's mistake, and `-32603` would pin it on us.
+
+    `_handle_server_request` turns this into `-32602`, which is what a JSON-RPC
+    peer says about bad params in either direction.
+    """
+
+
 @dataclass(frozen=True)
 class MCPClientCapabilities:
     """What this client promises an MCP server it can answer.
@@ -70,7 +85,7 @@ class MCPClientCapabilities:
     `sampling/createMessage` has no answer here and never will; leaving the
     field out means the block cannot be built wrong rather than trusting every
     caller to remember. `roots` and `elicitation` are the two we can actually
-    serve — see `mcp_registry.py` for the first and `pyacp-8bv.4` for the second.
+    serve — see `mcp_registry.py` for the first and `elicitation.py` for the second.
     """
 
     #: We can answer `roots/list`. `mcp_registry` sets this from the session's
@@ -81,6 +96,7 @@ class MCPClientCapabilities:
     roots_list_changed: bool = False
     #: We can answer `elicitation/create`. Requires the negotiated revision to be
     #: `2025-06-18` or later — which is why `_MCP_PROTOCOL_VERSION` moved.
+    #: `elicitation.py` is what answers it, by forwarding to the ACP client.
     elicitation: bool = False
 
     def __post_init__(self) -> None:
@@ -162,6 +178,11 @@ class MCPStdioClient:
     own at any time, not only responses to ours. A background read loop consumes
     every stdout message and routes it by shape, so nothing is dropped and the
     server never blocks waiting on a request we ignored.
+
+    **The read loop answers nothing itself.** Each server request is handled in a
+    task of its own, because a handler may wait on a human — `elicitation/create`
+    does — and a read loop parked inside one would stop reading everything else on
+    the connection, including the response to the call that provoked it.
     """
 
     command: Sequence[str]
@@ -202,6 +223,10 @@ class MCPStdioClient:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._stderr_task: asyncio.Task[None] | None = None
         self._stdout_task: asyncio.Task[None] | None = None
+        # One task per server request in flight. They are not awaited by the read
+        # loop -- see `_handle_message` -- so something has to hold a reference or
+        # the event loop may garbage-collect a running task mid-answer.
+        self._server_requests: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         if self._proc is not None:
@@ -221,6 +246,10 @@ class MCPStdioClient:
         proc = self._proc
         if proc is None:
             return
+        # Before the subprocess goes: a handler still waiting on a human is waiting
+        # for a session that is being torn down, and holding it open would spend
+        # both shutdown timeouts on an answer that has nowhere left to go.
+        await self._cancel_server_requests()
         try:
             await self._shutdown_process(proc)
         finally:
@@ -228,6 +257,11 @@ class MCPStdioClient:
             # server's final stdout output is still consumed on the way out.
             await self._cancel_task("_stdout_task")
             await self._cancel_task("_stderr_task")
+            # Again, and this is the call that actually guarantees the set is empty:
+            # the read loop was still running during the shutdown above, so a server
+            # getting one last request out would have been tracked after the first
+            # sweep. Nothing can create one now.
+            await self._cancel_server_requests()
             self._fail_pending(MCPProtocolError("MCP process stopped"))
             self._proc = None
 
@@ -640,7 +674,15 @@ class MCPStdioClient:
             await self._handle_notification(method, params)
             return
 
-        await self._handle_server_request(message_id, method, params)
+        # A task, not an await: `on_server_request` may take arbitrarily long --
+        # `elicitation/create` is forwarded to the ACP client and waits on a human --
+        # and awaiting it here would stall the read loop for the whole duration.
+        # Nothing else on this connection could be read meanwhile, including the
+        # response to the very call that provoked the request. Replies may now leave
+        # out of arrival order, which JSON-RPC allows: the id is what matches them.
+        task = asyncio.create_task(self._handle_server_request(message_id, method, params))
+        self._server_requests.add(task)
+        task.add_done_callback(self._server_requests.discard)
 
     def _resolve_response(self, message_id: Any, message: dict[str, Any]) -> None:
         future = self._pending.pop(message_id, None) if message_id is not None else None
@@ -680,6 +722,11 @@ class MCPStdioClient:
                     request_id, -32601, f"Unsupported method: {method}", method
                 )
                 return
+        except MalformedServerRequest as exc:
+            # The server's mistake, not ours: it used a capability we really do
+            # declare, with params this client cannot read.
+            await self._respond_error(request_id, -32602, str(exc), method)
+            return
         except UnsupportedServerRequest:
             # The handler exists but does not serve this method — which is a
             # different answer from "we broke", and the server needs to be able
@@ -766,6 +813,28 @@ class MCPStdioClient:
         text = line.decode("utf-8", errors="replace").rstrip()
         if text:
             logger.debug("MCP server stderr: %s", text)
+
+    async def _cancel_server_requests(self) -> None:
+        """Abandon every server request still being answered.
+
+        The server is told nothing, because there is nothing useful to tell it: it
+        is about to lose the connection either way, and a reply written into a
+        closing stdin is no better than silence.
+        """
+        # A snapshot, and the live set is left alone: each task's done callback
+        # discards itself from it, and awaiting below is exactly when those callbacks
+        # run — iterating the set itself would change size mid-loop. Emptying it here
+        # instead would strand a task created after this line with nothing tracking it.
+        tasks = tuple(self._server_requests)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 -- logged; one handler must not strand the rest
+                logger.debug("MCP server request handler failed on shutdown", exc_info=True)
 
     async def _cancel_task(self, attribute: str) -> None:
         task: asyncio.Task[None] | None = getattr(self, attribute)

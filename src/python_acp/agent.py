@@ -58,6 +58,8 @@ from python_acp.capabilities import (
     build_agent_capabilities,
     negotiate_protocol_version,
 )
+from python_acp.elicitation import ConnectedClient, Forwarder
+from python_acp.elicitation import forwarder as elicitation_forwarder
 from python_acp.errors import as_request_error
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
@@ -69,7 +71,7 @@ from python_acp.sessions import (
 )
 from python_acp.terminals import TerminalRegistry
 from python_acp.turn_mcp_router import McpToolRouterExecutor
-from python_acp.turns import TurnContext, TurnExecutor
+from python_acp.turns import ClientGates, Gate, TurnContext, TurnExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,30 @@ class PythonAcpAgent:
         """
         return self._client_capabilities
 
+    def _elicit_for(self, session_id: str) -> Forwarder | None:
+        """This session's route from an MCP server's question to the connected human.
+
+        `None` when the current client cannot be asked, and that `None` is what stops
+        `mcp_registry` declaring the MCP `elicitation` capability to the session's
+        backends — the promise and the thing that keeps it are decided together, here,
+        once per session.
+
+        The gate is read **now**, when the backends are spawned, because that is when the
+        promise is made. What the forwarder itself reads later is whoever is connected
+        *then*; `elicitation.py` records why those can differ and what it answers when
+        they do.
+        """
+        if not ClientGates.of(self._client_capabilities).allows(Gate.ELICITATION_FORM):
+            return None
+        return elicitation_forwarder(session_id, self._connected)
+
+    def _connected(self) -> ConnectedClient | None:
+        """Who is on the far side right now, for a caller that may outlive a connection."""
+        client = self._client
+        if client is None:
+            return None
+        return ConnectedClient(client, ClientGates.of(self._client_capabilities))
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -294,10 +320,17 @@ class PythonAcpAgent:
             config_options=self._config_options(),
         )
         try:
-            # The session's roots go with the servers: each backend declares the MCP
-            # `roots` capability and answers `roots/list` from them. See
-            # `mcp_registry.roots_responder`.
-            await self._backends.open(session.session_id, stdio_servers, session.roots)
+            # Two things go with the servers, and both are promises made in the
+            # handshake: the session's roots, which every backend declares and answers
+            # `roots/list` from, and the elicitation forwarder, whose presence is what
+            # decides whether a backend may ask the human anything at all. See
+            # `mcp_registry.backend_responder`.
+            await self._backends.open(
+                session.session_id,
+                stdio_servers,
+                session.roots,
+                self._elicit_for(session.session_id),
+            )
         except Exception:
             # The session was registered a line ago and its backends did not come up.
             # Handing back an id whose tools silently do not exist is the failure this
@@ -382,8 +415,14 @@ class PythonAcpAgent:
         forked = self._sessions.fork(session_id, cwd=root, additional_directories=extra)
         try:
             # The fork's own roots, not the parent's: `session/fork` takes its own `cwd`.
+            # Its own elicitation forwarder too, for the stronger reason that a forwarder
+            # carries the session id it will put on the wire.
             await self._backends.fork(
-                session_id, forked.session_id, stdio_servers, forked.roots
+                session_id,
+                forked.session_id,
+                stdio_servers,
+                forked.roots,
+                self._elicit_for(forked.session_id),
             )
         except Exception:
             await self._sessions.close(forked.session_id)

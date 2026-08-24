@@ -127,7 +127,11 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
      outcomes, gated on client capability.
 4.2. Call `fs/read_text_file` and `fs/write_text_file`; fall back correctly when unsupported.
 4.3. Call the `terminal/*` family.
-4.4. Drive `elicitation/create` and `elicitation/complete`.
+4.4. Drive `elicitation/create` and `elicitation/complete`. **Resolved:** `elicitation/create`
+     is called by `elicitation.py`, forwarding an MCP server's question to the client as a
+     form-mode, session-scoped elicitation. `elicitation/complete` is **declined
+     structurally** — it is addressed by `elicitationId`, which exists only on the two URL
+     variants of `ElicitationMode`, and nothing here creates one.
 
 ### Phase 5 — Authentication, modes, and config options
 

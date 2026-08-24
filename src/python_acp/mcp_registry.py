@@ -32,8 +32,7 @@ disturb another.
 
 ## The session's roots are what we can answer
 
-`roots/list` is the one MCP *client* primitive this process can serve today, and the
-answer already exists: a session's `cwd` plus its `additionalDirectories` is exactly
+`roots/list` is the MCP *client* primitive whose answer this process already has: a session's `cwd` plus its `additionalDirectories` is exactly
 what MCP calls a root. So every backend a session opens is handed those roots, declares
 `roots` in its `initialize` capability block, and answers `roots/list` from them.
 
@@ -42,9 +41,16 @@ what MCP calls a root. So every backend a session opens is handed those roots, d
 there is no change to notify. A fork gets its own subprocesses *and* its own roots,
 because a fork may name a different `cwd`.
 
-`sampling` is never declared: there is no LLM in this runtime. `elicitation` is not
-declared here yet — `pyacp-8bv.4` is where forwarding it to the ACP client lands, and
-declaring it before then would strand a server on a request nothing answers.
+## The second thing we can answer is a question for the human
+
+`elicitation/create` is the other MCP client primitive this process serves, and it serves
+it by forwarding: `elicitation.py` turns the server's question into an ACP
+`elicitation/create` and hands the answer back. A backend is given that forwarder only
+when the client that created the session advertised form-mode elicitation, and the
+capability block follows the forwarder rather than the other way round — declaring
+`elicitation` with nothing behind it is the one thing a capability block must never do.
+
+`sampling` is never declared: there is no LLM in this runtime.
 
 ## Opening is all-or-nothing
 
@@ -64,6 +70,7 @@ from typing import Any
 
 from acp.schema import McpServerStdio
 
+from python_acp.elicitation import MCP_ELICITATION_CREATE, Forwarder
 from python_acp.mcp_stdio import (
     MCPClientCapabilities,
     MCPProtocolError,
@@ -78,7 +85,9 @@ logger = logging.getLogger(__name__)
 #: registry's lifetime and failure handling without spawning anything. The roots are the
 #: session's, and travel with the spec because they are part of what the handshake
 #: promises — see `roots_responder`.
-Connector = Callable[[McpServerStdio, Sequence[str]], Awaitable[MCPStdioClient]]
+Connector = Callable[
+    [McpServerStdio, Sequence[str], Forwarder | None], Awaitable[MCPStdioClient]
+]
 
 
 class UnknownBackendError(ValueError):
@@ -102,10 +111,9 @@ def roots_responder(roots: Sequence[str]) -> ServerRequestHandler:
     rather than on every request. `Path.as_uri()` requires an absolute path, which
     `paths.normalize_roots` has already guaranteed at the `session/new` edge.
 
-    Any other method raises `UnsupportedServerRequest`, which becomes `-32601`. That
-    matters more than it looks: this handler is the *only* one a backend has, so without
-    it a `sampling/createMessage` we never declared would come back as `-32603` — "we
-    broke" instead of "we never offered that".
+    Any other method raises `UnsupportedServerRequest`, which is how `backend_responder`
+    composes it with the elicitation forwarder without either half having to know what the
+    other serves.
     """
     listing = tuple(
         {"uri": Path(root).as_uri(), "name": Path(root).name or root} for root in roots
@@ -122,7 +130,38 @@ def roots_responder(roots: Sequence[str]) -> ServerRequestHandler:
     return respond
 
 
-async def connect_stdio(server: McpServerStdio, roots: Sequence[str] = ()) -> MCPStdioClient:
+def backend_responder(
+    roots: Sequence[str], elicit: Forwarder | None
+) -> ServerRequestHandler | None:
+    """Everything one backend may ask of us, behind the single handler MCP allows.
+
+    `MCPStdioClient` takes one `on_server_request`, so the two primitives this process
+    serves have to arrive as one callable. Dispatch is by method name and the fallthrough
+    is `UnsupportedServerRequest` — `-32601`, "we never offered this" — which is what
+    keeps a `sampling/createMessage` we never declared from being reported as our failure.
+
+    `None` when there is nothing to answer at all, so a backend with no roots and no
+    elicitation promises nothing and is handed no handler to prove it.
+    """
+    roots_handler = roots_responder(roots) if roots else None
+    if roots_handler is None and elicit is None:
+        return None
+
+    async def respond(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "roots/list" and roots_handler is not None:
+            return await roots_handler(method, params)
+        if method == MCP_ELICITATION_CREATE and elicit is not None:
+            return await elicit(params)
+        raise UnsupportedServerRequest(method)
+
+    return respond
+
+
+async def connect_stdio(
+    server: McpServerStdio,
+    roots: Sequence[str] = (),
+    elicit: Forwarder | None = None,
+) -> MCPStdioClient:
     """Spawn one MCP server and complete its handshake.
 
     The handshake happens **here**, not lazily on first use. A server that cannot
@@ -133,12 +172,18 @@ async def connect_stdio(server: McpServerStdio, roots: Sequence[str] = ()) -> MC
     handshake declares the `roots` capability and installs the handler that honours it;
     empty means neither, because declaring a capability nothing answers is the one thing
     a capability block must never do.
+
+    `elicit` follows exactly the same rule: a forwarder means the handshake declares
+    `elicitation` and the handler answers it, and `None` means the server is never told
+    it may ask. `agent.py` supplies one only when the connected client can be asked.
     """
     client = MCPStdioClient(
         [server.command, *server.args],
         env={variable.name: variable.value for variable in server.env},
-        on_server_request=roots_responder(roots) if roots else None,
-        client_capabilities=MCPClientCapabilities(roots=bool(roots)),
+        on_server_request=backend_responder(roots, elicit),
+        client_capabilities=MCPClientCapabilities(
+            roots=bool(roots), elicitation=elicit is not None
+        ),
     )
     await client.start()
     try:
@@ -174,6 +219,7 @@ class McpBackendRegistry:
         session_id: str,
         servers: Sequence[McpServerStdio],
         roots: Sequence[str] = (),
+        elicit: Forwarder | None = None,
     ) -> Mapping[str, MCPStdioClient]:
         """Start every server for a session, or none of them.
 
@@ -184,6 +230,10 @@ class McpBackendRegistry:
         `roots` is the session's `cwd` + `additionalDirectories`, handed to every backend
         so each can declare and answer `roots/list`. Defaulting it to empty keeps a
         caller that has no roots to give from accidentally promising one.
+
+        `elicit` is this session's forwarder to the ACP client, or `None` when there is
+        nobody to forward to. It defaults to `None` for the same reason `roots` defaults
+        to empty: a caller that says nothing must not promise something.
         """
         if session_id in self._backends or session_id in self._specs:
             raise RuntimeError(f"Session {session_id!r} already has MCP backends open")
@@ -197,7 +247,7 @@ class McpBackendRegistry:
         try:
             for server in servers:
                 logger.debug("Opening MCP server %r for session %s", server.name, session_id)
-                opened[server.name] = await self._connect(server, tuple(roots))
+                opened[server.name] = await self._connect(server, tuple(roots), elicit)
         except Exception:
             # All-or-nothing: a half-open session would hand back an id whose tools
             # silently do not exist, and leak the subprocesses that did start.
@@ -215,6 +265,7 @@ class McpBackendRegistry:
         child_id: str,
         servers: Sequence[McpServerStdio] | None = None,
         roots: Sequence[str] | None = None,
+        elicit: Forwarder | None = None,
     ) -> Mapping[str, MCPStdioClient]:
         """Open a fork's servers: its own subprocesses, from the parent's specs.
 
@@ -230,10 +281,14 @@ class McpBackendRegistry:
         `roots` follows the same rule for the same reason: `session/fork` takes its own
         `cwd`, so a fork into a different working tree must declare *its* roots to its
         own subprocesses, not the parent's.
+
+        `elicit` is **not** inherited and has no parent default: a forwarder is bound to
+        one session id, and reusing the parent's would send the fork's questions to the
+        wrong session. The caller builds the child's.
         """
         specs = self._specs.get(parent_id, ()) if servers is None else tuple(servers)
         forked_roots = self._roots.get(parent_id, ()) if roots is None else tuple(roots)
-        return await self.open(child_id, specs, forked_roots)
+        return await self.open(child_id, specs, forked_roots, elicit)
 
     def backends(self, session_id: str) -> Mapping[str, MCPStdioClient]:
         """Every server this session opened. Empty for a session that opened none.
@@ -292,6 +347,7 @@ __all__ = [
     "McpBackendRegistry",
     "MCPProtocolError",
     "UnknownBackendError",
+    "backend_responder",
     "connect_stdio",
     "roots_responder",
 ]

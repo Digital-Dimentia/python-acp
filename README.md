@@ -289,7 +289,7 @@ A change is announced with `config_option_update`, carrying **every** option rat
 the changed one — which is what a client re-rendering a settings panel wants.
 
 **Every tool call asks the client for permission first**, via
-`session/request_permission`. MCP `2024-11-05` has no tool annotations, so there is no way
+`session/request_permission`. Nothing reads a tool's annotations yet, so there is no way
 to tell a read from a delete — treating every call as consequential is the only setting
 that cannot silently do damage, and the "for session" options keep it to once per tool.
 Choosing a reject option marks that call `failed` and lets the rest of the turn continue;

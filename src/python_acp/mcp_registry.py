@@ -30,6 +30,22 @@ landmine.
 A refcounted share is a valid later optimisation *provided* closing one session cannot
 disturb another.
 
+## The session's roots are what we can answer
+
+`roots/list` is the one MCP *client* primitive this process can serve today, and the
+answer already exists: a session's `cwd` plus its `additionalDirectories` is exactly
+what MCP calls a root. So every backend a session opens is handed those roots, declares
+`roots` in its `initialize` capability block, and answers `roots/list` from them.
+
+`listChanged` is `false` and honest: a session's roots are fixed when it is created —
+`session/prompt` and `session/resume` both validate a `cwd` they then do not apply — so
+there is no change to notify. A fork gets its own subprocesses *and* its own roots,
+because a fork may name a different `cwd`.
+
+`sampling` is never declared: there is no LLM in this runtime. `elicitation` is not
+declared here yet — `pyacp-8bv.4` is where forwarding it to the ACP client lands, and
+declaring it before then would strand a server on a request nothing answers.
+
 ## Opening is all-or-nothing
 
 `session/new` either gets a session with every server it asked for, or an error. A
@@ -43,16 +59,26 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from acp.schema import McpServerStdio
 
-from python_acp.mcp_stdio import MCPProtocolError, MCPStdioClient
+from python_acp.mcp_stdio import (
+    MCPClientCapabilities,
+    MCPProtocolError,
+    MCPStdioClient,
+    ServerRequestHandler,
+    UnsupportedServerRequest,
+)
 
 logger = logging.getLogger(__name__)
 
 #: How a spec becomes a running, handshaken client. Injectable so tests can drive the
-#: registry's lifetime and failure handling without spawning anything.
-Connector = Callable[[McpServerStdio], Awaitable[MCPStdioClient]]
+#: registry's lifetime and failure handling without spawning anything. The roots are the
+#: session's, and travel with the spec because they are part of what the handshake
+#: promises — see `roots_responder`.
+Connector = Callable[[McpServerStdio, Sequence[str]], Awaitable[MCPStdioClient]]
 
 
 class UnknownBackendError(ValueError):
@@ -69,16 +95,50 @@ class UnknownBackendError(ValueError):
         self.name = name
 
 
-async def connect_stdio(server: McpServerStdio) -> MCPStdioClient:
+def roots_responder(roots: Sequence[str]) -> ServerRequestHandler:
+    """Answer `roots/list` with a session's roots, and nothing else.
+
+    MCP roots are `file://` URIs, so the stored absolute paths are converted once here
+    rather than on every request. `Path.as_uri()` requires an absolute path, which
+    `paths.normalize_roots` has already guaranteed at the `session/new` edge.
+
+    Any other method raises `UnsupportedServerRequest`, which becomes `-32601`. That
+    matters more than it looks: this handler is the *only* one a backend has, so without
+    it a `sampling/createMessage` we never declared would come back as `-32603` — "we
+    broke" instead of "we never offered that".
+    """
+    listing = tuple(
+        {"uri": Path(root).as_uri(), "name": Path(root).name or root} for root in roots
+    )
+
+    async def respond(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "roots/list":
+            raise UnsupportedServerRequest(method)
+        # A fresh copy per call, entries included: the reply is serialised by the caller,
+        # but handing out the stored dicts would let one mutation rewrite every later
+        # answer for the life of the session.
+        return {"roots": [dict(root) for root in listing]}
+
+    return respond
+
+
+async def connect_stdio(server: McpServerStdio, roots: Sequence[str] = ()) -> MCPStdioClient:
     """Spawn one MCP server and complete its handshake.
 
     The handshake happens **here**, not lazily on first use. A server that cannot
     negotiate is a `session/new` failure the client can act on; discovering it mid-turn
     would surface as a broken prompt with no explanation.
+
+    `roots` is the session's `cwd` + `additionalDirectories`. Non-empty means the
+    handshake declares the `roots` capability and installs the handler that honours it;
+    empty means neither, because declaring a capability nothing answers is the one thing
+    a capability block must never do.
     """
     client = MCPStdioClient(
         [server.command, *server.args],
         env={variable.name: variable.value for variable in server.env},
+        on_server_request=roots_responder(roots) if roots else None,
+        client_capabilities=MCPClientCapabilities(roots=bool(roots)),
     )
     await client.start()
     try:
@@ -98,6 +158,9 @@ class McpBackendRegistry:
         # own subprocesses (see the module docstring), which means it needs the recipe,
         # not the running clients.
         self._specs: dict[str, tuple[McpServerStdio, ...]] = {}
+        # The roots each session declared, kept for the same reason as the specs: a fork
+        # that does not name its own reuses the parent's recipe, roots included.
+        self._roots: dict[str, tuple[str, ...]] = {}
         self._connect = connect
 
     def __contains__(self, session_id: object) -> bool:
@@ -107,13 +170,20 @@ class McpBackendRegistry:
         return len(self._backends)
 
     async def open(
-        self, session_id: str, servers: Sequence[McpServerStdio]
+        self,
+        session_id: str,
+        servers: Sequence[McpServerStdio],
+        roots: Sequence[str] = (),
     ) -> Mapping[str, MCPStdioClient]:
         """Start every server for a session, or none of them.
 
         Names must be unique within one session: `pyacp-hnk.2` routes a tool call by
         server name, and two servers answering to one name would make which of them ran
         a matter of dict ordering.
+
+        `roots` is the session's `cwd` + `additionalDirectories`, handed to every backend
+        so each can declare and answer `roots/list`. Defaulting it to empty keeps a
+        caller that has no roots to give from accidentally promising one.
         """
         if session_id in self._backends or session_id in self._specs:
             raise RuntimeError(f"Session {session_id!r} already has MCP backends open")
@@ -127,7 +197,7 @@ class McpBackendRegistry:
         try:
             for server in servers:
                 logger.debug("Opening MCP server %r for session %s", server.name, session_id)
-                opened[server.name] = await self._connect(server)
+                opened[server.name] = await self._connect(server, tuple(roots))
         except Exception:
             # All-or-nothing: a half-open session would hand back an id whose tools
             # silently do not exist, and leak the subprocesses that did start.
@@ -136,6 +206,7 @@ class McpBackendRegistry:
 
         self._backends[session_id] = opened
         self._specs[session_id] = tuple(servers)
+        self._roots[session_id] = tuple(roots)
         return dict(opened)
 
     async def fork(
@@ -143,6 +214,7 @@ class McpBackendRegistry:
         parent_id: str,
         child_id: str,
         servers: Sequence[McpServerStdio] | None = None,
+        roots: Sequence[str] | None = None,
     ) -> Mapping[str, MCPStdioClient]:
         """Open a fork's servers: its own subprocesses, from the parent's specs.
 
@@ -154,9 +226,14 @@ class McpBackendRegistry:
         Sharing the parent's *clients* instead would be cheaper and wrong: `session/close`
         on the fork would tear down the parent's tools. `sessions.py` records the same
         decision for the session state itself, and the two have to agree.
+
+        `roots` follows the same rule for the same reason: `session/fork` takes its own
+        `cwd`, so a fork into a different working tree must declare *its* roots to its
+        own subprocesses, not the parent's.
         """
         specs = self._specs.get(parent_id, ()) if servers is None else tuple(servers)
-        return await self.open(child_id, specs)
+        forked_roots = self._roots.get(parent_id, ()) if roots is None else tuple(roots)
+        return await self.open(child_id, specs, forked_roots)
 
     def backends(self, session_id: str) -> Mapping[str, MCPStdioClient]:
         """Every server this session opened. Empty for a session that opened none.
@@ -184,6 +261,7 @@ class McpBackendRegistry:
         servers is ordinary, and the hook fires for every session either way.
         """
         self._specs.pop(session_id, None)
+        self._roots.pop(session_id, None)
         opened = self._backends.pop(session_id, None)
         if not opened:
             return
@@ -215,4 +293,5 @@ __all__ = [
     "MCPProtocolError",
     "UnknownBackendError",
     "connect_stdio",
+    "roots_responder",
 ]

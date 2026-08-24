@@ -44,6 +44,14 @@ rather than only while one of our requests is in flight.
   against `_SUPPORTED_MCP_PROTOCOL_VERSIONS` or raises `MCPProtocolError`.
 - `_MCP_PROTOCOL_VERSION` / `_SUPPORTED_MCP_PROTOCOL_VERSIONS`: the revision
   proposed, and the set that may be accepted in reply.
+- `MCPClientCapabilities`: the frozen block `initialize` promises. `roots`,
+  `roots_list_changed`, `elicitation` — and deliberately no `sampling` field.
+- `MCPStdioClient.client_capabilities`: what this client will declare. Empty by
+  default.
+- `MCPStdioClient._declared_capabilities()`: builds the block and refuses to send
+  a non-empty one with no `on_server_request` handler behind it.
+- `UnsupportedServerRequest`: raised by a handler for a method it does not serve;
+  becomes `-32601` rather than `-32603`.
 - `MCPStdioClient.request()`: sends a request and awaits its correlated reply.
 - `MCPStdioClient.notify()`: sends a notification without expecting a response.
 - `MCPStdioClient.cancel_request()`: sends `notifications/cancelled` for a
@@ -107,17 +115,60 @@ waiting on us — the failure this design exists to prevent.
 - Anything else goes to `on_server_request` when one is set; its return value
   becomes the `result`.
 - With no handler set, the reply is `-32601` naming the method.
-- A handler that raises produces `-32603` carrying the exception text; the read
-  loop keeps running.
+- A handler that raises `UnsupportedServerRequest` also produces `-32601` — the
+  same answer, because it means the same thing.
+- A handler that raises anything else produces `-32603` carrying the exception
+  text; the read loop keeps running.
 
-`on_server_request` is where ACP integration will hook in: MCP's
-`elicitation/create` maps onto ACP's `session/request_permission`, and
+**Why the two error codes are not interchangeable.** `-32603` says *we broke*;
+`-32601` says *we never offered this*. One callable stands behind every declared
+capability, so a handler wired up for `roots/list` is also the thing a server's
+`sampling/createMessage` reaches. Collapsing that into `-32603` would tell the
+server its request failed when the truth is that it was never on offer, and the
+distinction is what makes the capability block above mean anything on the wire.
+
+`on_server_request` is where ACP integration hooks in.
+[mcp_registry.py](mcp_registry.md) installs one per backend today, answering
+`roots/list` from the session's roots. MCP's `elicitation/create` maps onto ACP's
+`session/request_permission` and lands in `pyacp-8bv.4`;
 `sampling/createMessage` has no answer here because this runtime has no LLM.
+
+## Client Capabilities
+
+A capability block is a **promise**. MCP says a server MUST NOT use a capability
+the client did not declare, and by symmetry a client that declares one must be
+able to answer it. Both failure modes are real and neither is loud:
+
+| Mistake | What the server does |
+|---|---|
+| declare nothing (`{}`) | never sends `roots/list`, `elicitation/create`, or anything else, so the handler is dead code |
+| declare what nothing answers | sends the request and gets a `-32601` it was told would not happen |
+
+So `initialize` refuses the second one before it reaches the wire:
+`_declared_capabilities()` raises `RuntimeError` when the block is non-empty and
+`on_server_request` is `None`. That is a conformance bug in *this* process, not
+a bad input, which is why it is a `RuntimeError` and not an `MCPProtocolError`.
+The check is presence, not coverage — nothing here can tell which methods a
+single callable actually handles, which is what `UnsupportedServerRequest` is
+for.
+
+| Field | Wire | Answered by |
+|---|---|---|
+| `roots` | `"roots": {"listChanged": <bool>}` | `mcp_registry.roots_responder`, from the session's `cwd` + `additionalDirectories` |
+| `roots_list_changed` | the `listChanged` flag | nothing — `false` today, because a session's roots are fixed for its lifetime |
+| `elicitation` | `"elicitation": {}` | nobody yet; `pyacp-8bv.4` forwards it to ACP `session/request_permission` |
+| *(no field)* | `"sampling": {}` | **never.** There is no LLM in this runtime |
+
+`sampling` has no field on purpose. Leaving it out means the block cannot be
+built wrong, rather than trusting every caller to remember not to set it.
+
+An undeclared capability contributes **no key at all**, not a `false`: in MCP,
+absent means unsupported.
 
 ## Protocol Version Negotiation
 
 The handshake settles on a version; it does not assume one. The client proposes
-`_MCP_PROTOCOL_VERSION` (`2024-11-05`) and the server replies with the revision
+`_MCP_PROTOCOL_VERSION` (`2025-06-18`) and the server replies with the revision
 it will actually use — which need not be the one proposed. A server that cannot
 speak the proposal MUST counter with one it supports, and a client that cannot
 speak the counter MUST hang up rather than carry on.
@@ -133,11 +184,23 @@ never sent on the rejection path — half a handshake strands the server.
 | any other version | `MCPProtocolError: Unsupported MCP protocol version <v> from server`, subprocess stopped |
 | `protocolVersion` absent, empty, or not a string | `MCPProtocolError: MCP initialize result omitted protocolVersion`, subprocess stopped |
 
-`_SUPPORTED_MCP_PROTOCOL_VERSIONS` currently holds exactly one revision, so in
-practice every accepted answer equals the proposal. The set — rather than an
-equality check against what was sent — is what lets a later revision be added
-without rewriting the rule. Widening it is a claim that this client can speak
-that revision; read
+**Proposed and accepted are two different sets, and that is the point.** We
+propose `2025-06-18` and accept either it or `2024-11-05`:
+
+| | Revision | Why |
+|---|---|---|
+| proposed | `2025-06-18` | `elicitation` — the client capability that maps onto ACP `session/request_permission` — does not exist before it |
+| also accepted | `2024-11-05` | a server pinned there must counter with it, and hanging up on that counter would drop every server that has not moved yet |
+
+Nothing in this module changed to make the bump: the framing, the handshake, and
+the shutdown sequence are identical across the two, the result fields
+`2025-06-18` adds (`structuredContent`, resource links) are passed through
+untouched, and JSON-RPC batching — the one thing it removes — was never used
+here. Every method this client calls exists in both. Only `elicitation/create`
+is newer, and a server that countered with `2024-11-05` will never send one.
+
+Widening the accepted set further is a claim that this client can speak that
+revision; read
 [spec-versions.md](../../.claude/skills/mcp-protocol/spec-versions.md) first,
 since `2026-07-28` replaces the handshake outright.
 
@@ -153,6 +216,11 @@ proposed, which is what a supporting server does:
 | (none) | echo the proposed `protocolVersion` back |
 | `MOCK_MCP_PROTOCOL_VERSION=<v>` | answer with `<v>` regardless of the proposal (the counter-offer path) |
 | `MOCK_MCP_OMIT_PROTOCOL_VERSION=1` | omit `protocolVersion` from the result entirely |
+
+It also records the `initialize` params exactly as they arrived and hands them
+back through the `handshake-report` tool. A test that wants to check the
+capability block should read it there rather than off the client attribute: what
+a promise says is what reached the server.
 
 ## List Pagination
 

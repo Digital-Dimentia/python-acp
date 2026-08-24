@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import signal
@@ -13,8 +14,10 @@ import pytest
 from python_acp.cli import build_parser
 from python_acp.mcp_stdio import (
     _MCP_PROTOCOL_VERSION,
+    MCPClientCapabilities,
     MCPProtocolError,
     MCPStdioClient,
+    UnsupportedServerRequest,
     tool_result_text,
 )
 
@@ -777,3 +780,115 @@ async def test_abandoning_one_request_does_not_disturb_the_next() -> None:
         result = await asyncio.wait_for(client.call_tool("echo", {"text": "hi"}), timeout=10)
 
     assert result["content"][0]["text"] == "hi"
+
+
+# ---------------------------------------------------------------------------
+# Client capabilities: a capability block is a promise, and `initialize` is
+# where it is made. (pyacp-pb7)
+# ---------------------------------------------------------------------------
+
+
+async def handshake_params(client: MCPStdioClient) -> dict:
+    """The `initialize` params as the fixture actually received them.
+
+    Read off the wire rather than off the client, because what a capability block
+    promises is what arrived at the server.
+    """
+    result = await asyncio.wait_for(client.call_tool("handshake-report", {}), timeout=10)
+    return json.loads(result["content"][0]["text"])
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_can_answer_nothing_declares_nothing() -> None:
+    """An empty block is the honest one for a client with no handler wired up."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        params = await handshake_params(client)
+
+    assert params["capabilities"] == {}
+    assert params["protocolVersion"] == _MCP_PROTOCOL_VERSION == "2025-06-18"
+
+
+@pytest.mark.asyncio
+async def test_declared_capabilities_reach_the_server_in_the_handshake() -> None:
+    """Absent means unsupported, so an undeclared capability contributes no key."""
+
+    async def handler(method: str, params: dict) -> dict:
+        return {"roots": []}
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(
+        cmd,
+        on_server_request=handler,
+        client_capabilities=MCPClientCapabilities(roots=True),
+    ) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        params = await handshake_params(client)
+
+    assert params["capabilities"] == {"roots": {"listChanged": False}}
+
+
+@pytest.mark.asyncio
+async def test_declaring_a_capability_with_no_handler_is_refused() -> None:
+    """Promising what nothing answers strands the server; fail before the wire."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(
+        cmd, client_capabilities=MCPClientCapabilities(roots=True)
+    ) as client:
+        with pytest.raises(RuntimeError, match="no on_server_request handler"):
+            await asyncio.wait_for(client.initialize(), timeout=10)
+
+        # Nothing was negotiated, because nothing was sent.
+        assert client.protocol_version is None
+
+
+def test_the_capability_block_has_no_way_to_declare_sampling() -> None:
+    """There is no LLM in this runtime, so the field does not exist to be set wrong."""
+    names = {f.name for f in dataclasses.fields(MCPClientCapabilities)}
+    assert "sampling" not in names
+    assert names == {"roots", "roots_list_changed", "elicitation"}
+
+    everything = MCPClientCapabilities(roots=True, roots_list_changed=True, elicitation=True)
+    assert everything.to_wire() == {"roots": {"listChanged": True}, "elicitation": {}}
+
+
+def test_roots_list_changed_without_roots_is_rejected() -> None:
+    """A change notification for a list we never offered means nothing."""
+    with pytest.raises(ValueError, match="no list to change"):
+        MCPClientCapabilities(roots_list_changed=True)
+
+
+@pytest.mark.asyncio
+async def test_a_method_the_handler_does_not_serve_is_32601_not_32603() -> None:
+    """`-32603` says *we broke*; the truth is *we never offered this*."""
+
+    async def handler(method: str, params: dict) -> dict:
+        raise UnsupportedServerRequest(method)
+
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, on_server_request=handler) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+        result = await asyncio.wait_for(
+            client.call_tool("provoke", {"server_method": "sampling/createMessage"}),
+            timeout=10,
+        )
+
+    reply = json.loads(result["content"][0]["text"])
+    assert reply["error"]["code"] == -32601
+    assert "sampling/createMessage" in reply["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_server_pinned_to_the_previous_revision_is_still_met(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """We propose 2025-06-18; hanging up on a 2024-11-05 counter would drop real servers."""
+    monkeypatch.setenv("MOCK_MCP_PROTOCOL_VERSION", "2024-11-05")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await asyncio.wait_for(client.initialize(), timeout=10)
+
+        assert client.protocol_version == "2024-11-05"
+        # And the connection is usable, not merely un-hung-up-on.
+        assert [tool["name"] for tool in await client.list_tools()] == ["echo"]

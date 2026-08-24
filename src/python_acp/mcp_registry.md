@@ -32,6 +32,35 @@ agree — otherwise a forked session's `close` becomes a landmine for its parent
 refcounted share is a valid later optimisation *provided* closing one session cannot
 disturb another.
 
+## The session's roots are what we can answer
+
+MCP is bidirectional, and `roots/list` is the one **client** primitive this process can
+serve today. The answer already exists: a session's `cwd` plus its
+`additionalDirectories` is exactly what MCP calls a root. So `open` hands those roots to
+every backend it starts, each one declares `roots` in its `initialize` capability block,
+and `roots_responder` answers `roots/list` from them as `file://` URIs.
+
+Declaring and answering are one decision, not two — see the capability section of
+[mcp_stdio.md](mcp_stdio.md). A backend given no roots therefore gets no handler *and*
+no declaration; `connect_stdio(spec)` with the default empty `roots` is that case, and it
+is what every direct caller in the tests takes.
+
+| Capability | Declared here? | Why |
+|---|---|---|
+| `roots` | yes, whenever the session has roots | `cwd` + `additionalDirectories` is the answer |
+| `roots.listChanged` | no (`false`) | a session's roots are fixed when it is created — `session/prompt` and `session/resume` both validate a `cwd` they then do not apply — so there is nothing to notify |
+| `elicitation` | not yet | `pyacp-8bv.4` is where forwarding it to the ACP client lands; declaring it first would strand a server on a request nothing answers |
+| `sampling` | never | there is no LLM in this runtime |
+
+`roots_responder` raises `UnsupportedServerRequest` for anything else, which becomes
+`-32601`. That matters because it is the *only* handler a backend has: without it a
+`sampling/createMessage` we never declared would come back as `-32603`, saying "we broke"
+instead of "we never offered that".
+
+Roots are stored per session alongside the specs, and for the same reason: a fork that
+names no roots of its own reuses the parent's recipe. A fork that does name its own —
+`session/fork` carries a `cwd` — declares *those* to its own subprocesses.
+
 ## Opening is all-or-nothing
 
 `session/new` either gets a session with every server it asked for, or an error.
@@ -84,8 +113,9 @@ problem.
 
 | Symbol | Purpose |
 |---|---|
-| `McpBackendRegistry` | `open` / `backends` / `get` / `close` / `close_all`, keyed by session id then name |
-| `connect_stdio(server)` | Spawn one server and complete its handshake — the default `Connector` |
+| `McpBackendRegistry` | `open` / `fork` / `backends` / `get` / `close` / `close_all`, keyed by session id then name |
+| `connect_stdio(server, roots)` | Spawn one server and complete its handshake — the default `Connector` |
+| `roots_responder(roots)` | The `on_server_request` handler a backend gets: answers `roots/list`, raises `UnsupportedServerRequest` for anything else |
 | `Connector` | The injection point; `tests/test_mcp_registry.py` drives lifetime and failure handling through it without spawning anything |
 | `UnknownBackendError` | A server name the session did not open |
 
@@ -108,9 +138,10 @@ never closed still own subprocesses.
 `tests/test_mcp_registry.py`. Most drive a fake `Connector`: what is under test is
 *lifetime* — all-or-nothing opening, teardown ordering, one-failure-does-not-strand-the-
 rest — and a real subprocess adds a handshake and two timeouts without exercising one
-extra line of it. Three tests do use the real
-`tests/fixtures/mock_mcp_server.py`, because "the spec actually becomes a running server"
-is not something a fake can prove.
+extra line of it. Several do use the real `tests/fixtures/mock_mcp_server.py`, because
+"the spec actually becomes a running server" is not something a fake can prove — and
+neither is "the capability block we declared is the one that arrived", which the
+fixture's `handshake-report` tool hands back verbatim.
 
 ## Related
 

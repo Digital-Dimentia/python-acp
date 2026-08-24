@@ -94,7 +94,10 @@ A fork copies the transcript up to the fork point. A shallow copy is enough — 
 never mutated after `record`, only appended — but it must be a *copy*, or the child's
 next turn would append to the parent's transcript.
 
-## Remembered permissions
+## Executor state that lives on the session
+
+Two fields here belong to `turn_mcp_router.py` rather than to the protocol. This module
+stores them and never interprets them; each is here because the alternative was worse.
 
 `Session.remembered_permissions` maps a qualified tool name to the answer the user asked
 to be remembered. `allow_always` and `reject_always` are the two ACP options that write
@@ -104,6 +107,22 @@ here, and **session** is their scope — the SDK's own default option is literal
 It lives on the session rather than in the executor so it dies with the session instead
 of outliving it in a process-wide map, and a fork **copies** it: a fork answering "always
 allow" must not decide for its parent, exactly as with mode and config state.
+
+`Session.running_tool_call` is the other piece of executor state parked here, and it is
+parked here for a sharper reason: it has to be readable **by session id, from outside the
+turn**. An MCP server's `elicitation/create` arrives on that backend's read loop in a task
+of its own, with no route back to the `TurnContext` of the turn that provoked it, so
+[elicitation.py](elicitation.md) reads the id from here to tell the client which tool call
+the question belongs to (`pyacp-owi`).
+
+It is unique only because **one turn runs at a time** and a turn runs its invocations in
+order — at most one MCP call is in flight per session. That is a real constraint this
+field now depends on, not an incidental property: relaxing either would make the id a
+guess, and the fix would be a different mechanism rather than a patch to this one.
+
+`compare=False, repr=False`, unlike `remembered_permissions`: two sessions that differ
+only in what they are doing this instant are not different sessions. A fork does not
+inherit it, for the same reason it does not inherit the in-flight turn.
 
 This module does not interpret the values. [turn_mcp_router.py](turn_mcp_router.md) does.
 
@@ -173,6 +192,7 @@ decides whether to cancel and retry.
 | `Session.set_mode` / `set_config_option` | Validated mutation; both move `updated_at` |
 | `Session.attach_turn` / `detach_turn` / `cancel_turn` | Where `session/cancel` reaches |
 | `Session.fork` / `to_info` | The deep copy, and the `session/list` view |
+| `Session.remembered_permissions` / `.running_tool_call` | Executor state — see above. Neither is interpreted here |
 | `SessionRegistry` | `create` / `get` / `fork` / `resume` / `list` / `close` / `close_all` |
 | `UnknownSessionError`, `TurnAlreadyRunningError` | See **Errors** above |
 | `PAGE_SIZE` | The default `session/list` page size (100), and the `limit` a caller gets when it names none |

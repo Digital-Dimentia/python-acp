@@ -37,9 +37,26 @@ a form. ACP's is a union of four:
 | `ElicitationUrlSessionMode` | no — nothing here has an out-of-band flow to send a user to |
 | `ElicitationUrlRequestMode` | no — same |
 
-`tool_call_id` is left unset. It is optional, and attaching the question to the tool call
-that provoked it would need the id to reach the read loop the handler runs on — worth
-doing, tracked separately, and not something to fake in the meantime.
+`toolCallId` **is** set, and getting it there is the one piece of plumbing this module
+needs from outside — `pyacp-owi`. Without it a client renders the form floating beside the
+transcript rather than attached to the call that asked for it, which is precisely the case
+the field exists for.
+
+The id is minted where `tools/call` is made, and the handler runs on the backend's read
+loop in a task of its own, with no route back to that turn's `TurnContext`. `contextvars`
+do not cross that boundary, because the task is created from the read loop rather than
+from the caller. So `turn_mcp_router` parks the id on the `Session`
+(`running_tool_call`) for exactly the length of the call, and the forwarder reads it back
+by session id.
+
+That is only correct because **a session runs one turn at a time** (`attach_turn` refuses
+a second) and a turn runs its invocations in order, so at most one MCP call is ever in
+flight per session. [sessions.md](sessions.md) records the same constraint beside the
+field. If either stops being true this becomes a guess and must be replaced rather than
+patched.
+
+`None` is ordinary rather than a fallback: a server may elicit outside any `tools/call` —
+during its own handshake, say — and then there is genuinely nothing to attach to.
 
 ## `complete_elicitation` is declined, not deferred
 

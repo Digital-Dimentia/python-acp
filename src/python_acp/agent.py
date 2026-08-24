@@ -209,7 +209,22 @@ class PythonAcpAgent:
         """
         if not ClientGates.of(self._client_capabilities).allows(Gate.ELICITATION_FORM):
             return None
-        return elicitation_forwarder(session_id, self._connected)
+        return elicitation_forwarder(
+            session_id, self._connected, lambda: self._running_tool_call(session_id)
+        )
+
+    def _running_tool_call(self, session_id: str) -> str | None:
+        """The `toolCallId` this session's turn is inside, for a forwarded elicitation.
+
+        By session id rather than by holding the `Session`, because the lookup outlives
+        any one turn and a closed session must answer `None` rather than resurrect a
+        record. An unknown session is exactly that case — `session/close` races an
+        `elicitation/create` already in flight — so it is answered, not raised on.
+        """
+        try:
+            return self._sessions.get(session_id).running_tool_call
+        except UnknownSessionError:
+            return None
 
     def _connected(self) -> ConnectedClient | None:
         """Who is on the far side right now, for a caller that may outlive a connection."""

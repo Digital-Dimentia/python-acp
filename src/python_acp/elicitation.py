@@ -129,15 +129,29 @@ class ConnectedClient:
 #: How the forwarder finds the client to ask. `None` means nobody is connected.
 Connected = Callable[[], ConnectedClient | None]
 
+#: The `toolCallId` of the MCP call in flight for this session, or `None` between calls.
+#: Looked up per elicitation for the same reason the client is: it changes constantly, and
+#: a value captured when the backend was spawned would name a call that finished long ago.
+RunningToolCall = Callable[[], str | None]
+
 #: Answers one MCP `elicitation/create`: its params in, its result out.
 Forwarder = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
-def forwarder(session_id: str, connected: Connected) -> Forwarder:
+def forwarder(
+    session_id: str,
+    connected: Connected,
+    running_tool_call: RunningToolCall | None = None,
+) -> Forwarder:
     """Build the handler for one session's `elicitation/create` requests.
 
     Bound to a session id because that is what the ACP request must carry, and every
     backend a session opened shares it.
+
+    `running_tool_call` supplies the optional `toolCallId`, so a client can attach the
+    question to the tool call that provoked it rather than floating it beside the
+    transcript. Optional, and `None` from it is ordinary: a server may elicit outside any
+    `tools/call`, and then there is genuinely nothing to attach to.
     """
 
     async def forward(params: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +179,7 @@ def forwarder(session_id: str, connected: Connected) -> Forwarder:
             message=message,
             mode=ElicitationFormSessionMode(
                 sessionId=session_id,
+                toolCallId=None if running_tool_call is None else running_tool_call(),
                 requestedSchema=schema,
             ),
         )

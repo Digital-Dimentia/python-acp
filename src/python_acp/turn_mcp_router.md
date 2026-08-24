@@ -461,6 +461,7 @@ directly, so the context does not widen for one executor's dependency. Servers w
 | `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title`, `reads`, `write`, `locations` |
 | `FileRead` / `FileWrite` | One file to read into an argument, and where the output goes. Both carry the **resolved** path |
 | `CommandRun` | One command to run in a client terminal, into one tool argument — `FileRead`'s mirror. `output_byte_limit` is never absent |
+| `Session.running_tool_call` (written here) | Set to the live `toolCallId` for the length of each `tools/call` and cleared in `finally`, so a server's `elicitation/create` can name the call it interrupted. See [elicitation.md](elicitation.md) |
 | `PromptConventionError` | A prompt this executor will not run. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602`. `explains_convention` says whether the refusal appends `CONVENTION` |
 | `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |

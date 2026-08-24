@@ -874,16 +874,15 @@ class McpToolRouterExecutor:
         `mcp_tools.py` for why a hint may relabel a question but never withdraw it.
         """
         key = str(index)
-        await context.emit(
-            tracker.start(
-                key,
-                title=invocation.title,
-                kind=await catalogue.kind(invocation.server, invocation.tool),
-                status="pending",
-                raw_input=invocation.arguments,
-                locations=invocation.locations,
-            )
+        started = tracker.start(
+            key,
+            title=invocation.title,
+            kind=await catalogue.kind(invocation.server, invocation.tool),
+            status="pending",
+            raw_input=invocation.arguments,
+            locations=invocation.locations,
         )
+        await context.emit(started)
         if _mode(context) == DRY_RUN:
             await context.emit(
                 tracker.progress(
@@ -932,7 +931,17 @@ class McpToolRouterExecutor:
 
         client = backends[invocation.server]
         logger.debug("Calling %s for session %s", invocation.title, context.session_id)
-        result = await client.call_tool(invocation.tool, arguments)
+        # Parked on the session for the length of the call, and only that long. A server
+        # that asks a question mid-`tools/call` sends `elicitation/create` on its own read
+        # loop, which has no route back to this turn — so this is how the forwarded
+        # question learns which tool call it belongs to (`pyacp-owi`, `elicitation.md`).
+        # Cleared in `finally` because a call that raised is no longer in flight either,
+        # and a stale id would attach the *next* question to a call that already ended.
+        context.session.running_tool_call = started.tool_call_id
+        try:
+            result = await client.call_tool(invocation.tool, arguments)
+        finally:
+            context.session.running_tool_call = None
 
         # `isError` is the MCP-sanctioned way for a tool to report its own failure on an
         # otherwise successful call. It becomes a status, never an exception.

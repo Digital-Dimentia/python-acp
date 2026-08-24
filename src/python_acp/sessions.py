@@ -159,6 +159,23 @@ class Session:
     #:
     #: This module does not interpret the values; `turn_mcp_router.py` does.
     remembered_permissions: dict[str, bool] = field(default_factory=dict)
+    #: The `toolCallId` of the MCP call running right now, or `None` between calls.
+    #:
+    #: Turn state parked on the session because it has to be readable **by session id
+    #: from outside the turn**: an MCP server's `elicitation/create` arrives on that
+    #: backend's read loop, in a task of its own, with no route back to the `TurnContext`
+    #: of the turn that provoked it. This is how the forwarded question gets attached to
+    #: the tool call it belongs to (`pyacp-owi`).
+    #:
+    #: Unique because a session runs **one turn at a time** (`attach_turn`) and a turn runs
+    #: its invocations in order, so at most one MCP call is ever in flight per session. If
+    #: either ever stops being true, this becomes a guess and must be replaced rather than
+    #: patched.
+    #:
+    #: `compare=False, repr=False` because it is turn-scoped: two sessions that differ only
+    #: in what they are doing this instant are not different sessions. A fork does not
+    #: inherit it, for the same reason it does not inherit the in-flight turn.
+    running_tool_call: str | None = field(default=None, repr=False, compare=False)
     _clock: Clock = field(default=_utc_now, repr=False, compare=False)
     _turn: asyncio.Task[Any] | None = field(default=None, repr=False, compare=False)
     _cancel_requested: asyncio.Event = field(

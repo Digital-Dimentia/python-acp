@@ -31,6 +31,7 @@ from acp.schema import (
     ElicitationUrlCapabilities,
     McpServerStdio,
     OtherElicitationResponse,
+    TextContentBlock,
 )
 
 from python_acp.elicitation import ConnectedClient, forwarder
@@ -91,6 +92,32 @@ def question(**overrides) -> dict:
 # ---------------------------------------------------------------------------
 # The translation
 # ---------------------------------------------------------------------------
+
+
+async def test_a_question_carries_the_tool_call_that_provoked_it() -> None:
+    """`pyacp-owi`: a client can attach the form to the right tool call, not the transcript.
+
+    The lookup is a callable rather than a value because the id changes constantly, and
+    one captured when the backend was spawned would name a call that finished long ago.
+    """
+    client = FakeClient(AcceptElicitationResponse(action="accept"))
+    running = ["call-7"]
+
+    await forwarder("sess-1", connected(client), lambda: running[0])(question())
+    running[0] = "call-8"
+    await forwarder("sess-1", connected(client), lambda: running[0])(question())
+
+    assert [mode.tool_call_id for _, mode in client.calls] == ["call-7", "call-8"]
+
+
+async def test_a_question_asked_outside_a_tool_call_carries_no_id() -> None:
+    """`None` is ordinary, not a fallback: a server may elicit outside any `tools/call`."""
+    client = FakeClient(AcceptElicitationResponse(action="accept"))
+
+    await forwarder("sess-1", connected(client), lambda: None)(question())
+    await forwarder("sess-1", connected(client))(question())
+
+    assert [mode.tool_call_id for _, mode in client.calls] == [None, None]
 
 
 async def test_an_mcp_question_becomes_a_session_scoped_form() -> None:
@@ -418,3 +445,97 @@ async def test_session_new_promises_nothing_to_a_client_that_cannot_be_asked() -
     promised = await _promised(None)
 
     assert "elicitation" not in promised
+
+
+# ---------------------------------------------------------------------------
+# The tool call a question belongs to (pyacp-owi)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_real_server_eliciting_mid_tool_call_names_that_tool_call() -> None:
+    """The whole point of `pyacp-owi`, proved through a real subprocess and a real turn.
+
+    The fixture's `provoke` tool sends `elicitation/create` and blocks until it is
+    answered, so the question really is in flight *inside* `tools/call` — which is the
+    only moment `Session.running_tool_call` is set, and the only moment the id means
+    anything. Asserting it equals the `toolCallId` the turn actually streamed is what
+    makes this more than "some string arrived".
+    """
+    from python_acp.mcp_registry import McpBackendRegistry
+    from python_acp.sessions import SessionRegistry
+    from python_acp.turn_mcp_router import McpToolRouterExecutor
+    from python_acp.turns import TurnContext
+
+    client = FakeClient(AcceptElicitationResponse(action="accept", content={"user": "ada"}))
+
+    class Approving(FakeClient):
+        """Answers `session/update` and approves every tool call, like a real client."""
+
+        def __init__(self, inner: FakeClient) -> None:
+            super().__init__(None)
+            self.inner = inner
+            self.updates: list = []
+
+        async def session_update(self, session_id: str, update: object, **kw) -> None:
+            self.updates.append(update)
+
+        async def request_permission(self, session_id, tool_call, options, **kw):
+            from acp.schema import AllowedOutcome, RequestPermissionResponse
+
+            return RequestPermissionResponse(
+                outcome=AllowedOutcome(outcome="selected", optionId="approve")
+            )
+
+        async def create_elicitation(self, message: str, mode: object, **kw) -> object:
+            return await self.inner.create_elicitation(message, mode, **kw)
+
+    acp_client = Approving(client)
+    session = SessionRegistry().create("/work")
+    backends = McpBackendRegistry()
+    await backends.open(
+        session.session_id,
+        [spec("tools")],
+        (),
+        forwarder(
+            session.session_id,
+            connected(acp_client),
+            lambda: session.running_tool_call,
+        ),
+    )
+    try:
+        context = TurnContext(session, acp_client, FORM_CLIENT)
+        result = await asyncio.wait_for(
+            McpToolRouterExecutor(backends).execute(
+                context,
+                [
+                    TextContentBlock(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "tool": "provoke",
+                                "arguments": {
+                                    "server_method": "elicitation/create",
+                                    "server_params": question(),
+                                },
+                            }
+                        ),
+                    )
+                ],
+            ),
+            timeout=20,
+        )
+    finally:
+        await backends.close_all()
+
+    assert result.stop_reason == "end_turn"
+    # The id the turn streamed to the client...
+    streamed = [
+        u.tool_call_id for u in acp_client.updates
+        if getattr(u, "session_update", None) == "tool_call"
+    ]
+    assert len(streamed) == 1
+    # ...is the one the forwarded question carried.
+    _, mode = client.calls[0]
+    assert mode.tool_call_id == streamed[0]
+    # And it is cleared once the call is over, so the next question cannot inherit it.
+    assert session.running_tool_call is None

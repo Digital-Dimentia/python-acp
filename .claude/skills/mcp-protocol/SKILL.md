@@ -258,11 +258,12 @@ Anything that adds or renames a module also triggers the `repo-docs-sync` skill.
 
 Real gaps, in rough priority order. Check beads before filing a duplicate.
 
-- A forwarded `elicitation/create` carries no `toolCallId`, so a client cannot attach the
-  question to the tool call that provoked it. The id is known where `tools/call` is made
-  and not on the read loop the handler runs on; `pyacp-owi` weighs the ways to bridge that.
 - `roots.listChanged` is `false`, so a session whose roots could change could not say so.
   Nothing can change them today, which makes it honest rather than a gap.
+- A forwarded `elicitation/create` carries the `toolCallId` of the call it interrupted,
+  read off `Session.running_tool_call`. That is correct **only while a session runs one
+  turn at a time and a turn runs its invocations in order** — relax either and the id
+  becomes a guess. `sessions.md` and `elicitation.md` both record the dependency.
 - `read_resource` forwards an `arguments` param that is not in the MCP spec —
   `resources/read` takes `uri` only. The mock server honors it; a real server will
   ignore it. Templated resources are meant to be expanded client-side into a concrete

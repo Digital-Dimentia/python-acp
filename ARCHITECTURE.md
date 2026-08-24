@@ -466,6 +466,13 @@ mapped to the method it promises, and the method is called. A `true` with a brok
 behind it is the failure the capability manifest exists to prevent, and this is where the
 promise meets the behaviour.
 
+`tests/test_executor_neutrality.py` guards a different promise: that decision D3's
+swappable executor is real. A complete executor with no backend at all serves a whole
+session through the SDK's router, and an AST walk keeps `sessions.py`,
+`capabilities.py`, and `turns.py` free of any backend import — so a second backend stays
+addable without touching the session registry, the capability block, or the
+update-emission path.
+
 ## Design Documents
 
 - [ACP v1 plan](docs/full-apc-plan.md) — phases, decisions D1-D6, and delivery sequencing.

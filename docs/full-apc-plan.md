@@ -144,7 +144,10 @@ correctly when a capability is absent. That inversion is corrected in Phase 4 be
 6.1. Backend hardening — protocol-version negotiation, client capability declaration,
      pagination, cancellation, error-code fidelity, shutdown ordering.
 6.2. Map MCP results onto ACP tool-call and content updates.
-6.3. Backend abstraction permitting non-MCP executors.
+6.3. Backend abstraction permitting non-MCP executors. **Resolved by Phase 3.1:** the
+     `TurnExecutor` seam is the abstraction, and `pyacp-eg1.2` closed by *proving* it —
+     `tests/test_executor_neutrality.py` runs a non-MCP executor through a whole session
+     and guards the seam's imports. No second abstraction was added.
 
 ### Phase 7 — Legacy surface deprecation and removal *(replaces the old docs phase)*
 

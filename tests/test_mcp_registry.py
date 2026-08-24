@@ -9,7 +9,9 @@ because "the spec actually becomes a running server" is not something a fake can
 
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -19,8 +21,9 @@ from python_acp.mcp_registry import (
     McpBackendRegistry,
     UnknownBackendError,
     connect_stdio,
+    roots_responder,
 )
-from python_acp.mcp_stdio import MCPProtocolError
+from python_acp.mcp_stdio import MCPProtocolError, UnsupportedServerRequest
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
@@ -49,10 +52,14 @@ class FakeConnector:
     def __init__(self, fail_on: set[str] | None = None) -> None:
         self.fail_on = fail_on or set()
         self.opened: list[FakeClient] = []
+        #: The roots each connect was handed, in order. What a backend is told its
+        #: session's roots are is part of the handshake, so it is worth observing.
+        self.roots: list[tuple[str, ...]] = []
 
-    async def __call__(self, server: McpServerStdio) -> FakeClient:
+    async def __call__(self, server: McpServerStdio, roots: Sequence[str] = ()) -> FakeClient:
         if server.name in self.fail_on:
             raise MCPProtocolError(f"{server.name} refused to start")
+        self.roots.append(tuple(roots))
         client = FakeClient(server.name)
         self.opened.append(client)
         return client
@@ -181,7 +188,7 @@ async def test_one_server_that_will_not_stop_does_not_strand_the_rest() -> None:
     connector = FakeConnector()
     registry = McpBackendRegistry(connect=connector)
 
-    async def connect(server: McpServerStdio):
+    async def connect(server: McpServerStdio, roots: Sequence[str] = ()):
         client = Stubborn(server.name) if server.name == "bad" else FakeClient(server.name)
         connector.opened.append(client)
         return client
@@ -315,3 +322,117 @@ async def test_closing_a_session_tears_down_its_backends_through_the_hook() -> N
 
     assert connector.opened[0].stopped == 1
     assert session.session_id not in registry
+
+
+# ---------------------------------------------------------------------------
+# Roots: the one MCP client primitive this process can serve today (pyacp-pb7)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_sessions_roots_reach_every_backend_it_opens() -> None:
+    """Each backend declares them, so each backend has to be told them."""
+    registry, connector = fake_registry()
+
+    await registry.open("s1", [spec("a"), spec("b")], ["/work", "/extra"])
+
+    assert connector.roots == [("/work", "/extra"), ("/work", "/extra")]
+
+
+async def test_a_fork_declares_its_own_roots_not_the_parents() -> None:
+    """`session/fork` takes its own `cwd`; a fork into another tree is a different root."""
+    registry, connector = fake_registry()
+    await registry.open("parent", [spec("a")], ["/work"])
+
+    await registry.fork("parent", "child", roots=["/elsewhere"])
+
+    assert connector.roots == [("/work",), ("/elsewhere",)]
+
+
+async def test_a_fork_that_names_no_roots_reuses_the_parents() -> None:
+    """The same "same recipe as the parent" rule the specs follow."""
+    registry, connector = fake_registry()
+    await registry.open("parent", [spec("a")], ["/work"])
+
+    await registry.fork("parent", "child")
+
+    assert connector.roots == [("/work",), ("/work",)]
+
+
+async def test_closing_a_session_forgets_its_roots() -> None:
+    """Otherwise a reused id would inherit roots from a session that is long gone."""
+    registry, connector = fake_registry()
+    await registry.open("s1", [spec("a")], ["/work"])
+    await registry.close("s1")
+
+    await registry.open("s1", [spec("a")])
+
+    assert connector.roots == [("/work",), ()]
+
+
+async def test_a_backend_with_roots_answers_roots_list_from_them() -> None:
+    """Against a real subprocess: the declaration and the answer have to agree."""
+    registry = McpBackendRegistry()
+    opened = await registry.open("s1", [spec("tools")], ["/work", "/extra"])
+    try:
+        client = opened["tools"]
+        handshake = json.loads(
+            (await client.call_tool("handshake-report", {}))["content"][0]["text"]
+        )
+        assert handshake["capabilities"] == {"roots": {"listChanged": False}}
+
+        provoked = await client.call_tool("provoke", {"server_method": "roots/list"})
+        reply = json.loads(provoked["content"][0]["text"])
+    finally:
+        await registry.close("s1")
+
+    assert reply["result"]["roots"] == [
+        {"uri": "file:///work", "name": "work"},
+        {"uri": "file:///extra", "name": "extra"},
+    ]
+
+
+async def test_a_backend_refuses_a_method_it_never_declared() -> None:
+    """`sampling/createMessage` has no answer here, and `-32601` is how to say so."""
+    registry = McpBackendRegistry()
+    opened = await registry.open("s1", [spec("tools")], ["/work"])
+    try:
+        provoked = await opened["tools"].call_tool(
+            "provoke", {"server_method": "sampling/createMessage"}
+        )
+        reply = json.loads(provoked["content"][0]["text"])
+    finally:
+        await registry.close("s1")
+
+    assert reply["error"]["code"] == -32601
+
+
+async def test_a_backend_given_no_roots_promises_nothing() -> None:
+    """Declaring a capability nothing answers is the one thing a block must never do."""
+    client = await connect_stdio(spec("tools"))
+    try:
+        handshake = json.loads(
+            (await client.call_tool("handshake-report", {}))["content"][0]["text"]
+        )
+    finally:
+        await client.stop()
+
+    assert handshake["capabilities"] == {}
+    assert client.on_server_request is None
+
+
+async def test_the_roots_responder_hands_out_a_copy_each_time() -> None:
+    """One caller mutating its reply must not rewrite every later answer."""
+    respond = roots_responder(["/work"])
+
+    first = await respond("roots/list", {})
+    first["roots"].append({"uri": "file:///smuggled"})
+    first["roots"][0]["uri"] = "file:///rewritten"
+
+    assert await respond("roots/list", {}) == {"roots": [{"uri": "file:///work", "name": "work"}]}
+
+
+async def test_the_roots_responder_serves_only_roots_list() -> None:
+    respond = roots_responder(["/work"])
+
+    with pytest.raises(UnsupportedServerRequest):
+        await respond("elicitation/create", {})

@@ -294,7 +294,10 @@ class PythonAcpAgent:
             config_options=self._config_options(),
         )
         try:
-            await self._backends.open(session.session_id, stdio_servers)
+            # The session's roots go with the servers: each backend declares the MCP
+            # `roots` capability and answers `roots/list` from them. See
+            # `mcp_registry.roots_responder`.
+            await self._backends.open(session.session_id, stdio_servers, session.roots)
         except Exception:
             # The session was registered a line ago and its backends did not come up.
             # Handing back an id whose tools silently do not exist is the failure this
@@ -378,7 +381,10 @@ class PythonAcpAgent:
         root, extra = normalize_roots(cwd, additional_directories)
         forked = self._sessions.fork(session_id, cwd=root, additional_directories=extra)
         try:
-            await self._backends.fork(session_id, forked.session_id, stdio_servers)
+            # The fork's own roots, not the parent's: `session/fork` takes its own `cwd`.
+            await self._backends.fork(
+                session_id, forked.session_id, stdio_servers, forked.roots
+            )
         except Exception:
             await self._sessions.close(forked.session_id)
             raise

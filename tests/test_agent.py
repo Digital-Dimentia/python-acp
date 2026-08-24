@@ -543,6 +543,40 @@ async def test_new_session_opens_the_stdio_servers_it_was_given() -> None:
         await backends.close_all()
 
 
+async def test_new_session_hands_its_roots_to_the_backends_it_opens() -> None:
+    """`cwd` + `additionalDirectories` is exactly what MCP calls a root (pyacp-pb7)."""
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends))
+
+    result = await router(
+        "session/new",
+        {
+            "cwd": "/work",
+            "additionalDirectories": ["/extra"],
+            "mcpServers": [
+                {
+                    "name": "tools",
+                    "command": sys.executable,
+                    "args": [str(FIXTURE_SERVER)],
+                    "env": [],
+                }
+            ],
+        },
+        False,
+    )
+    try:
+        client = backends.backends(result.session_id)["tools"]
+        provoked = await client.call_tool("provoke", {"server_method": "roots/list"})
+        reply = json.loads(provoked["content"][0]["text"])
+    finally:
+        await backends.close_all()
+
+    assert [root["uri"] for root in reply["result"]["roots"]] == [
+        "file:///work",
+        "file:///extra",
+    ]
+
+
 async def test_a_backend_that_cannot_start_takes_the_session_with_it() -> None:
     """A session id whose tools silently do not exist is the failure this path prevents."""
     sessions = SessionRegistry()

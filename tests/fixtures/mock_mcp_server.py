@@ -55,6 +55,12 @@ _stall_initialize = os.environ.get("MOCK_MCP_STALL_INITIALIZE") == "1"
 _stalled_ids = []
 _cancellations = []
 
+# The params of the initialize request as they actually arrived, handed back by the
+# `handshake-report` tool. A capability block is a promise made on the wire, so a test
+# that wants to check it should read what this process received rather than the
+# attribute the client was constructed with.
+_initialize_params = None
+
 
 def write(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
@@ -163,8 +169,10 @@ while True:
 
     if method == "initialize" and _stall_initialize:
         # Read the handshake and never answer it.
+        _initialize_params = req.get("params") or {}
         _stalled_ids.append(req_id)
     elif method == "initialize":
+        _initialize_params = req.get("params") or {}
         result = {}
         if not _omit_protocol_version:
             proposed = (req.get("params") or {}).get("protocolVersion")
@@ -185,6 +193,19 @@ while True:
     # reachable from a test at all.
     elif method == "tools/call" and req.get("params", {}).get("name") == "stall":
         _stalled_ids.append(req_id)
+    # Hand back the initialize params exactly as they arrived, as JSON text, so a test
+    # can assert on the protocolVersion and capability block that were really sent.
+    elif method == "tools/call" and req.get("params", {}).get("name") == "handshake-report":
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(_initialize_params)}],
+                    "isError": False,
+                },
+            }
+        )
     # Hand back everything stalled and every cancellation received, as JSON text.
     elif method == "tools/call" and req.get("params", {}).get("name") == "cancel-report":
         write(

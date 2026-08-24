@@ -12,15 +12,95 @@ logger = logging.getLogger("python_acp.mcp_stdio")
 # The MCP revision this client proposes at `initialize`. It has nothing to do
 # with `capabilities.SUPPORTED_PROTOCOL_VERSIONS` — that one is the ACP
 # version, an int, on the other side of the bridge. Two protocols, two fields.
-_MCP_PROTOCOL_VERSION = "2024-11-05"
+#
+# `2025-06-18` rather than `2024-11-05` because `elicitation` is the client
+# capability that maps onto ACP `session/request_permission`, and it does not
+# exist before that revision. Nothing else in this module changed to get here:
+# the framing, the handshake, and the shutdown sequence are identical, and the
+# result fields the revision adds (`structuredContent`, resource links) are
+# passed through untouched.
+_MCP_PROTOCOL_VERSION = "2025-06-18"
 # The revisions we can actually speak. The server's answer is authoritative and
 # may name a revision we never proposed; anything outside this set means we hang
 # up rather than guess. Read .claude/skills/mcp-protocol/spec-versions.md before
 # widening it — a newer revision is a capability claim, not a string swap.
-_SUPPORTED_MCP_PROTOCOL_VERSIONS: frozenset[str] = frozenset({_MCP_PROTOCOL_VERSION})
+#
+# `2024-11-05` stays in the *accepted* set while no longer being what we
+# propose: a server pinned to it must counter with it, and hanging up on that
+# counter would drop every server that has not moved yet. Everything this client
+# calls exists in both revisions; only `elicitation/create` is newer, and a
+# server that countered with `2024-11-05` will never send one.
+_SUPPORTED_MCP_PROTOCOL_VERSIONS: frozenset[str] = frozenset(
+    {_MCP_PROTOCOL_VERSION, "2024-11-05"}
+)
 
 ServerRequestHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+class UnsupportedServerRequest(Exception):
+    """An `on_server_request` handler's way of saying "not me".
+
+    Without it a handler has only two outcomes — a result, or an exception that
+    becomes `-32603`. Neither is right for a method the handler does not
+    implement: `-32603` says *we broke*, when the truth is *we never offered
+    this*. That distinction became load-bearing the moment this client started
+    declaring capabilities, because a server may still send a request outside
+    what we declared and MUST be told which kind of "no" it got.
+
+    `_handle_server_request` turns this into `-32601`, the same reply a client
+    with no handler at all gives.
+    """
+
+
+@dataclass(frozen=True)
+class MCPClientCapabilities:
+    """What this client promises an MCP server it can answer.
+
+    A capability block is a **promise**, not a wish list: MCP says a server MUST
+    NOT use a capability the client did not declare, and by symmetry a client
+    that declares one MUST be able to answer it. Declaring something nothing
+    answers is worse than declaring nothing, because the server will call it and
+    strand itself on a `-32601` it was told would not happen. So this is
+    deliberately explicit — the caller states what it wired up, and
+    `MCPStdioClient.initialize` refuses to send a non-empty block when no
+    `on_server_request` handler exists to receive the traffic.
+
+    **`sampling` has no field, on purpose.** There is no LLM in this runtime, so
+    `sampling/createMessage` has no answer here and never will; leaving the
+    field out means the block cannot be built wrong rather than trusting every
+    caller to remember. `roots` and `elicitation` are the two we can actually
+    serve — see `mcp_registry.py` for the first and `pyacp-8bv.4` for the second.
+    """
+
+    #: We can answer `roots/list`. `mcp_registry` sets this from the session's
+    #: `cwd` + `additionalDirectories`, which is exactly what a root is.
+    roots: bool = False
+    #: We will send `notifications/roots/list_changed`. Only meaningful with
+    #: `roots`, and false today: a session's roots are fixed for its lifetime.
+    roots_list_changed: bool = False
+    #: We can answer `elicitation/create`. Requires the negotiated revision to be
+    #: `2025-06-18` or later — which is why `_MCP_PROTOCOL_VERSION` moved.
+    elicitation: bool = False
+
+    def __post_init__(self) -> None:
+        if self.roots_list_changed and not self.roots:
+            raise ValueError(
+                "roots_list_changed without roots: there is no list to change"
+            )
+
+    def to_wire(self) -> dict[str, Any]:
+        """The `capabilities` member of the `initialize` request.
+
+        Absent means unsupported, so an undeclared capability contributes no key
+        at all rather than a `false`.
+        """
+        block: dict[str, Any] = {}
+        if self.roots:
+            block["roots"] = {"listChanged": self.roots_list_changed}
+        if self.elicitation:
+            block["elicitation"] = {}
+        return block
 
 
 class MCPProtocolError(RuntimeError):
@@ -94,6 +174,10 @@ class MCPStdioClient:
     env: Mapping[str, str] | None = None
     on_server_request: ServerRequestHandler | None = field(default=None)
     on_notification: NotificationHandler | None = field(default=None)
+    #: What `initialize` will promise this server. Empty by default: a client
+    #: that has wired up no handler can answer nothing, and saying so is the
+    #: only honest block. See `MCPClientCapabilities`.
+    client_capabilities: MCPClientCapabilities = field(default=MCPClientCapabilities())
 
     # Bare assignments (no annotation) stay class attributes, not fields.
     _STDERR_CHUNK = 4096
@@ -224,12 +308,15 @@ class MCPStdioClient:
         and `notifications/initialized` is never sent on that path: half a
         handshake is worse than none, because the mismatch would otherwise
         resurface later as unrelated-looking failures.
+
+        The `capabilities` block is the other half of the same handshake, and it
+        is checked before it is sent — see `_declared_capabilities`.
         """
         result = await self.request(
             "initialize",
             {
                 "protocolVersion": _MCP_PROTOCOL_VERSION,
-                "capabilities": {},
+                "capabilities": self._declared_capabilities(),
                 "clientInfo": {"name": "python-acp", "version": "0.1.0"},
             },
         )
@@ -240,6 +327,28 @@ class MCPStdioClient:
             raise
         await self.notify("notifications/initialized")
         return result
+
+    def _declared_capabilities(self) -> dict[str, Any]:
+        """The capability block to send, refusing to promise what nobody answers.
+
+        Every declared capability becomes a request the server is entitled to
+        send, and `on_server_request` is the only thing that can answer one.
+        Declaring without a handler is a conformance bug in *this* process, not
+        a bad input, so it is a `RuntimeError` and it fires before the promise
+        reaches the wire rather than as a `-32601` the server gets much later.
+
+        The check is presence, not coverage: one callable stands behind every
+        capability and nothing here can tell which methods it actually handles.
+        A handler that is offered a declared method it does not implement should
+        raise `UnsupportedServerRequest`.
+        """
+        block = self.client_capabilities.to_wire()
+        if block and self.on_server_request is None:
+            raise RuntimeError(
+                f"MCP client declares {sorted(block)} but has no on_server_request "
+                "handler to answer them"
+            )
+        return block
 
     @staticmethod
     def _agreed_protocol_version(result: dict[str, Any]) -> str:
@@ -571,6 +680,14 @@ class MCPStdioClient:
                     request_id, -32601, f"Unsupported method: {method}", method
                 )
                 return
+        except UnsupportedServerRequest:
+            # The handler exists but does not serve this method — which is a
+            # different answer from "we broke", and the server needs to be able
+            # to tell them apart. Same reply as having no handler at all.
+            await self._respond_error(
+                request_id, -32601, f"Unsupported method: {method}", method
+            )
+            return
         except Exception as exc:
             logger.debug("MCP server request handler failed for %s", method, exc_info=True)
             await self._respond_error(request_id, -32603, str(exc), method)

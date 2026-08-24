@@ -351,11 +351,16 @@ A session whose executor exposes no options takes every default.
 ## Permission
 
 **Every tool call is consequential**, so every one is asked about. That is not caution
-for its own sake: MCP `2024-11-05` has no tool annotations — `readOnlyHint`,
-`destructiveHint`, and friends arrive in `2025-03-26` — so there is no way to tell a read
-from a delete. Treating everything as consequential is the only setting that cannot
-silently do damage, and `allow_always` is what keeps it to once per tool per session.
-Refining this is tied to the MCP protocol-version bump, not to a heuristic.
+for its own sake: nothing here reads a tool's annotations — `readOnlyHint`,
+`destructiveHint`, and friends — so there is no way to tell a read from a delete.
+Treating everything as consequential is the only setting that cannot silently do damage,
+and `allow_always` is what keeps it to once per tool per session.
+
+The version that gated this is no longer the blocker: `pyacp-pb7` moved the pinned MCP
+revision to `2025-06-18`, so annotations are available on the wire whenever the server
+sends them. What is left is reading them and deciding what a hint may downgrade, which is
+`pyacp-eg1.3` — and it stays a *hint*: a server's own claim about its tool is not a
+security boundary, so a missing or false annotation must still land on "ask".
 
 *"But the client already chose the tool"* — the client that sent `session/prompt` and the
 human at the ACP client are not necessarily the same party. Automation asks; the

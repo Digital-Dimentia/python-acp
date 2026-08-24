@@ -30,13 +30,30 @@ client-facing transport. It owns no protocol logic of its own.
 
 | Value | What it does | Notes |
 |---|---|---|
-| `ws` *(default)* | Binds `WebSocketAgentServer` on `--host`/`--port` | Stays the default because it is what existing deployments bind. Since `pyacp-sld.3` it carries nothing `stdio` does not. |
+| `ws` *(default)* | Binds `WebSocketAgentServer` on `--host`/`--port` | Stays the default; see below. Since `pyacp-sld.3` it carries nothing `stdio` does not. |
 | `stdio` | Serves ACP on this process's own stdin/stdout via [transport_stdio.py](transport_stdio.md) | How an editor spawns an agent (D2). `--host` and `--port` are ignored. |
 
-The default was to flip to `stdio` when the action surface went. It has not, and the
-reason is now inertia rather than capability: flipping it would break every existing
-WebSocket invocation for no gain, since the two are the same agent. Filed as its own
-decision rather than done silently here.
+### Why `ws` is still the default (`pyacp-6z4`, decided 2026-08-24)
+
+The plan was to flip to `stdio` once the action surface went, since `stdio` is how an
+editor spawns an agent (D2) and needs no port. **That flip was examined and declined.**
+
+The reason is not inertia. It is that every *released* invocation is a WebSocket
+invocation: `v0.1.0` and `v0.1.1` (both 2026-08-21) shipped a CLI of exactly
+`--mcp-command`, `--host`, `--port` — **there was no `--transport` flag at all**, and no
+way to speak `stdio`. Anyone running a published version binds a socket. Changing the
+default would take that away from them silently, in exchange for nothing: since
+`pyacp-sld.3` the two transports serve the identical agent, so the flip buys no
+capability, only a different first impression.
+
+That the two are identical is the argument *against* flipping, not for it. A breaking
+change to a shipped default needs to buy something, and this one does not.
+
+`stdio` remains fully supported and one flag away. Revisit only alongside a release that
+is already breaking the CLI contract for other reasons — the cost is then already paid,
+and `--transport stdio` should become the documented default in the same release note.
+`tests/test_transport_stdio.py::test_ws_stays_the_default_transport` pins the current
+answer so the flip cannot happen by accident.
 
 ## stdout is reserved under `--transport stdio`
 

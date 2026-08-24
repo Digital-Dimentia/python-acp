@@ -302,6 +302,16 @@ async def test_a_session_whose_server_will_not_start_is_refused() -> None:
 
 
 def test_ws_stays_the_default_transport() -> None:
+    """Pins a decision, not an implementation detail (`pyacp-6z4`).
+
+    `stdio` is how an editor spawns an agent and would be the better first
+    impression, so the flip is a standing temptation. It is declined because
+    `v0.1.0` and `v0.1.1` shipped WebSocket-only — no `--transport` flag existed
+    — so every released invocation binds a socket, and since `pyacp-sld.3` the
+    two transports serve the identical agent. A breaking change to a shipped
+    default that buys no capability is not worth making. See cli.md; flip this
+    only alongside a release already breaking the CLI contract.
+    """
     args = build_parser().parse_args([])
 
     assert args.transport == "ws"

@@ -113,9 +113,12 @@ codes a stdio client gets:
 ```
 
 `ws` remains the default transport, though the two now carry exactly the same agent —
-same negotiation, same capability block, same methods, same error codes. The default is
-inertia rather than capability: changing it would break every existing WebSocket
-invocation for no gain. See [transport_ws.py](src/python_acp/transport_ws.md).
+same negotiation, same capability block, same methods, same error codes. That sameness is
+the reason the default has not moved: `v0.1.0` and `v0.1.1` shipped WebSocket-only, with
+no `--transport` flag at all, so every released invocation binds a socket. Changing the
+default would take that away for no capability gain. `--transport stdio` is one flag
+away and fully supported. See [cli.py](src/python_acp/cli.md) for the full decision and
+[transport_ws.py](src/python_acp/transport_ws.md) for the binding.
 
 ### Sessions bring their own MCP servers
 

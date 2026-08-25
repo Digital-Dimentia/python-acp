@@ -37,7 +37,9 @@
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.
-- Design docs (target state, not yet built):
+- [Changelog](CHANGELOG.md) — what changed per release, and the upgrade path off `0.1.x`.
+- Design docs — the plan is delivered, so these record decisions and their reasons,
+  including what was declined:
   - [ACP v1 plan](docs/full-apc-plan.md)
   - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md)
   - [Interop runbook](docs/interop.md)
@@ -305,9 +307,13 @@ A change is announced with `config_option_update`, carrying **every** option rat
 the changed one — which is what a client re-rendering a settings panel wants.
 
 **Every tool call asks the client for permission first**, via
-`session/request_permission`. Nothing reads a tool's annotations yet, so there is no way
-to tell a read from a delete — treating every call as consequential is the only setting
-that cannot silently do damage, and the "for session" options keep it to once per tool.
+`session/request_permission`. A server's tool annotations set the call's `kind`, so the
+prompt can say "delete" rather than "other" — but they never decide *whether* the question
+is asked. A hint asserted by the party being restrained is not consent, and MCP says so
+itself: annotations are not guaranteed to describe behaviour faithfully. Treating every
+call as consequential is the only setting that cannot silently do damage, and the "for
+session" options keep it to once per tool. See
+[mcp_tools.py](src/python_acp/mcp_tools.md).
 Choosing a reject option marks that call `failed` and lets the rest of the turn continue;
 cancelling the prompt ends the turn with `stopReason: "cancelled"`.
 

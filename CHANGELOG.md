@@ -10,7 +10,7 @@ startup.
 ## 0.2.0 — 2026-08-24
 
 **`python-acp` stops being an MCP passthrough and becomes a strict ACP v1 agent runtime.**
-192 commits since `0.1.1`.
+196 commits since `0.1.1`.
 
 A client no longer reaches through this process to an MCP server it did not choose. It
 opens an ACP session, names the MCP servers that session should talk to, and sends
@@ -209,7 +209,7 @@ Three things to know while porting:
 - **`make docs-check`** enforces the three documentation invariants nothing else did:
   relative links resolve, every Mermaid flowchart edge names a node its own block defines,
   and every production module has a sibling `.md` with no orphans.
-- **The test suite went from one file to 23 files and 898 tests**, including a method-by-method
+- **The test suite went from one file to 24 files and 901 tests**, including a method-by-method
   conformance suite, golden JSON-RPC transcripts for four flows, a negative-surface table,
   an interop run against a client that imports nothing from this package, and a
   session-wide guard that fails the run if any test leaves a subprocess behind.

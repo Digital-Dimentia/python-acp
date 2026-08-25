@@ -7,7 +7,7 @@ is allowed to break the client-facing wire. `0.2.0` does. Read its Breaking sect
 upgrading — every `0.1.x` client stops working, and every `0.1.x` invocation fails at
 startup.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-08-24
 
 **`python-acp` stops being an MCP passthrough and becomes a strict ACP v1 agent runtime.**
 192 commits since `0.1.1`.

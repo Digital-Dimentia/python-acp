@@ -23,6 +23,10 @@
   feature branches such as feat/* stays local until it is merged to main -- that is
   the contract, not an oversight.
 
+  Tags travel the other way: the script runs `git fetch --tags --force` so release
+  tags cut by the GitHub Actions release workflow land here, where the sandboxed
+  agents can see them. Tags are never pushed and never pruned.
+
   This repo has a .beads/ directory, so `bd dolt push` runs too; git push alone does
   not carry issue data (it rides on refs/dolt/data).
 

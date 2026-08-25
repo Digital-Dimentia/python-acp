@@ -50,7 +50,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint docs-check test transcripts build wheel sdist container-image print-release-platforms package release-bundle run clean clean-outputs clean-venv distclean
+.PHONY: venv sync install lint docs-check test stats stats-check transcripts build wheel sdist container-image print-release-platforms package release-bundle run clean clean-outputs clean-venv distclean
 
 venv: $(VENV_STAMP)
 
@@ -79,6 +79,18 @@ docs-check: venv
 
 test: venv
 	$(PYTHON_BIN) -m pytest tests
+
+## Rewrite STATISTICS.md from the source tree. The document is GENERATED -- an edit by
+## hand is lost the next time anyone runs this. Counting is done on the AST, so a `def`
+## in a docstring is not a function. `make stats-check` reports staleness without
+## writing; it is deliberately NOT in the default gates, because failing a build over a
+## line count is a tax rather than a guard. See scripts/code_stats.py.
+stats: venv
+	$(PYTHON_BIN) scripts/code_stats.py
+	@git --no-pager diff --stat STATISTICS.md || true
+
+stats-check: venv
+	$(PYTHON_BIN) scripts/code_stats.py --check
 
 ## Re-record the golden JSON-RPC transcripts in tests/transcripts/, then READ THE DIFF.
 ## A regeneration nobody looked at is worse than no transcript: it launders a wire

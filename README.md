@@ -38,6 +38,8 @@
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.
 - [Changelog](CHANGELOG.md) — what changed per release, and the upgrade path off `0.1.x`.
+- [Statistics](STATISTICS.md) — lines, modules, classes, functions, and tests. Generated
+  by `make stats`; counted on the AST rather than with `grep`.
 - Design docs — the plan is delivered, so these record decisions and their reasons,
   including what was declined:
   - [ACP v1 plan](docs/full-apc-plan.md)

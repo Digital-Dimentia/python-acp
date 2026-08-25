@@ -14,18 +14,18 @@ linter checks. It is easy to violate silently.
 basename.** Established by `docs/full-apc-plan.md` step 8.3.
 
 ```
-src/python_acp/cli.py        ↔ src/python_acp/cli.md
-src/python_acp/mcp_stdio.py  ↔ src/python_acp/mcp_stdio.md
-src/python_acp/ws_bridge.py  ↔ src/python_acp/ws_bridge.md
+src/python_acp/cli.py          ↔ src/python_acp/cli.md
+src/python_acp/mcp_stdio.py    ↔ src/python_acp/mcp_stdio.md
+src/python_acp/transport_ws.py ↔ src/python_acp/transport_ws.md
 ```
 
 Consequences:
 
-- **New module** → create its `.md` in the same commit, and link it from both the
+- **New module** → create its `.md` in the same commit, link it from both the
   "Module Documentation" list in `ARCHITECTURE.md` and the "Architecture docs" list in
-  `README.md`. Two lists, both need the entry.
-- **Renamed module** → rename the `.md` to match and fix both lists.
-- **Deleted module** → delete the `.md` and remove both list entries.
+  `README.md`, and run `make stats`. Two lists and one generated file.
+- **Renamed module** → rename the `.md` to match, fix both lists, `make stats`.
+- **Deleted module** → delete the `.md`, remove both list entries, `make stats`.
 - **Changed public surface** → update the existing `.md`.
 
 `__init__.py` is exempt. Files under `tests/` are exempt.
@@ -35,8 +35,10 @@ Consequences:
 Holds two Mermaid diagrams that describe real behavior, not intent:
 
 - a `flowchart LR` of subsystems and their wiring
-- a `sequenceDiagram` of the request lifecycle, including the `alt` branch that splits
-  action-based from JSON-RPC requests
+- a `sequenceDiagram` of the request lifecycle, including the `alt` branch that splits an
+  unusable frame from a well-formed one. (That branch used to split *action-based from
+  JSON-RPC* requests; `pyacp-sld.3` deleted the action surface, so the only thing decided
+  before the SDK sees a frame is whether it is usable at all.)
 
 Update the sequence diagram whenever the dispatch path changes shape — a new
 participant, a new branch, a changed hop. Adding one more method to an existing branch
@@ -53,6 +55,31 @@ add-a-method checklist.
 
 (This section used to describe a "WebSocket actions" section with one payload example per
 deprecated action. `pyacp-sld.3` deleted both the surface and the section.)
+
+## STATISTICS.md is generated — never hand-edit it
+
+[STATISTICS.md](../../../STATISTICS.md) at the repo root records lines, modules, classes,
+functions, and tests. **`make stats` writes it** from
+[scripts/code_stats.py](../../../scripts/code_stats.py); anything typed into it by hand is
+lost the next time anyone runs that.
+
+Counting is done on the **AST**, so a `def` inside a docstring is not a function and a `#`
+inside a string is not a comment. That is not fussiness in this repo — prose outweighs code
+in several modules, so grep-based counts are wrong by a wide margin rather than merely
+imprecise.
+
+**Run `make stats` whenever the module list changes** — a module added, renamed, or
+deleted. That is the case the document cannot survive, and `tests/test_code_stats.py`
+asserts the module table is complete, so forgetting fails the suite rather than shipping a
+table that reads as authoritative.
+
+`make stats-check` reports staleness without writing. It is deliberately **not** in
+`make lint && make docs-check && make test`: gating a build on a line count would fail
+every commit that adds a line, and a check that cries wolf is one people learn to satisfy
+without reading. The line numbers are allowed to lag; the module list is not.
+
+The document stamps the commit it was generated from, so a reader can date what they are
+looking at rather than assuming it is current.
 
 ## Checking before handoff
 

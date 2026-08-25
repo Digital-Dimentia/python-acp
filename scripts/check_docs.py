@@ -26,7 +26,42 @@ import re
 import sys
 from pathlib import Path
 
-SKIP_PARTS = (".venv", ".git", "node_modules", "egg-info", "dist", "artifacts")
+#: Directory names that are never ours, matched exactly against a path component.
+SKIP_PARTS = (
+    ".git", "node_modules", "dist", "artifacts",
+    "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache",
+)
+
+#: Directory name *suffixes* that are never ours.
+#:
+#: `egg-info` used to sit in `SKIP_PARTS`, where it could never match anything: build
+#: metadata is always named `<project>.egg-info`, so the exact comparison was against a
+#: string no directory is ever called. The same mistake as the `.venv` one below, in the
+#: same tuple, found by the test that was written to pin the first.
+SKIP_SUFFIXES = (".egg-info",)
+
+#: Directory name *prefixes* that are never ours.
+#:
+#: **A prefix, because an exact match on `.venv` was a bug** (`pyacp-bdc`). `.gitignore`
+#: line 155 and the Makefile's `VENV_DIR` override document matrix-leg environments named
+#: `.venv311` and `.venv312`, and none of those equal `.venv` — so this walker used to
+#: descend into an entire installed site-packages tree. Cosmetic for `code_stats.py`,
+#: which merely counted vendored Markdown as ours; not cosmetic here, where it meant
+#: validating relative links inside a *dependency's* files and failing `make docs-check`
+#: for a file nobody in this repository wrote.
+SKIP_PREFIXES = (".venv", "venv")
+
+
+def is_ignored(path: Path) -> bool:
+    """Whether `path` lies inside something that is not this project's source.
+
+    Shared with `code_stats.py`, which imports it rather than keeping a second copy —
+    two lists of directories to skip is exactly how one of them ends up missing an entry.
+    """
+    return any(
+        part in SKIP_PARTS or part.startswith(SKIP_PREFIXES) or part.endswith(SKIP_SUFFIXES)
+        for part in path.parts
+    )
 
 MERMAID_BLOCK = re.compile(r"```mermaid\n(.*?)```", re.S)
 LINK = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
@@ -45,9 +80,7 @@ STRUCTURAL = ("subgraph", "end", "style", "classDef", "class ", "click", "linkSt
 
 
 def markdown_files(root: Path) -> list[Path]:
-    return sorted(
-        p for p in root.rglob("*.md") if not any(part in SKIP_PARTS for part in p.parts)
-    )
+    return sorted(p for p in root.rglob("*.md") if not is_ignored(p))
 
 
 def broken_links(root: Path) -> list[str]:

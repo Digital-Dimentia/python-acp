@@ -213,3 +213,52 @@ def test_this_repository_passes_its_own_check() -> None:
     assert check_docs.broken_links(root) == []
     assert check_docs.flowchart_problems(root) == []
     assert check_docs.colocated_docs(root) == []
+
+
+# ---------------------------------------------------------------------------
+# What counts as ours (pyacp-bdc)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        # The bug: SKIP_PARTS held the literal ".venv" and was matched exactly, so a
+        # matrix-leg venv -- which .gitignore line 155 and the Makefile's VENV_DIR
+        # override both document -- was walked in full.
+        ".venv311/lib/python3.11/site-packages/pip/_vendor/idna/LICENSE.md",
+        ".venv312/lib/python3.12/site-packages/anything/README.md",
+        ".venv/lib/python3.14/site-packages/anything/README.md",
+        "venv/lib/python3.11/site-packages/anything/README.md",
+        ".pytest_cache/README.md",
+        ".ruff_cache/whatever.md",
+        "node_modules/thing/README.md",
+        "dist/README.md",
+        "src/python_acp.egg-info/README.md",
+    ],
+)
+def test_a_file_that_is_not_ours_is_skipped(relative: str) -> None:
+    assert check_docs.is_ignored(Path("/repo") / relative)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["README.md", "docs/interop.md", "src/python_acp/turns.md", ".claude/skills/x/SKILL.md"],
+)
+def test_a_file_that_is_ours_is_not_skipped(relative: str) -> None:
+    """The skip must stay narrow. `.claude/skills` in particular is ours and is counted —
+    those files are maintained by hand like any other doc."""
+    assert not check_docs.is_ignored(Path("/repo") / relative)
+
+
+def test_a_dependency_doc_cannot_fail_this_repositorys_check(tmp_path: Path) -> None:
+    """The consequence that was not cosmetic.
+
+    A dependency shipping Markdown with a link that does not resolve from its installed
+    location used to fail `make docs-check`, naming a file nobody here wrote. The venv is
+    walked past entirely now, so the broken link below is invisible.
+    """
+    vendored = tmp_path / ".venv311" / "lib" / "python3.11" / "site-packages" / "dep"
+    vendored.mkdir(parents=True)
+    (vendored / "README.md").write_text("[gone](./nowhere-at-all.md)\n")
+    assert check_docs.broken_links(tmp_path) == []

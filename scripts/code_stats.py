@@ -41,9 +41,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from check_docs import is_ignored  # noqa: E402  — sibling script, not an installed package
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = REPO_ROOT / "STATISTICS.md"
-SKIP_PARTS = (".venv", ".git", "node_modules", "egg-info", "dist", "artifacts", "__pycache__")
 
 #: The groups the report is broken down by, in the order they appear.
 GROUPS: tuple[tuple[str, str], ...] = (
@@ -168,11 +171,7 @@ def analyse(path: Path) -> FileStats:
 
 
 def python_files(directory: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in directory.rglob("*.py")
-        if not any(part in SKIP_PARTS for part in path.parts)
-    )
+    return sorted(path for path in directory.rglob("*.py") if not is_ignored(path))
 
 
 def collect(root: Path = REPO_ROOT) -> list[Group]:
@@ -197,9 +196,7 @@ def markdown_files(root: Path = REPO_ROOT) -> list[Path]:
     one file.
     """
     return sorted(
-        path
-        for path in root.rglob("*.md")
-        if not any(part in SKIP_PARTS for part in path.parts) and path != OUTPUT
+        path for path in root.rglob("*.md") if not is_ignored(path) and path != OUTPUT
     )
 
 
@@ -374,6 +371,21 @@ def render(root: Path = REPO_ROOT) -> str:
             f"{stats.total:,}", f"{stats.code:,}",
             f"{stats.classes:,}", f"{stats.functions:,}", doc,
         ]))
+
+    out += [
+        "",
+        "## Documentation",
+        "",
+        "Every Markdown file in the repository, this one excepted. Prose is a deliverable",
+        "here rather than a by-product, so it is counted per file and not only in total.",
+        "",
+        _row(["File", "Lines"]),
+        _row(["---", "---:"]),
+    ]
+    for path in sorted(docs, key=lambda item: -_line_count(item)):
+        relative = path.relative_to(root).as_posix()
+        out.append(_row([f"[`{relative}`]({relative})", f"{_line_count(path):,}"]))
+    out.append(_row([f"**{len(docs)} files**", f"**{doc_lines:,}**"]))
 
     out += [
         "",

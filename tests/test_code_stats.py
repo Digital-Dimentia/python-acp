@@ -19,7 +19,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -192,13 +191,45 @@ def test_generating_twice_produces_the_same_bytes() -> None:
     assert render() == render()
 
 
-@pytest.mark.parametrize("flag", [[], ["--check"]])
-def test_the_script_runs_as_a_command(flag: list[str]) -> None:
-    """It is invoked by `make`, not imported, so the entry point is exercised too."""
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "code_stats.py"), *flag],
-        capture_output=True,
-        text=True,
-        check=False,
+def test_the_script_runs_as_a_command(tmp_path: Path) -> None:
+    """It is invoked by `make`, not imported, so the entry point is exercised too.
+
+    **`--output` is not incidental here.** The first version of this test ran the script
+    with no flag, which writes `STATISTICS.md` — so a passing `make test` left the working
+    tree dirty, every time. A test that modifies a tracked file is a test that will one day
+    be blamed for a diff nobody made.
+    """
+    destination = tmp_path / "STATISTICS.md"
+    script = str(REPO_ROOT / "scripts" / "code_stats.py")
+
+    written = subprocess.run(
+        [sys.executable, script, "--output", str(destination)],
+        capture_output=True, text=True, check=False,
     )
-    assert result.returncode == 0, result.stderr
+    assert written.returncode == 0, written.stderr
+    assert destination.is_file()
+
+    checked = subprocess.run(
+        [sys.executable, script, "--check", "--output", str(destination)],
+        capture_output=True, text=True, check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+    destination.write_text("stale\n", encoding="utf-8")
+    stale = subprocess.run(
+        [sys.executable, script, "--check", "--output", str(destination)],
+        capture_output=True, text=True, check=False,
+    )
+    assert stale.returncode == 1, "--check must fail on a stale file, or it guards nothing"
+
+
+def test_the_suite_does_not_modify_the_committed_document() -> None:
+    """The regression above, asserted directly rather than only avoided.
+
+    Reads the file, runs nothing that writes, and confirms the bytes are the ones the
+    other tests saw — so a future test that reaches for the default output path fails here
+    instead of silently dirtying the tree.
+    """
+    before = OUTPUT.read_bytes()
+    render()
+    assert OUTPUT.read_bytes() == before, "rendering must not write; only `main` writes"

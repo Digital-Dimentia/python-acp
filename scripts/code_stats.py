@@ -401,19 +401,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report whether STATISTICS.md is current without writing it. Exits 1 if not.",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT,
+        # So a test can exercise the writing path without dirtying the working tree. It
+        # did: the first version of `tests/test_code_stats.py` ran this script with no
+        # flag, and `make test` left STATISTICS.md modified every time it passed.
+        help="Where to write. Defaults to STATISTICS.md at the repository root.",
+    )
     args = parser.parse_args(argv)
 
     rendered = render()
     if args.check:
-        current = OUTPUT.read_text(encoding="utf-8") if OUTPUT.is_file() else ""
+        current = args.output.read_text(encoding="utf-8") if args.output.is_file() else ""
         if without_stamp(current) == without_stamp(rendered):
-            print(f"{OUTPUT.name} is current")
+            print(f"{args.output.name} is current")
             return 0
-        print(f"{OUTPUT.name} is out of date — run `make stats`", file=sys.stderr)
+        print(f"{args.output.name} is out of date — run `make stats`", file=sys.stderr)
         return 1
 
-    OUTPUT.write_text(rendered, encoding="utf-8")
-    print(f"wrote {OUTPUT.relative_to(REPO_ROOT)}")
+    args.output.write_text(rendered, encoding="utf-8")
+    print(f"wrote {args.output}")
     return 0
 
 

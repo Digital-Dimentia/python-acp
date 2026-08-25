@@ -229,6 +229,28 @@ def _commit() -> str:
     return result.stdout.strip() or "unknown"
 
 
+#: Prefix of the line naming the commit the numbers were counted at. Comparisons ignore
+#: that line — see `without_stamp`.
+STAMP_PREFIX = "Counted at commit"
+
+
+def without_stamp(document: str) -> str:
+    """The document with the commit stamp blanked, for comparing two generations.
+
+    **The stamp is a fixed point and must be excluded from any staleness check.** The
+    document names the commit it was generated at; committing the document *is* a new
+    commit, so the file is stale against its own stamp the instant it lands. Regenerating
+    does not converge — it stamps the new HEAD, which committing changes again, forever.
+
+    The line count had the same shape and was solved by exclusion (see `markdown_files`).
+    This is the same answer one level up: the stamp stays, because a reader needs to know
+    how old the numbers are, and it is ignored when asking whether the *numbers* moved.
+    """
+    return "\n".join(
+        "" if line.startswith(STAMP_PREFIX) else line for line in document.splitlines()
+    )
+
+
 def _row(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
@@ -254,8 +276,10 @@ def render(root: Path = REPO_ROOT) -> str:
         "[scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time",
         "anyone runs it.",
         "",
-        f"Counted at commit **{_commit()}**. These are a snapshot and go out of date with",
-        "the next commit, which is why the commit is stamped rather than the date alone.",
+        f"{STAMP_PREFIX} **{_commit()}**. These are a snapshot and go out of date with the",
+        "next commit, which is why the commit is stamped rather than the date alone. The",
+        "stamp is ignored when checking whether the numbers are current — it names the",
+        "commit *before* the one that committed this file, and always will.",
         "",
         "Counting is done on the **AST**, not with `grep`: a `def` inside a docstring is not",
         "a function and a `#` inside a string is not a comment. That distinction is not",
@@ -382,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     rendered = render()
     if args.check:
         current = OUTPUT.read_text(encoding="utf-8") if OUTPUT.is_file() else ""
-        if current == rendered:
+        if without_stamp(current) == without_stamp(rendered):
             print(f"{OUTPUT.name} is current")
             return 0
         print(f"{OUTPUT.name} is out of date — run `make stats`", file=sys.stderr)

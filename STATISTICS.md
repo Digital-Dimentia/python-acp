@@ -4,8 +4,10 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **89bf4cf 2026-08-24**. These are a snapshot and go out of date with
-the next commit, which is why the commit is stamped rather than the date alone.
+Counted at commit **093a24e 2026-08-25**. These are a snapshot and go out of date with the
+next commit, which is why the commit is stamped rather than the date alone. The
+stamp is ignored when checking whether the numbers are current — it names the
+commit *before* the one that committed this file, and always will.
 
 Counting is done on the **AST**, not with `grep`: a `def` inside a docstring is not
 a function and a `#` inside a string is not a comment. That distinction is not
@@ -22,15 +24,15 @@ does. Docstring totals below are therefore lower than a naive span count.
 | Group | Files | Lines | Code | Docstring | Comment | Blank | Classes | Functions | async | Test fns |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `src/python_acp` | 17 | 6,857 | 3,268 | 1,962 | 567 | 1,060 | 41 | 247 | 98 | 0 |
-| `tests` | 28 | 13,649 | 8,177 | 1,567 | 680 | 3,225 | 43 | 898 | 529 | 657 |
-| `scripts` | 4 | 1,320 | 895 | 163 | 40 | 222 | 5 | 50 | 0 | 0 |
-| **Total** | **49** | **21,826** | **12,340** | **3,692** | **1,287** | **4,507** | **89** | **1,195** | **627** | **657** |
+| `tests` | 28 | 13,674 | 8,188 | 1,576 | 680 | 3,230 | 43 | 899 | 529 | 658 |
+| `scripts` | 4 | 1,344 | 902 | 172 | 42 | 228 | 5 | 51 | 0 | 0 |
+| **Total** | **49** | **21,875** | **12,358** | **3,710** | **1,289** | **4,518** | **89** | **1,197** | **627** | **658** |
 
 ## Ratios worth knowing
 
 | Measure | Value | What it means |
 | --- | ---: | --- |
-| Test code to production code | 2.5 : 1 | 8,177 lines of test code against 3,268 of production code |
+| Test code to production code | 2.5 : 1 | 8,188 lines of test code against 3,268 of production code |
 | Prose share of production source | 37% | 1,962 docstring + 567 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
 | Co-located module docs | 3,499 lines | 16 files beside the 16 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
 | Markdown across the repo | 7,547 lines | 34 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
@@ -86,8 +88,8 @@ longer than the module, that is usually deliberate.
 | [`test_mcp_content.py`](tests/test_mcp_content.py) | 195 | 16 |
 | [`test_check_docs.py`](tests/test_check_docs.py) | 215 | 15 |
 | [`test_errors.py`](tests/test_errors.py) | 181 | 14 |
+| [`test_code_stats.py`](tests/test_code_stats.py) | 204 | 11 |
 | [`test_interop.py`](tests/test_interop.py) | 159 | 11 |
-| [`test_code_stats.py`](tests/test_code_stats.py) | 179 | 10 |
 | [`test_transcripts.py`](tests/test_transcripts.py) | 652 | 10 |
 | [`test_executor_neutrality.py`](tests/test_executor_neutrality.py) | 305 | 8 |
 | [`test_mcp_tools.py`](tests/test_mcp_tools.py) | 166 | 8 |

@@ -26,10 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from code_stats import (  # noqa: E402
     OUTPUT,
     REPO_ROOT,
+    STAMP_PREFIX,
     analyse,
     classify_lines,
     markdown_files,
     render,
+    without_stamp,
 )
 
 SAMPLE = '''"""Module docstring.
@@ -133,11 +135,34 @@ def test_the_document_is_current() -> None:
     This is the one staleness assertion, and it is cheap to satisfy: the message says the
     command. It is here rather than in `check_docs.py` because it is about a generated
     file, not about the documentation invariants that script owns.
+
+    Compared **without the commit stamp**, which is a fixed point: committing the document
+    is itself a commit, so the stamp names the commit before the one that landed the file
+    and can never agree with HEAD. Comparing it would make this test fail on every commit
+    that touches the document — including the one that introduced it, which is how the
+    problem was found.
     """
     assert OUTPUT.is_file(), "STATISTICS.md is missing — run `make stats`"
-    assert OUTPUT.read_text(encoding="utf-8") == render(), (
+    assert without_stamp(OUTPUT.read_text(encoding="utf-8")) == without_stamp(render()), (
         "STATISTICS.md is out of date — run `make stats` and commit the result"
     )
+
+
+def test_the_staleness_check_ignores_the_commit_stamp_and_nothing_else() -> None:
+    """The exclusion has to be narrow, or it hides real drift.
+
+    A changed stamp is invisible to the check; a changed *number* on any other line is
+    not.
+    """
+    document = render()
+    restamped = "\n".join(
+        f"{STAMP_PREFIX} **deadbee 1999-01-01**." if line.startswith(STAMP_PREFIX) else line
+        for line in document.splitlines()
+    )
+    assert without_stamp(restamped) == without_stamp(document), "a new stamp must not count"
+
+    moved = document.replace("## Totals", "## Totals (edited)", 1)
+    assert without_stamp(moved) != without_stamp(document), "real drift must still count"
 
 
 def test_the_module_table_names_every_production_module() -> None:

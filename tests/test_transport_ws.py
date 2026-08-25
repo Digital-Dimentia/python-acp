@@ -37,14 +37,21 @@ from acp import PROTOCOL_VERSION
 from websockets.protocol import State
 
 from python_acp import __version__
+from python_acp.cli import run as cli_run
 from python_acp.capabilities import build_agent_capabilities
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
+    ACCESS_KEY_ENV,
+    ALLOW_UNAUTHENTICATED_ENV,
+    UnauthenticatedBindError,
     WebSocketAgentServer,
     WebSocketMessageTransport,
+    access_key_from_env,
+    is_loopback,
     serve_websocket,
+    unauthenticated_bind_allowed,
 )
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
@@ -626,14 +633,19 @@ async def listening_server(**kwargs: Any) -> AsyncIterator[tuple[WebSocketAgentS
     sockets: list[socket.socket] = []
 
     class Accepting:
-        async def connect(self) -> Any:
-            """One client, connected through the real opening handshake."""
+        async def connect(self, path: str = "/") -> Any:
+            """One client, connected through the real opening handshake.
+
+            `path` is what the access-key check reads, so it is the only way to exercise
+            that hook the way a client meets it — during the handshake, before there is
+            a connection to send anything on.
+            """
             client_sock, server_sock = socket.socketpair()
             sockets.extend((client_sock, server_sock))
             await loop.connect_accepted_socket(captured["factory"], server_sock)
             # `ws://localhost/` is never resolved: `sock=` supplies the connection, and
             # the URI only supplies the Host header the handshake has to send.
-            return await websockets.connect("ws://localhost/", sock=client_sock)
+            return await websockets.connect(f"ws://localhost{path}", sock=client_sock)
 
     try:
         yield server, Accepting()
@@ -755,7 +767,10 @@ async def test_serve_forever_returns_when_the_server_is_closed() -> None:
     async def create_server(protocol_factory: Any, *args: Any, **kw: Any) -> _StubAsyncioServer:
         return _StubAsyncioServer(loop)
 
-    server = WebSocketAgentServer(None)
+    # Loopback rather than `None`: `None` is every interface, which the access-key guard
+    # now refuses without a key. Nothing here binds anything — `create_server` is stubbed
+    # — so the host is incidental to what this test is about.
+    server = WebSocketAgentServer("127.0.0.1")
     loop.create_server = create_server  # type: ignore[method-assign]
     try:
         serving = asyncio.create_task(server.serve_forever())
@@ -764,3 +779,173 @@ async def test_serve_forever_returns_when_the_server_is_closed() -> None:
         await asyncio.wait_for(serving, timeout=TIMEOUT)
     finally:
         loop.create_server = real_create_server  # type: ignore[method-assign]
+
+
+# ----------------------------------------------------------------------
+# Access key (pyacp-rg8)
+#
+# The key is checked during the opening handshake, so the tests that matter are the ones
+# that go through a real one. `listening_server` already provides that, and `connect()`
+# takes the path because the URL is where the key rides.
+# ----------------------------------------------------------------------
+
+
+async def test_a_client_presenting_the_key_completes_the_handshake() -> None:
+    async with listening_server(access_key="s3cr3t") as (_server, accepting):
+        connection = await asyncio.wait_for(accepting.connect("/?key=s3cr3t"), timeout=TIMEOUT)
+        try:
+            assert connection.protocol.state is State.OPEN
+        finally:
+            await connection.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "why"),
+    [
+        ("/", "no key at all"),
+        ("/?key=", "an empty key"),
+        ("/?key=wrong", "a wrong key"),
+        ("/?nothing=s3cr3t", "the right value under the wrong parameter"),
+        ("/?key=wrong&key=s3cr3t", "the right key smuggled beside a wrong one"),
+    ],
+)
+async def test_a_client_without_the_key_is_refused_before_the_handshake(
+    path: str, why: str
+) -> None:
+    """401 from `process_request`, which runs *instead of* the upgrade.
+
+    The last case is the one worth having: a check that asked "is the key among the
+    values" rather than "is there exactly one value and is it the key" would let it in.
+    """
+    async with listening_server(access_key="s3cr3t") as (_server, accepting):
+        with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
+            await asyncio.wait_for(accepting.connect(path), timeout=TIMEOUT)
+        assert refused.value.response.status_code == 401, why
+
+
+async def test_no_configured_key_leaves_the_handshake_untouched() -> None:
+    """The default path is unchanged: no key configured means no `process_request`."""
+    async with listening_server() as (server, accepting):
+        assert server._access_key is None
+        connection = await asyncio.wait_for(accepting.connect("/?key=anything"), timeout=TIMEOUT)
+        try:
+            assert connection.protocol.state is State.OPEN
+        finally:
+            await connection.close()
+
+
+async def test_a_rejected_client_never_reaches_the_agent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal is admission control, not an ACP error.
+
+    Nothing logs a connection, because `_handle_client` is never called — which is the
+    whole point of checking during the handshake rather than on the first message.
+    """
+    with caplog.at_level(logging.INFO, logger="python_acp.transport_ws"):
+        async with listening_server(access_key="s3cr3t") as (_server, accepting):
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                await asyncio.wait_for(accepting.connect("/"), timeout=TIMEOUT)
+    assert not any("client connected" in record.message for record in caplog.records)
+    assert any("Rejected WebSocket connection" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.53", True),
+        ("localhost", True),
+        ("::1", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("192.168.1.10", False),
+        ("example.internal", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_loopback_fails_closed(host: str | None, loopback: bool) -> None:
+    """A name we cannot parse is treated as exposed; so are `None` and `""`, which mean
+    every interface to `serve()`."""
+    assert is_loopback(host) is loopback
+
+
+def test_binding_off_loopback_without_a_key_refuses_to_start() -> None:
+    with pytest.raises(UnauthenticatedBindError) as refusal:
+        WebSocketAgentServer("0.0.0.0")
+    message = str(refusal.value)
+    # The message has to carry the fix, because it is the only thing the operator sees.
+    assert ACCESS_KEY_ENV in message
+    assert ALLOW_UNAUTHENTICATED_ENV in message
+
+
+def test_the_guard_is_satisfied_by_a_key_or_by_the_opt_out() -> None:
+    assert WebSocketAgentServer("0.0.0.0", access_key="s3cr3t")._access_key == "s3cr3t"
+    assert WebSocketAgentServer("0.0.0.0", allow_unauthenticated=True)._access_key is None
+    # And loopback needs neither, which is what keeps every local workflow working.
+    assert WebSocketAgentServer("127.0.0.1")._access_key is None
+
+
+def test_an_empty_key_in_the_environment_reads_as_unset() -> None:
+    """`PYTHON_ACP_WS_KEY=` is how someone spells "off". Honouring it as a key would
+    refuse every client that sent none while admitting one that sent `?key=`."""
+    assert access_key_from_env({ACCESS_KEY_ENV: ""}) is None
+    assert access_key_from_env({}) is None
+    assert access_key_from_env({ACCESS_KEY_ENV: "s3cr3t"}) == "s3cr3t"
+
+
+@pytest.mark.parametrize(
+    ("value", "allowed"),
+    [("1", True), ("true", True), ("TRUE", True), ("yes", True), ("0", False), ("false", False),
+     ("no", False), ("", False), ("maybe", False)],
+)
+def test_the_opt_out_is_read_strictly(value: str, allowed: bool) -> None:
+    """A permissive reading would turn `=0` — which says the opposite — into consent."""
+    assert unauthenticated_bind_allowed({ALLOW_UNAUTHENTICATED_ENV: value}) is allowed
+
+
+def test_the_cli_exits_2_rather_than_serving_an_unauthenticated_socket(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End to end through `run()`, because the guard is worth nothing if the CLI
+    swallows it or dies with a traceback instead of the sentence naming the fix.
+
+    Exit 2 matches argparse's own code for a usage refusal, which is what this is.
+    """
+    monkeypatch.delenv(ACCESS_KEY_ENV, raising=False)
+    monkeypatch.delenv(ALLOW_UNAUTHENTICATED_ENV, raising=False)
+    monkeypatch.setattr(sys, "argv", ["python-acp", "--host", "0.0.0.0"])
+    with caplog.at_level(logging.ERROR, logger="python_acp.cli"):
+        with pytest.raises(SystemExit) as exited:
+            cli_run()
+    assert exited.value.code == 2
+    assert any(ACCESS_KEY_ENV in record.getMessage() for record in caplog.records)
+
+
+def test_the_cli_serves_when_the_environment_supplies_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: with the key set, the same invocation gets past the guard.
+
+    `start()` is stubbed out, so this proves the key reached the server rather than that
+    a port was bound — the binding itself is covered above over a socketpair.
+    """
+    monkeypatch.setenv(ACCESS_KEY_ENV, "s3cr3t")
+    monkeypatch.delenv(ALLOW_UNAUTHENTICATED_ENV, raising=False)
+    monkeypatch.setattr(sys, "argv", ["python-acp", "--host", "0.0.0.0"])
+    built: dict[str, Any] = {}
+
+    real_init = WebSocketAgentServer.__init__
+
+    def capturing_init(self: WebSocketAgentServer, *args: Any, **kwargs: Any) -> None:
+        real_init(self, *args, **kwargs)
+        built["key"] = self._access_key
+
+    async def stop_here(self: WebSocketAgentServer) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(WebSocketAgentServer, "__init__", capturing_init)
+    monkeypatch.setattr(WebSocketAgentServer, "start", stop_here)
+    cli_run()  # KeyboardInterrupt is swallowed by `run()`, so returning is the assertion.
+    assert built["key"] == "s3cr3t"

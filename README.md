@@ -122,6 +122,65 @@ default would take that away for no capability gain. `--transport stdio` is one 
 away and fully supported. See [cli.py](src/python_acp/cli.md) for the full decision and
 [transport_ws.py](src/python_acp/transport_ws.md) for the binding.
 
+### Securing the WebSocket
+
+**Read this before binding anything but loopback.** `session/new` takes a `command` and
+`args` and spawns them, so whoever can open this socket can run programs as the user
+running the bridge. On `127.0.0.1` that is the design — the client is you. Anywhere else
+it is a remote shell with no password.
+
+Set a shared key in the **environment**, and have the client present it in the URL:
+
+```bash
+PYTHON_ACP_WS_KEY=$(openssl rand -hex 32) python-acp --host 0.0.0.0
+```
+
+```
+ws://your-host:8765/?key=<the same secret>
+```
+
+A client that presents no key, the wrong key, or two keys is refused with **`401` during
+the opening handshake** — it never reaches `initialize`, so it never becomes an ACP
+connection at all.
+
+The variable is read from the environment and there is **no `--ws-key` flag**, because
+`argv` is world-readable through `ps`: a flag would publish the secret to every other user
+of the machine at the moment it is used to protect it. An empty value (`PYTHON_ACP_WS_KEY=`)
+reads as unset.
+
+**Binding a non-loopback host with no key refuses to start:**
+
+```
+$ python-acp --host 0.0.0.0
+refusing to bind 0.0.0.0 without an access key: session/new runs commands named by the
+client, so an unauthenticated socket off loopback is remote code execution. Set
+PYTHON_ACP_WS_KEY=<secret> and connect to ws://…/?key=<secret>, or set
+PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED=1 to accept the risk.
+$ echo $?
+2
+```
+
+Loopback with no key is unchanged, so every local workflow keeps working untouched.
+
+#### What the key does not do
+
+It is a floor, not a security model. Know these before putting it anywhere interesting:
+
+- **There is no TLS in this process.** The key travels in the request URL, readable by
+  anything on the path and written down in proxy and server access logs. Put a reverse
+  proxy or an SSH tunnel in front of it for anything beyond a trusted network.
+- **One key, no identity.** Every client shares it, so there is no per-client revocation
+  and nothing to attribute a session to — and `session/list` shows every client every
+  session. Rotating means a restart.
+- **A query parameter is the wrong carrier on principle.** `Authorization` would keep the
+  secret out of the URL. It is a query parameter because that is the one thing every
+  WebSocket client library can send without custom header support, and a key nobody can
+  present protects nothing.
+
+Note that this is *transport* admission control and not ACP's `authenticate`, which is why
+`initialize` still advertises no auth methods: that field is about the agent presenting a
+credential, and it has none. See [transport_ws.py](src/python_acp/transport_ws.md).
+
 ### Sessions bring their own MCP servers
 
 `session/new` names the MCP servers that session should talk to. Each gets its own
@@ -413,18 +472,26 @@ The release bundle includes the built Python artifacts and, when available, the 
 
 ```bash
 podman build -t python-acp -f Containerfile .
-podman run --rm -p 8765:8765 python-acp --host 0.0.0.0
+podman run --rm -p 8765:8765 -e PYTHON_ACP_WS_KEY python-acp --host 0.0.0.0
 ```
 
 Or with Docker:
 
 ```bash
 docker build -t python-acp -f Containerfile .
-docker run --rm -p 8765:8765 python-acp --host 0.0.0.0
+docker run --rm -p 8765:8765 -e PYTHON_ACP_WS_KEY python-acp --host 0.0.0.0
 ```
 
+Both assume `PYTHON_ACP_WS_KEY` is set in your shell — `-e VAR` with no value passes it
+through without putting the secret in the command line, where `ps` and your shell history
+would both keep it.
+
 `--host 0.0.0.0` rather than the default `127.0.0.1`, which inside a container is
-reachable only from inside it.
+reachable only from inside it. That is also why the key is not optional here: `-p
+8765:8765` publishes the port on **every** host interface, and without a key the container
+refuses to start rather than serve an unauthenticated agent to the network. See
+[Securing the WebSocket](#securing-the-websocket) for the threat model and what the key
+does not cover.
 
 ### Raspberry Pi and other arm64 hosts
 

@@ -50,6 +50,11 @@ The whole design, including what was declined and why, is
   "bridge" named the thing this project stopped being.
 - `--transport ws` **remains the default**, so the socket a `0.1.x` deployment binds is
   still bound on the same host and port. Only what you may send over it changed.
+- **Binding a non-loopback host now requires an access key, or an explicit opt-out.**
+  `python-acp --host 0.0.0.0` with no `PYTHON_ACP_WS_KEY` exits `2` instead of serving.
+  This breaks the `0.1.x` container recipe on purpose — see Added, below, for what to set.
+  `PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED=1` restores the old behaviour for anyone who wants
+  it. **Loopback with no key is unchanged**, so no local workflow is affected.
 
 #### Upgrading
 
@@ -141,6 +146,23 @@ Three things to know while porting:
   onto ACP content blocks.
 - **Absolute-path enforcement** and a settled containment boundary for `cwd` and
   `additionalDirectories`.
+- **An access key for the WebSocket transport.** Set `PYTHON_ACP_WS_KEY` in the server's
+  environment; a client presents it as `ws://host:8765/?key=<secret>`. A client without it
+  is refused `401` **during the opening handshake**, so it never reaches `initialize`.
+  Before this, anyone who could open the socket was a client — and since `session/new`
+  spawns a command the client names, an exposed socket was remote code execution as the
+  bridge's user.
+
+  It is read from the environment and there is no `--ws-key` flag, because `argv` is
+  world-readable through `ps`. It is transport admission control rather than ACP's
+  `authenticate`, so `initialize` still advertises no auth methods — accurately: that
+  field is the agent presenting a credential, and it has none.
+
+  Know its limits before relying on it: no TLS in this process, so the key rides in the
+  URL and lands in access logs; one shared key with no identity, so no per-client
+  revocation and no rotation without a restart. The README's
+  [Securing the WebSocket](README.md#securing-the-websocket) section states the threat
+  model, and `pyacp-smj` holds the real design.
 - **A multi-arch container image** — `linux/amd64` and `linux/arm64`, so it runs on a
   Raspberry Pi 3, 4, 5, or Zero 2 W under 64-bit Raspberry Pi OS.
 
@@ -187,7 +209,7 @@ Three things to know while porting:
 - **`make docs-check`** enforces the three documentation invariants nothing else did:
   relative links resolve, every Mermaid flowchart edge names a node its own block defines,
   and every production module has a sibling `.md` with no orphans.
-- **The test suite went from one file to 23 files and 866 tests**, including a method-by-method
+- **The test suite went from one file to 23 files and 898 tests**, including a method-by-method
   conformance suite, golden JSON-RPC transcripts for four flows, a negative-surface table,
   an interop run against a client that imports nothing from this package, and a
   session-wide guard that fails the run if any test leaves a subprocess behind.

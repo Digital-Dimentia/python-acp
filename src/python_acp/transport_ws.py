@@ -49,12 +49,18 @@ every well-formed message it reads.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import os
+import secrets
+from http import HTTPStatus
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from acp import RequestError, run_agent
 from websockets.asyncio.server import Server, ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from python_acp.agent import PythonAcpAgent
 from python_acp.errors import to_error_object
@@ -70,6 +76,128 @@ logger = logging.getLogger(__name__)
 # closed rather than an error, so the two transports must not disagree about the size of
 # a message they will both be asked to carry.
 _MAX_MESSAGE_BYTES = 50 * 1024 * 1024
+
+#: Environment variable holding the shared access key a client must present. Unset — or
+#: set to the empty string — means no key is required.
+#:
+#: **An environment variable and not a CLI flag, deliberately.** `argv` is world-readable
+#: through `ps` on every platform this runs on, so a `--ws-key` flag would publish the
+#: secret to every other user of the machine at the moment it is used to protect it.
+ACCESS_KEY_ENV = "PYTHON_ACP_WS_KEY"
+
+#: Escape hatch for `_refuse_unauthenticated_bind`. Set to `1`, `true`, or `yes` to bind a
+#: non-loopback interface with no key anyway.
+ALLOW_UNAUTHENTICATED_ENV = "PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED"
+
+#: Query parameter carrying the key: `ws://host:8765/?key=<secret>`.
+#:
+#: A query parameter is the wrong place for a secret on principle — it lands in proxy and
+#: server access logs, which is where URLs get written down — and `Authorization` or a
+#: `Sec-WebSocket-Protocol` token would keep it out of the URL. It is here because it is
+#: the one carrier every WebSocket client library can send without custom header support,
+#: and a key nobody can present protects nothing. `pyacp-smj` owns the better answer.
+ACCESS_KEY_QUERY_PARAM = "key"
+
+
+class UnauthenticatedBindError(RuntimeError):
+    """Raised when a non-loopback bind is asked for with no key and no opt-out.
+
+    A `RuntimeError` rather than a `ValueError`: nothing about the arguments is malformed,
+    and `errors.py` maps `ValueError` to `-32602`, which would be a bizarre answer to a
+    startup misconfiguration that never reaches a client.
+    """
+
+
+def access_key_from_env(environ: dict[str, str] | None = None) -> str | None:
+    """The configured key, or `None` when there is none.
+
+    An empty value reads as unset. `PYTHON_ACP_WS_KEY=` in a shell profile or a compose
+    file is how someone spells "I turned this off", and treating it as a key that matches
+    only the empty string would be a trap: every client that sent no key at all would
+    still be refused, while one that sent `?key=` would be let in.
+    """
+    source = os.environ if environ is None else environ
+    return source.get(ACCESS_KEY_ENV) or None
+
+
+def unauthenticated_bind_allowed(environ: dict[str, str] | None = None) -> bool:
+    """Whether the opt-out is set, read strictly.
+
+    Only `1`, `true`, and `yes` enable it, case-insensitively. A permissive reading would
+    turn `PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED=0` — which says the opposite — into consent.
+    """
+    source = os.environ if environ is None else environ
+    return source.get(ALLOW_UNAUTHENTICATED_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def is_loopback(host: str | None) -> bool:
+    """Whether binding `host` reaches only this machine. **Fails closed.**
+
+    `None` and `""` mean every interface to `websockets.serve`, and a name we cannot parse
+    as an address is not resolved here — a DNS lookup at startup is a side effect this
+    function has no business having, and one that could answer differently later. Anything
+    not provably loopback is treated as exposed, which is the safe direction to be wrong in.
+    """
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _refuse_unauthenticated_bind(host: str | None, key: str | None, allowed: bool) -> None:
+    """Refuse to serve an unauthenticated agent to anything but this machine.
+
+    The threat is specific and not hypothetical: `session/new` takes a `command` and
+    `args` and spawns them, so a socket anyone can open is arbitrary code execution as
+    whoever runs the bridge. On loopback that is the design — the client is the user. On
+    any other interface it is a remote shell with no password.
+
+    This lives in the transport rather than in `cli.py` so that a caller embedding
+    `WebSocketAgentServer` in its own program inherits the guard instead of having to
+    remember it.
+    """
+    if key is not None or allowed or is_loopback(host):
+        return
+    raise UnauthenticatedBindError(
+        f"refusing to bind {host or 'all interfaces'} without an access key: "
+        f"session/new runs commands named by the client, so an unauthenticated socket "
+        f"off loopback is remote code execution. Set {ACCESS_KEY_ENV}=<secret> and "
+        f"connect to ws://…/?{ACCESS_KEY_QUERY_PARAM}=<secret>, or set "
+        f"{ALLOW_UNAUTHENTICATED_ENV}=1 to accept the risk."
+    )
+
+
+def _access_key_check(expected: str) -> Any:
+    """A `process_request` hook that answers 401 unless the URL carries the key.
+
+    Checked during the opening handshake, so a client without the key never reaches
+    `initialize` and never becomes an ACP connection at all. That is why this changes
+    nothing about `AUTH_METHODS`: ACP's `authenticate` is the agent presenting a
+    credential, and this is admission control one layer below the protocol.
+    """
+
+    expected_bytes = expected.encode("utf-8")
+
+    def process_request(connection: ServerConnection, request: Request) -> Response | None:
+        offered = parse_qs(urlsplit(request.path).query).get(ACCESS_KEY_QUERY_PARAM, [])
+        # Exactly one, so `?key=wrong&key=right` cannot be smuggled past a check that
+        # scanned for any match. `compare_digest` keeps the comparison constant-time.
+        if len(offered) == 1 and secrets.compare_digest(offered[0].encode("utf-8"), expected_bytes):
+            return None
+        logger.warning(
+            "Rejected WebSocket connection from %s: %s access key",
+            connection.remote_address,
+            "missing" if not offered else "wrong",
+        )
+        # No detail in the body. A rejected client is unauthenticated by definition, so
+        # it has no claim on knowing whether the key was absent, wrong, or duplicated.
+        return connection.respond(HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
+
+    return process_request
 
 
 class WebSocketMessageTransport:
@@ -145,14 +273,20 @@ class WebSocketAgentServer:
         port: int = 8765,
         debug: bool = False,
         *,
+        access_key: str | None = None,
+        allow_unauthenticated: bool = False,
         sessions: SessionRegistry | None = None,
         backends: McpBackendRegistry | None = None,
         terminals: TerminalRegistry | None = None,
         executor: TurnExecutor | None = None,
         use_unstable_protocol: bool = True,
     ) -> None:
+        # Before anything else, and in the constructor rather than in `start()`: the point
+        # of the guard is that the misconfiguration never gets as far as a listening port.
+        _refuse_unauthenticated_bind(host, access_key, allow_unauthenticated)
         self._host = host
         self._port = port
+        self._access_key = access_key
         # One registry for every connection this server accepts — a session outlives the
         # socket that created it, which is the whole meaning of `session/resume`.
         self._sessions = sessions if sessions is not None else SessionRegistry()
@@ -167,7 +301,13 @@ class WebSocketAgentServer:
         if self._server is not None:
             return
         self._server = await serve(
-            self._handle_client, self._host, self._port, max_size=_MAX_MESSAGE_BYTES
+            self._handle_client,
+            self._host,
+            self._port,
+            max_size=_MAX_MESSAGE_BYTES,
+            # `None` when no key is configured, which is `serve()`'s own default and
+            # leaves the handshake exactly as it was.
+            process_request=_access_key_check(self._access_key) if self._access_key else None,
         )
 
     async def stop(self) -> None:

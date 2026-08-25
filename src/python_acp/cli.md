@@ -74,14 +74,34 @@ flowchart TD
     Log --> Registries["build sessions + backends + terminals, wire on_close"]
     Registries --> Pick{"--transport"}
     Pick -- stdio --> Stdio["run_stdio(PythonAcpAgent())"]
-    Pick -- ws --> BridgeStart["start WebSocketAgentServer"]
+    Pick -- ws --> Guard{"off loopback<br/>with no access key?"}
+    Guard -- yes --> Refuse["UnauthenticatedBindError<br/>logged, exit 2"]
+    Guard -- no --> BridgeStart["start WebSocketAgentServer"]
     BridgeStart --> Serve["serve_forever"]
     Stdio --> Stop["client disconnects, or KeyboardInterrupt"]
     Serve --> Stop
 ```
 
+The guard raises from `WebSocketAgentServer.__init__`, so it fires before a port is
+bound — and it lives in the transport rather than here, so a caller embedding the server
+in its own program inherits it. `run()` turns it into **exit 2**, argparse's own code for
+a usage refusal, logging the one sentence that names the fix rather than a traceback.
+
+## The access key comes from the environment, never from a flag
+
+`--transport ws` reads `PYTHON_ACP_WS_KEY` and `PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED`
+through `access_key_from_env()` and `unauthenticated_bind_allowed()`. There is deliberately
+**no `--ws-key` flag**: `argv` is world-readable through `ps`, so a flag would publish the
+secret to every other user of the machine at the moment it is used to protect it.
+
+Both are ignored under `--transport stdio`, like `--host` and `--port`, because there is
+no socket to admit anyone to. The full design is in
+[transport_ws.py docs](transport_ws.md).
+
 ## Error and Shutdown Behavior
 
+- `UnauthenticatedBindError` exits **2** with the fix logged to stderr — see the flowchart
+  above.
 - `KeyboardInterrupt` is caught in `run()` to allow clean interactive shutdown.
 - MCP subprocesses belong to sessions, so they are torn down by `on_close` below and by
   `sessions.close_all()` on the way out — not by anything this module holds directly.

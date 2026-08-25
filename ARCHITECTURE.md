@@ -144,6 +144,13 @@ For what every method is for and why, see
 deleted the deprecated branch, so the only thing decided before the SDK sees a frame is
 whether it is usable at all.
 
+The diagram starts at the first frame, which means one gate sits *above* it and is not
+drawn: when `PYTHON_ACP_WS_KEY` is set, `transport_ws.py`'s `process_request` hook answers
+`401` during the WebSocket opening handshake unless the URL carries the key. A client
+refused there sends no frames at all, so nothing below this line ever runs for it — which
+is the point of checking at the handshake rather than on the first message. See
+[transport_ws.py](src/python_acp/transport_ws.md).
+
 ```mermaid
 sequenceDiagram
     participant C as ACP client

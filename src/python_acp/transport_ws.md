@@ -103,6 +103,57 @@ pretend to meet.
 the router ever calling the agent; the two transports must agree, or the same client gets
 different answers depending on how it connected.
 
+## The access key, and why it is not `authenticate` (`pyacp-rg8`)
+
+Until `pyacp-rg8` nothing authenticated a WebSocket client: `serve()` took no
+`process_request`, there was no `Origin` check, and `AUTH_METHODS` is empty by decision.
+Anyone who could open the socket was a client.
+
+That is not a small gap here, because of what a client may ask for. **`session/new` takes
+a `command` and `args` and spawns them.** A socket anyone can open is therefore arbitrary
+code execution as whoever runs the bridge. On loopback that is the design — the client is
+the user, and this is a local-automation tool. On any other interface it is a remote shell
+with no password.
+
+So there are two mechanisms, and they are separate on purpose:
+
+| | What it does |
+|---|---|
+| **The key** | `PYTHON_ACP_WS_KEY` in the server's environment; the client presents it as `ws://host:8765/?key=<secret>`. A `process_request` hook answers `401` during the opening handshake when it is absent, wrong, or duplicated |
+| **The guard** | Binding a non-loopback host with no key raises `UnauthenticatedBindError` from `WebSocketAgentServer.__init__`, before a port exists. `PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED=1` overrides it |
+
+Loopback with no key is unchanged, which is what keeps `make run` and every local
+workflow working exactly as before.
+
+**This is admission control, one layer below ACP, and it does not touch the capability
+block.** `initialize` still advertises no `authMethods`, and that is still accurate: ACP's
+`authenticate` is *the agent presenting a credential*, which it has none of, while this is
+*a client presenting one to the transport*. Two different questions. A rejected client is
+refused during the handshake and never sends `initialize` at all, so there is nothing for
+the ACP layer to describe. Do not "reconcile" this by adding an auth method — the empty
+list is bound by test to the absence of a remote MCP transport (see
+`capabilities.py`), and this change gives neither reason to move.
+
+Four decisions worth not relitigating:
+
+- **An environment variable, not a CLI flag.** `argv` is world-readable through `ps`, so
+  `--ws-key` would publish the secret to every other user of the machine at the moment it
+  is used to protect it.
+- **An empty value reads as unset.** `PYTHON_ACP_WS_KEY=` is how someone spells "off".
+  Treating it as a key matching only the empty string would refuse every client that sent
+  no key while admitting one that sent `?key=`.
+- **The opt-out is read strictly** — only `1`, `true`, `yes`. A permissive reading would
+  turn `=0`, which says the opposite, into consent.
+- **`is_loopback` fails closed.** A hostname is not resolved (a DNS lookup at startup is a
+  side effect this has no business having, and it could answer differently later), so
+  anything not provably loopback counts as exposed.
+
+What the key does **not** do: there is no TLS in this process, so it crosses the wire in
+the URL and lands in any proxy or access log on the path. It is one shared secret with no
+identity behind it, so there is no per-client revocation and nothing to attribute a
+session to; rotating it means a restart. That is a floor, not an answer — `pyacp-smj`
+holds the real design.
+
 ## Main symbols
 
 | Symbol | Purpose |
@@ -110,6 +161,9 @@ different answers depending on how it connected.
 | `WebSocketMessageTransport` | One socket, shaped as the SDK's message-level `Transport`: `send` / `receive` / `close` |
 | `WebSocketAgentServer` | Server lifecycle — `start()` / `stop()` / `serve_forever()` |
 | `serve_websocket(websocket)` | Bind one already-accepted socket to a fresh agent and run until EOF |
+| `access_key_from_env()` / `unauthenticated_bind_allowed()` | Read the two environment variables, so `cli.py` does not spell them itself |
+| `is_loopback(host)` | Whether a bind reaches only this machine. Fails closed |
+| `UnauthenticatedBindError` | Raised by the guard. A `RuntimeError`, not a `ValueError` — `errors.py` maps `ValueError` to `-32602`, a bizarre answer to a startup misconfiguration no client ever sees |
 
 `serve_websocket` is split out from the server so a test — or a caller embedding this in
 its own HTTP server — can exercise the binding without a listening port. Most tests in

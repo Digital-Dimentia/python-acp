@@ -10,7 +10,12 @@ from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_stdio import run_stdio
-from python_acp.transport_ws import WebSocketAgentServer
+from python_acp.transport_ws import (
+    UnauthenticatedBindError,
+    WebSocketAgentServer,
+    access_key_from_env,
+    unauthenticated_bind_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +105,15 @@ async def _run(args: argparse.Namespace) -> None:
             await run_stdio(PythonAcpAgent(sessions, backends=backends, terminals=terminals))
             return
 
+        # The key is read from the environment, never from argv — see `ACCESS_KEY_ENV`.
+        # A non-loopback bind with neither a key nor the opt-out raises here, before the
+        # port is bound.
         server = WebSocketAgentServer(
             args.host,
             args.port,
             debug=args.debug,
+            access_key=access_key_from_env(),
+            allow_unauthenticated=unauthenticated_bind_allowed(),
             sessions=sessions,
             backends=backends,
             terminals=terminals,
@@ -124,6 +134,12 @@ def run() -> None:
     args = parser.parse_args()
     try:
         asyncio.run(_run(args))
+    except UnauthenticatedBindError as refusal:
+        # Exit 2, matching argparse's own code for "you asked for something I will not
+        # do", and log rather than print so the message goes to stderr like every other
+        # diagnostic. A traceback would bury the one sentence that says how to fix it.
+        logger.error("%s", refusal)
+        raise SystemExit(2) from None
     except KeyboardInterrupt:
         pass
 

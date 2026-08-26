@@ -99,6 +99,30 @@ ALLOW_UNAUTHENTICATED_ENV = "PYTHON_ACP_WS_ALLOW_UNAUTHENTICATED"
 ACCESS_KEY_QUERY_PARAM = "key"
 
 
+#: Seconds between server keepalive pings, and how long a pong may go unanswered before
+#: the connection is dropped. Both are `serve()`'s own current defaults, restated here
+#: **because they are client-facing contract rather than an implementation detail.**
+#:
+#: ACP defines no ping: SDK 0.12.1 routes 38 methods and not one is a heartbeat, and the
+#: `$/` prefix a client might reach for is an LSP convention the SDK has no concept of.
+#: Liveness on an idle connection is therefore the transport's job, which is exactly how
+#: the SDK's own HTTP transport treats it — `acp/http/server.py` emits an SSE keepalive
+#: comment every `SSE_KEEPALIVE_INTERVAL_SECONDS = 15.0` so that "intermediaries do not
+#: time out an otherwise-healthy but quiet stream".
+#:
+#: A client that sends nothing of its own — the correct behaviour, and what `acp-ui`
+#: settled on after dropping a `$/ping` notification that only produced a
+#: `method_not_found` traceback here — depends on *these* pings to hold a NAT or proxy
+#: mapping open. Inheriting them from `websockets` would leave that dependency written
+#: down nowhere and free to change under a pin bump with no test failing.
+#:
+#: 20s rather than the SDK's 15s: it sits under the common 30s intermediary idle timeout
+#: with room to spare, and it is what this transport has always run. Lower it toward 15
+#: if a deployment turns up an intermediary that 20s does not satisfy.
+_PING_INTERVAL_SECONDS = 20.0
+_PING_TIMEOUT_SECONDS = 20.0
+
+
 class UnauthenticatedBindError(RuntimeError):
     """Raised when a non-loopback bind is asked for with no key and no opt-out.
 
@@ -305,6 +329,8 @@ class WebSocketAgentServer:
             self._host,
             self._port,
             max_size=_MAX_MESSAGE_BYTES,
+            ping_interval=_PING_INTERVAL_SECONDS,
+            ping_timeout=_PING_TIMEOUT_SECONDS,
             # `None` when no key is configured, which is `serve()`'s own default and
             # leaves the handshake exactly as it was.
             process_request=_access_key_check(self._access_key) if self._access_key else None,

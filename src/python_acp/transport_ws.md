@@ -154,6 +154,38 @@ identity behind it, so there is no per-client revocation and nothing to attribut
 session to; rotating it means a restart. That is a floor, not an answer — `pyacp-smj`
 holds the real design.
 
+## Keepalive is ours to send, because ACP has no ping (`pyacp-7uw`)
+
+`serve()` is given `ping_interval=20.0` and `ping_timeout=20.0` explicitly, from
+`_PING_INTERVAL_SECONDS` and `_PING_TIMEOUT_SECONDS`. They are `serve()`'s own current
+defaults; restating them is the point.
+
+**ACP defines no ping.** SDK 0.12.1 routes 38 methods and not one is a heartbeat, and
+the `$/` prefix a client might reach for is an LSP convention the SDK has no concept of
+— a `$/ping` notification reaches the router, matches nothing, and produces a
+`method_not_found` traceback per ping while correctly answering nothing, since a
+notification takes no reply. Liveness on an idle connection is therefore the transport's
+job. The SDK agrees by example: its HTTP transport emits an SSE keepalive comment every
+`SSE_KEEPALIVE_INTERVAL_SECONDS = 15.0`, "kept in sync with the TypeScript reference so
+intermediaries do not time out an otherwise-healthy but quiet stream".
+
+So a correct client sends nothing while idle and depends on *our* pings to hold a NAT or
+proxy mapping open. That makes the interval client-facing contract. Inherited from
+`websockets`, it would be written down nowhere and free to change under a pin bump with
+nothing failing — and this repo exact-pins runtime dependencies precisely because they
+are protocol surface.
+
+20s rather than the SDK's 15s: it sits under the common 30s intermediary idle timeout
+with room to spare, and it is what this transport has always run. Lower it toward 15 if
+a deployment turns up an intermediary that 20s does not satisfy.
+
+**Testing this needs a value the library would never pick.** Asserting the shipped 20.0
+passes just as happily when the arguments are deleted, because 20 is also the default;
+`test_the_server_passes_its_own_keepalive_settings_to_serve` patches the constants to
+7.5/3.25 and reads them back off the real server-side connection, and
+`test_the_shipped_keepalive_stays_inside_a_useful_window` covers what patching hides —
+that the values we ship are neither `None` nor past 30s.
+
 ## Main symbols
 
 | Symbol | Purpose |

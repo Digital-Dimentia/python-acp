@@ -37,12 +37,15 @@ from acp import PROTOCOL_VERSION
 from websockets.protocol import State
 
 from python_acp import __version__
+from python_acp import transport_ws
 from python_acp.cli import run as cli_run
 from python_acp.capabilities import build_agent_capabilities
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
+    _PING_INTERVAL_SECONDS,
+    _PING_TIMEOUT_SECONDS,
     ACCESS_KEY_ENV,
     ALLOW_UNAUTHENTICATED_ENV,
     UnauthenticatedBindError,
@@ -633,6 +636,12 @@ async def listening_server(**kwargs: Any) -> AsyncIterator[tuple[WebSocketAgentS
     sockets: list[socket.socket] = []
 
     class Accepting:
+        def __init__(self) -> None:
+            #: The server-side `ServerConnection` for each accept, in order. `connect()`
+            #: returns the *client* half, which carries the client's own settings and so
+            #: says nothing about what `serve()` was given.
+            self.server_side: list[Any] = []
+
         async def connect(self, path: str = "/") -> Any:
             """One client, connected through the real opening handshake.
 
@@ -642,7 +651,10 @@ async def listening_server(**kwargs: Any) -> AsyncIterator[tuple[WebSocketAgentS
             """
             client_sock, server_sock = socket.socketpair()
             sockets.extend((client_sock, server_sock))
-            await loop.connect_accepted_socket(captured["factory"], server_sock)
+            _transport, protocol = await loop.connect_accepted_socket(
+                captured["factory"], server_sock
+            )
+            self.server_side.append(protocol)
             # `ws://localhost/` is never resolved: `sock=` supplies the connection, and
             # the URI only supplies the Host header the handshake has to send.
             return await websockets.connect(f"ws://localhost{path}", sock=client_sock)
@@ -690,6 +702,46 @@ async def test_a_real_frame_round_trips_through_the_agent() -> None:
     reply = json.loads(raw)
     assert reply["result"]["protocolVersion"] == PROTOCOL_VERSION
     assert reply["result"]["agentInfo"]["name"] == "python-acp"
+
+
+async def test_the_server_passes_its_own_keepalive_settings_to_serve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keepalive is contract, not a `serve()` default we happen to inherit.
+
+    ACP has no ping — SDK 0.12.1 routes 38 methods and none is a heartbeat — so a
+    correct client sends nothing while idle and depends on *these* pings to hold a NAT
+    or proxy mapping open. `acp-ui` reached that conclusion the hard way, by dropping a
+    `$/ping` notification that produced only a `method_not_found` traceback here.
+
+    **The constants are patched to values `websockets` would never pick on its own.**
+    Asserting the shipped 20.0 proves nothing: it is also the library default, so the
+    test passes just as happily when the arguments are deleted — which is the exact
+    regression the bead (`pyacp-7uw`) exists to catch. Verified by deleting them.
+    """
+    monkeypatch.setattr(transport_ws, "_PING_INTERVAL_SECONDS", 7.5)
+    monkeypatch.setattr(transport_ws, "_PING_TIMEOUT_SECONDS", 3.25)
+
+    async with listening_server() as (_server, accepting):
+        connection = await asyncio.wait_for(accepting.connect(), timeout=TIMEOUT)
+        try:
+            server_side = accepting.server_side[-1]
+            assert server_side.ping_interval == 7.5
+            assert server_side.ping_timeout == 3.25
+        finally:
+            await connection.close()
+
+
+def test_the_shipped_keepalive_stays_inside_a_useful_window() -> None:
+    """What the patched test above cannot say: the values we actually ship are sane.
+
+    `None` disables keepalive outright, which is the bug the constants exist to prevent;
+    anything at or above 30s stops holding open the intermediaries this is for.
+    """
+    assert _PING_INTERVAL_SECONDS is not None
+    assert _PING_TIMEOUT_SECONDS is not None
+    assert 0 < _PING_INTERVAL_SECONDS < 30
+    assert 0 < _PING_TIMEOUT_SECONDS <= _PING_INTERVAL_SECONDS
 
 
 async def test_the_server_accepts_a_message_far_larger_than_the_websockets_default() -> None:

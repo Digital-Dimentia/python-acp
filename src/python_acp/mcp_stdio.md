@@ -71,6 +71,9 @@ rather than only while one of our requests is in flight.
 - `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
   paginated list wrappers, each returning the accumulated items across all pages.
 - `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those three.
+- `MCPStdioClient.read_resource(uri)`: `resources/read` for one concrete URI. Takes
+  no `arguments` -- a templated resource is expanded client-side into a concrete
+  URI before this is called, so the substitution never reaches the wire.
 - `MCPStdioClient._MAX_LIST_PAGES`: hard ceiling on pages walked in one list call.
 - `MCPStdioClient._read_loop()`: background task consuming all stdout messages.
 - `MCPStdioClient._handle_message()`: routes one inbound message by shape.

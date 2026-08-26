@@ -57,8 +57,12 @@ async def test_list_prompts_get_prompt_and_read_resource_over_stdio() -> None:
         resources = await client.list_resources()
         assert resources[0]["name"] == "greeting-resource"
 
-        resource = await client.read_resource("greeting://{name}", {"name": "Ava"})
+        # A concrete URI, because `resources/read` takes one. `greeting://{name}` is a
+        # *template*: expanding it is client-side work that happens before this call,
+        # and the substitution never travels as a param of its own (`pyacp-ito`).
+        resource = await client.read_resource("greeting://Ava")
         assert resource["contents"][0]["text"] == "Hello, Ava!"
+        assert resource["contents"][0]["uri"] == "greeting://Ava"
 
 
 @pytest.mark.asyncio

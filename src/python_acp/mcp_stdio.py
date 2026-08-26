@@ -525,13 +525,20 @@ class MCPStdioClient:
 
         raise MCPProtocolError(f"{method} exceeded {self._MAX_LIST_PAGES} pages")
 
-    async def read_resource(
-        self, resource_id: str, arguments: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {"uri": resource_id}
-        if arguments:
-            params["arguments"] = arguments
-        return await self.request("resources/read", params)
+    async def read_resource(self, uri: str) -> dict[str, Any]:
+        """Read one resource. `resources/read` params are `{uri}` and nothing else.
+
+        There is deliberately no `arguments` here. A *templated* resource —
+        `greeting://{name}`, advertised by `resources/templates/list` rather than
+        `resources/list` — is expanded **client-side** into a concrete URI (RFC 6570)
+        and only then read. So the substitution never crosses the wire: passing one
+        would be a param the spec does not define, which a real server ignores while
+        a permissive mock quietly honours it (`pyacp-ito`).
+
+        Nothing here wraps `resources/templates/list` yet, so no caller has a template
+        to expand; when one does, the expansion belongs above this method, not in it.
+        """
+        return await self.request("resources/read", {"uri": uri})
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}

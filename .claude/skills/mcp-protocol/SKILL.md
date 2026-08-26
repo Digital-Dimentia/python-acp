@@ -143,7 +143,7 @@ Outbound — what `MCPStdioClient` wraps today, and the shape each returns:
 | `prompts/list` | `list_prompts()` | `[{name, description, arguments}]` — every page |
 | `prompts/get` | `get_prompt(name, arguments)` | `{description, messages: [{role, content}]}` |
 | `resources/list` | `list_resources()` | `[{uri, name, mimeType}]` — every page |
-| `resources/read` | `read_resource(resource_id, arguments)` | `{contents: [{uri, mimeType, text\|blob}]}` |
+| `resources/read` | `read_resource(uri)` | `{contents: [{uri, mimeType, text\|blob}]}` |
 | `notifications/cancelled` | `cancel_request(request_id, reason=None)` | nothing — a notification |
 
 The three `*_list` wrappers all go through `_list_all`, which walks `nextCursor` to
@@ -264,10 +264,13 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
   read off `Session.running_tool_call`. That is correct **only while a session runs one
   turn at a time and a turn runs its invocations in order** — relax either and the id
   becomes a guess. `sessions.md` and `elicitation.md` both record the dependency.
-- `read_resource` forwards an `arguments` param that is not in the MCP spec —
-  `resources/read` takes `uri` only. The mock server honors it; a real server will
-  ignore it. Templated resources are meant to be expanded client-side into a concrete
-  URI, and `resources/templates/list` is what advertises them.
+- **Templated resources are not reachable.** `resources/templates/list` is what
+  advertises a URI template like `greeting://{name}`, and nothing here wraps it, so no
+  caller ever gets one to expand. Expansion is client-side (RFC 6570) and produces a
+  concrete URI; `read_resource(uri)` then takes that URI and nothing else. Do **not**
+  reintroduce an `arguments` param to carry the substitution — `resources/read` params
+  are `{uri}`, a real server ignores anything more, and `pyacp-ito` removed exactly
+  that. The mock fixture used to honour it, which is why no test ever caught it.
 
 ## Protocol version
 

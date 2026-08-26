@@ -523,10 +523,13 @@ while True:
         )
     elif method == "resources/read":
         params = req.get("params", {})
-        resource_uri = params.get("uri") or params.get("name")
-        arguments = params.get("arguments", {}) or {}
-        if resource_uri == "greeting://{name}" or resource_uri == "greeting://" or resource_uri.startswith("greeting://"):
-            name = arguments.get("name", resource_uri.split("//", 1)[1] or "friend")
+        # `resources/read` params are `{uri}`. This used to accept an `arguments`
+        # member too, which no real server does -- honouring it here was the only
+        # reason a client that sent one ever appeared to work (`pyacp-ito`). A
+        # templated URI is expanded client-side before it gets this far.
+        resource_uri = params.get("uri")
+        if isinstance(resource_uri, str) and resource_uri.startswith("greeting://"):
+            name = resource_uri.split("//", 1)[1] or "friend"
             content = f"Hello, {name}!"
             write(
                 {

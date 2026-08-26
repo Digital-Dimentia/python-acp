@@ -19,7 +19,8 @@ client-facing transport. It owns no protocol logic of its own.
 ## Main Symbols
 
 - `build_parser()`: defines `--transport`, `--host`, `--port`, `--debug`.
-- `configure_logging(debug)`: installs the root handler on `sys.stderr`.
+- `configure_logging(debug)`: installs the root handler on `sys.stderr`, with the
+  bare message at INFO and `%(name)s: %(message)s` under `--debug`.
 - `_run(args)`: async runtime bootstrap and service startup sequence.
 - `run()`: sync wrapper that parses args and runs `_run()` with `asyncio.run`.
 
@@ -63,6 +64,24 @@ mode is what stops a banner from creeping back in later. `configure_logging` nam
 `sys.stderr` explicitly rather than relying on `basicConfig`'s default for the same
 reason. `transport_stdio.py` adds a structural backstop on top of this discipline — see
 its docs.
+
+## `--debug` names the logger, and why that is not cosmetic
+
+The root handler is shared with everything else that logs, and the loudest of those is
+`websockets`: `transport_ws.py` calls `serve()` without a `logger=`, so the library
+emits through `websockets.server` — including an INFO `server listening on host:port`
+at startup, which arrives whether or not `--debug` was passed.
+
+Under the bare `%(message)s` format that line is indistinguishable from this module's
+own `python-acp listening on ws://host:port`, so a normal startup reads as one program
+announcing itself twice in inconsistent words. Neither line is wrong; the format simply
+hid which was which. `--debug` therefore switches to `%(name)s: %(message)s`, which
+matters most exactly when `--debug` is on and the library's per-connection and
+handshake chatter is interleaved with our MCP and turn diagnostics.
+
+INFO keeps the bare format: at that level every line really is this process, and a
+prefix would be noise. `tests/test_transport_stdio.py::test_debug_logging_names_the_logger_that_emitted_each_record`
+pins both halves.
 
 ## Startup Flow
 

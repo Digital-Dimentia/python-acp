@@ -48,16 +48,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: The bare message, which is what a normal run wants: at INFO the handful of lines
+#: emitted are all this process announcing its own state, and a prefix would be noise.
+_LOG_FORMAT = "%(message)s"
+
+#: Under --debug the records stop being ours alone. `transport_ws.py` calls
+#: `websockets.serve()` without a `logger=`, so the library logs through its own
+#: `websockets.server`, and `%(message)s` renders a third-party line identically to one
+#: of ours -- most visibly at startup, where websockets' "server listening on host:port"
+#: reads as a duplicate of this module's own "python-acp listening on ws://host:port"
+#: in different words. Naming the logger is what separates our MCP and turn diagnostics
+#: from the library's handshake and per-connection chatter, which is the whole point of
+#: turning --debug on.
+_DEBUG_LOG_FORMAT = "%(name)s: %(message)s"
+
+
 def configure_logging(debug: bool) -> None:
     """Send every diagnostic to stderr, in every transport mode.
 
     `basicConfig` already defaults to stderr, but the default is not the point: under
     `--transport stdio` stdout is the protocol wire, so the stream is named explicitly
     here rather than relied upon.
+
+    The format widens under `debug` to attribute each record to its logger; see
+    `_DEBUG_LOG_FORMAT`.
     """
     logging.basicConfig(
         level=logging.DEBUG if debug else logging.INFO,
-        format="%(message)s",
+        format=_DEBUG_LOG_FORMAT if debug else _LOG_FORMAT,
         stream=sys.stderr,
     )
 

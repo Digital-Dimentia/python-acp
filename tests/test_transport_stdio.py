@@ -342,3 +342,42 @@ def test_logging_is_configured_onto_stderr() -> None:
 
     assert streams, "configure_logging installed no handler"
     assert all(stream is sys.stderr for stream in streams)
+
+
+@pytest.mark.parametrize(
+    ("debug", "expected"),
+    [
+        # A plain run says only what it means to say.
+        (False, "server listening on 127.0.0.1:8765"),
+        # --debug attributes the line, so a websockets record cannot be mistaken for
+        # one of ours. The pair below is exactly what looked like a duplicated startup
+        # message before: two loggers, one fact.
+        (True, "websockets.server: server listening on 127.0.0.1:8765"),
+    ],
+)
+def test_debug_logging_names_the_logger_that_emitted_each_record(
+    debug: bool, expected: str
+) -> None:
+    """The format, not the level, is what makes --debug output readable.
+
+    Library records reach the same handler as ours: `serve()` is called without a
+    `logger=`, so websockets logs through `websockets.server`. Under `%(message)s`
+    alone its startup line is indistinguishable from `cli.py`'s own.
+    """
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    root.handlers.clear()
+    captured = io.StringIO()
+    try:
+        configure_logging(debug=debug)
+        for handler in root.handlers:
+            handler.setStream(captured)
+        logging.getLogger("websockets.server").info(
+            "server listening on %s:%s", "127.0.0.1", 8765
+        )
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+    assert captured.getvalue().strip() == expected

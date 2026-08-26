@@ -154,6 +154,37 @@ identity behind it, so there is no per-client revocation and nothing to attribut
 session to; rotating it means a restart. That is a floor, not an answer — `pyacp-smj`
 holds the real design.
 
+## Startup says whether authentication is on
+
+`start()` logs one line at INFO before it binds, naming `PYTHON_ACP_WS_KEY` and either the
+key's **length** or its absence:
+
+```
+WebSocket access key configured from PYTHON_ACP_WS_KEY (43 characters); clients must present ?key=<secret>
+No WebSocket access key configured (PYTHON_ACP_WS_KEY unset or empty): every client that can reach 127.0.0.1:8765 is accepted
+```
+
+This is for the deploy, not for debugging. A key arrives through the environment, which is
+the kind of configuration that fails *silently*: an unset variable in a unit file, a
+compose interpolation that expanded to nothing, a secret mounted after the process
+started. Every one of those produces a server that starts perfectly and accepts anybody,
+and the only other evidence is a connection that should have been rejected and was not —
+which nobody is watching for. The absent-key line is the more important of the two,
+because it is what a deploy that dropped the variable looks like.
+
+The length is there because it separates "the deploy passed nothing" from "the deploy
+passed something truncated or quoted", which are the two mistakes that actually happen.
+**The value is never logged, at any level.** A test asserts its absence from the records
+and fails if a careless edit substitutes the key for its length — because putting the
+secret in a log file is the exact failure that makes a query parameter the wrong carrier
+in the first place, and `--debug` already writes the client's offered key into the request
+line that `websockets` logs.
+
+It is INFO rather than a warning even when no key is configured: on loopback that is the
+ordinary local-development arrangement, and a warning every developer learns to ignore is
+worth less than an accurate sentence. `_refuse_unauthenticated_bind` is what refuses the
+case that is genuinely dangerous.
+
 ## Keepalive is ours to send, because ACP has no ping (`pyacp-7uw`)
 
 `serve()` is given `ping_interval=20.0` and `ping_timeout=20.0` explicitly, from

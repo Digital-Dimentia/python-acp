@@ -321,9 +321,47 @@ class WebSocketAgentServer:
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
         self._server: Server | None = None
 
+    def _report_access_key(self) -> None:
+        """Say at startup whether authentication is on, and never say what the key is.
+
+        This exists for the deploy, not for debugging. A key arrives through the
+        environment, which is exactly the kind of configuration that fails silently: an
+        unset variable in a unit file, a compose interpolation that expanded to nothing, a
+        secret mounted after the process started. Every one of those produces a server
+        that runs perfectly and accepts anybody, and the only other evidence is a
+        connection that *should* have been rejected and was not — which nobody is watching
+        for.
+
+        The length is included because it separates "the deploy passed nothing" from "the
+        deploy passed something truncated or quoted", which is the difference between the
+        two mistakes that actually happen. **The value never is**, at any level: it would
+        put the secret in a log file, which is the whole failure mode that makes a query
+        parameter the wrong carrier in the first place (see `ACCESS_KEY_QUERY_PARAM`).
+        """
+        if self._access_key:
+            logger.info(
+                "WebSocket access key configured from %s (%d characters); clients must "
+                "present ?%s=<secret>",
+                ACCESS_KEY_ENV,
+                len(self._access_key),
+                ACCESS_KEY_QUERY_PARAM,
+            )
+            return
+        # Not a warning: on loopback this is the ordinary local-development arrangement,
+        # and a warning every developer learns to ignore is worth less than an accurate
+        # sentence. The bind guard is what refuses this off loopback.
+        logger.info(
+            "No WebSocket access key configured (%s unset or empty): every client that "
+            "can reach %s:%s is accepted",
+            ACCESS_KEY_ENV,
+            self._host,
+            self._port,
+        )
+
     async def start(self) -> None:
         if self._server is not None:
             return
+        self._report_access_key()
         self._server = await serve(
             self._handle_client,
             self._host,

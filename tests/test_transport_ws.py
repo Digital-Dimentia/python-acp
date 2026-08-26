@@ -704,6 +704,43 @@ async def test_a_real_frame_round_trips_through_the_agent() -> None:
     assert reply["result"]["agentInfo"]["name"] == "python-acp"
 
 
+async def test_startup_reports_that_a_key_was_found_without_reporting_the_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Evidence for the deploy, not for debugging.
+
+    A key arrives through the environment, which fails silently: an unset variable, a
+    compose interpolation that expanded to nothing, a secret mounted after the process
+    started. Each produces a server that runs perfectly and accepts anybody, and the only
+    other evidence is a connection that should have been rejected and was not.
+    """
+    secret = "s3cret-deploy-value"
+    with caplog.at_level(logging.INFO, logger="python_acp.transport_ws"):
+        async with listening_server(access_key=secret) as (_server, _accepting):
+            pass
+
+    reported = [record.getMessage() for record in caplog.records]
+    assert any("access key configured" in message for message in reported)
+    # The length separates "passed nothing" from "passed something truncated or quoted".
+    assert any(f"({len(secret)} characters)" in message for message in reported)
+    # The one thing this must never do, at any level.
+    assert not any(secret in message for message in reported)
+
+
+async def test_startup_says_so_when_no_key_was_configured(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The absence is the more important half: it is what a deploy that dropped the
+    variable looks like, and it is otherwise indistinguishable from a healthy start."""
+    with caplog.at_level(logging.INFO, logger="python_acp.transport_ws"):
+        async with listening_server() as (_server, _accepting):
+            pass
+
+    reported = " ".join(record.getMessage() for record in caplog.records)
+    assert "No WebSocket access key configured" in reported
+    assert ACCESS_KEY_ENV in reported
+
+
 async def test_the_server_passes_its_own_keepalive_settings_to_serve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

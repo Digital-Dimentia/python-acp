@@ -13,11 +13,23 @@ from typing import Any
 import pytest
 
 from python_acp.commands import (
+    COMMAND_NAMES,
     CommandError,
+    InvokePrompt,
     InvokeTool,
+    ListPrompts,
+    ListResources,
     ListTools,
+    ShowPrompt,
+    ShowResource,
     coerce_arguments,
     parse_command,
+    prompt_arguments,
+    prompt_message_blocks,
+    render_prompt_heading,
+    render_prompt_listing,
+    render_resource_contents,
+    render_resource_listing,
     render_tool_listing,
 )
 
@@ -228,3 +240,291 @@ def test_a_server_that_publishes_no_tools_is_still_named() -> None:
     text = render_tool_listing({"empty": []})
     assert "empty" in text
     assert "publishes no tools" in text
+
+
+# ---------------------------------------------------------------------------
+# Prompts: recognition and arguments
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("/listPrompts", ListPrompts),
+        ("listPrompts", ListPrompts),
+        ("/listResources", ListResources),
+        ("listResources", ListResources),
+    ],
+)
+def test_the_other_two_listings_are_recognised_with_or_without_the_slash(
+    text: str, kind: type
+) -> None:
+    assert isinstance(parse_command(text), kind)
+
+
+@pytest.mark.parametrize("name", ["listPrompts", "listResources"])
+def test_the_other_two_listings_take_no_arguments(name: str) -> None:
+    with pytest.raises(CommandError, match="takes no arguments"):
+        parse_command(f"/{name} --verbose")
+
+
+def test_an_unbalanced_quote_is_reported_for_every_command_name() -> None:
+    """The guard reads `COMMAND_NAMES`, so a command added without being put in that set
+    would silently hand its own bad quoting to the JSON parser instead."""
+    for name in COMMAND_NAMES:
+        with pytest.raises(CommandError, match="unbalanced quote"):
+            parse_command(f'/{name} demo/thing --text "unterminated')
+
+
+def test_prompt_show_parses_a_server_a_name_and_string_arguments() -> None:
+    command = parse_command('/promptShow demo/greeting --name "Ada Lovelace"')
+    assert isinstance(command, ShowPrompt)
+    assert (command.server, command.name) == ("demo", "greeting")
+    assert command.raw_arguments == {"name": ["Ada Lovelace"]}
+
+
+def test_prompt_invoke_parses_identically_and_is_a_distinct_command() -> None:
+    """The two differ only in what happens after parsing, so they must not be one class:
+    `execute` dispatches on which it got."""
+    show = parse_command("/promptShow demo/greeting --name Ada")
+    invoke = parse_command("/promptInvoke demo/greeting --name Ada")
+    assert isinstance(invoke, InvokePrompt)
+    assert not isinstance(show, InvokePrompt)
+    assert (invoke.server, invoke.name, invoke.raw_arguments) == (
+        show.server,
+        show.name,
+        show.raw_arguments,
+    )
+    assert (show.verb, invoke.verb) == ("promptShow", "promptInvoke")
+
+
+def test_a_bare_prompt_name_leaves_the_server_for_the_executor_to_resolve() -> None:
+    command = parse_command("/promptShow greeting")
+    assert isinstance(command, ShowPrompt)
+    assert command.server is None and command.name == "greeting"
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("/promptShow", "needs a prompt"),
+        ("/promptShow --name Ada", "the first argument is the prompt"),
+        ("/promptShow demo/", "names no prompt"),
+        ("/promptShow demo/greeting Ada", "Every argument is named"),
+        ("/promptShow demo/greeting --=x", "names no argument"),
+    ],
+)
+def test_a_malformed_prompt_command_says_which_part_is_wrong(text: str, message: str) -> None:
+    with pytest.raises(CommandError, match=message):
+        parse_command(text)
+
+
+# --- arguments, which are strings and only strings -------------------------
+
+GREETING = [{"name": "name", "required": True, "description": "Who to greet"},
+            {"name": "style", "description": "How formal"}]
+
+
+def show(*tokens: str) -> ShowPrompt:
+    command = parse_command("/promptShow demo/greeting " + " ".join(tokens))
+    assert isinstance(command, ShowPrompt)
+    return command
+
+
+def test_prompt_arguments_stay_strings_whatever_they_look_like() -> None:
+    """`coerce_arguments`' whole table has no counterpart here: MCP types a prompt's
+    arguments as `{[key: string]: string}`, so `3` is the *string* `"3"`."""
+    command = show("--name", "3", "--style", "true")
+    assert prompt_arguments(command, GREETING) == {"name": "3", "style": "true"}
+
+
+def test_a_prompt_argument_with_no_value_is_refused_rather_than_read_as_true() -> None:
+    """A bare `--flag` is `True` for a tool whose schema says boolean. A prompt has no
+    schema and no non-string argument for one to describe."""
+    with pytest.raises(CommandError, match="needs a value"):
+        prompt_arguments(show("--name"), GREETING)
+
+
+def test_a_prompt_argument_given_twice_is_refused_rather_than_made_a_list() -> None:
+    with pytest.raises(CommandError, match="given 2 times"):
+        prompt_arguments(show("--name", "Ada", "--name", "Grace"), GREETING)
+
+
+def test_an_undeclared_prompt_argument_is_refused_with_the_ones_it_takes() -> None:
+    with pytest.raises(CommandError, match=r"no argument --colour.*--name, --style"):
+        prompt_arguments(show("--name", "Ada", "--colour", "red"), GREETING)
+
+
+def test_a_missing_required_prompt_argument_is_refused() -> None:
+    with pytest.raises(CommandError, match="missing required --name"):
+        prompt_arguments(show("--style", "formal"), GREETING)
+
+
+def test_an_optional_prompt_argument_may_simply_be_left_out() -> None:
+    assert prompt_arguments(show("--name", "Ada"), GREETING) == {"name": "Ada"}
+
+
+@pytest.mark.parametrize("declared", [None, [], "nonsense", [{"no": "name"}]])
+def test_a_prompt_that_declares_nothing_usable_passes_everything_through(declared: Any) -> None:
+    """Same latitude `coerce_arguments` gives a tool with no `inputSchema`: nothing is
+    known, so nothing is checked, and the server gets to have the opinion."""
+    assert prompt_arguments(show("--anything", "at-all"), declared) == {"anything": "at-all"}
+
+
+# ---------------------------------------------------------------------------
+# Resources: a URI, not a slash-separated pair
+# ---------------------------------------------------------------------------
+
+
+def test_resource_show_takes_a_bare_uri() -> None:
+    command = parse_command("/resourceShow file:///etc/hosts")
+    assert isinstance(command, ShowResource)
+    assert (command.server, command.uri) == (None, "file:///etc/hosts")
+
+
+def test_resource_show_takes_the_server_as_a_separate_token() -> None:
+    """`demo/file:///etc/hosts` would be split by `rpartition('/')` at the last slash in
+    the path, which is why the count is the discriminator and not the shape."""
+    command = parse_command("/resourceShow demo file:///etc/hosts")
+    assert isinstance(command, ShowResource)
+    assert (command.server, command.uri) == ("demo", "file:///etc/hosts")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("/resourceShow", "needs a resource"),
+        ("/resourceShow --uri x", "is an option"),
+        ("/resourceShow demo file://a file://b", "but got 3 arguments"),
+    ],
+)
+def test_a_malformed_resource_command_says_which_part_is_wrong(text: str, message: str) -> None:
+    with pytest.raises(CommandError, match=message):
+        parse_command(text)
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+
+def test_the_prompt_listing_names_arguments_and_which_are_required() -> None:
+    text = render_prompt_listing(
+        {
+            "demo": [
+                {"name": "greeting", "description": "Build a greeting", "arguments": GREETING},
+                {"name": "bare", "description": "Takes nothing"},
+            ]
+        }
+    )
+    assert "2 prompts on 1 server." in text
+    assert "demo/greeting" in text
+    assert "--name" in text and "required" in text and "Who to greet" in text
+    assert "--style" in text
+    assert "(no arguments)" in text
+    assert "/promptShow demo/greeting --name <value>" in text
+
+
+def test_the_prompt_listing_says_which_servers_declared_no_prompts() -> None:
+    """An omitted server is indistinguishable from an empty one, and the two want
+    different reactions."""
+    text = render_prompt_listing({"demo": [{"name": "greeting"}]}, undeclared=["files"])
+    assert "files declares no prompts capability" in text
+    assert "not asked" in text
+
+
+def test_a_session_whose_servers_all_lack_prompts_says_so_rather_than_looking_empty() -> None:
+    text = render_prompt_listing({}, undeclared=["files", "shell"])
+    assert "none of this session's 2 MCP servers declares the prompts capability" in text
+
+
+@pytest.mark.parametrize(
+    ("render", "noun"),
+    [(render_prompt_listing, "prompts"), (render_resource_listing, "resources")],
+)
+def test_an_empty_session_is_told_where_servers_come_from(render: Any, noun: str) -> None:
+    text = render({})
+    assert f"no MCP servers, so there are no {noun}" in text
+    assert "session/new" in text and "mcpServers" in text
+
+
+def test_the_resource_listing_shows_uri_name_mime_type_and_a_two_token_example() -> None:
+    text = render_resource_listing(
+        {
+            "demo": [
+                {
+                    "uri": "greeting://ada",
+                    "name": "greeting",
+                    "mimeType": "text/plain",
+                    "description": "A greeting",
+                }
+            ]
+        }
+    )
+    assert "1 resource on 1 server." in text
+    assert "greeting://ada" in text
+    assert "greeting text/plain" in text
+    assert "A greeting" in text
+    # The server is a separate word, and the example is the only thing that says so.
+    assert "/resourceShow demo greeting://ada" in text
+
+
+def test_a_server_that_publishes_no_prompts_or_resources_is_still_named() -> None:
+    assert "publishes no prompts" in render_prompt_listing({"empty": []})
+    assert "publishes no resources" in render_resource_listing({"empty": []})
+
+
+def test_resource_text_is_printed_and_a_blob_never_is() -> None:
+    """Base64 in a chat transcript is unreadable and unbounded; the placeholder names the
+    size a reader can act on instead."""
+    text = render_resource_contents(
+        "greeting://ada",
+        {
+            "contents": [
+                {"uri": "greeting://ada", "mimeType": "text/plain", "text": "Hello, Ada!"},
+                {"uri": "greeting://ada.png", "mimeType": "image/png", "blob": "A" * 400},
+            ]
+        },
+    )
+    assert "Hello, Ada!" in text
+    assert "AAAA" not in text
+    assert "[binary, about 300 bytes, not shown]" in text
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        ({"contents": []}, "no contents"),
+        ({"contents": [{"uri": "x"}]}, "neither text nor blob"),
+    ],
+)
+def test_a_resource_with_nothing_in_it_says_so(result: Any, message: str) -> None:
+    assert message in render_resource_contents("greeting://ada", result)
+
+
+def test_the_prompt_heading_counts_messages_and_an_empty_expansion_says_so() -> None:
+    """An expansion with no messages emits no chunks at all, so without the count it is
+    indistinguishable from a call that failed."""
+    filled = render_prompt_heading(
+        "demo", "greeting", {"description": "Greeting prompt", "messages": [{}, {}]}
+    )
+    assert "demo/greeting — Greeting prompt" in filled
+    assert "2 messages" in filled
+    assert "expanded to no messages" in render_prompt_heading("demo", "greeting", {})
+
+
+def test_prompt_messages_come_back_as_role_and_block_pairs() -> None:
+    """MCP types `content` as one block. A list is accepted anyway, because a server that
+    sends one would otherwise have its whole message rendered as a placeholder."""
+    pairs = prompt_message_blocks(
+        {
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": "one"}},
+                {"role": "assistant", "content": [{"type": "text", "text": "two"}, {"t": 3}]},
+                {"content": {"type": "text", "text": "roleless"}},
+                "not a message",
+            ]
+        }
+    )
+    assert [role for role, _ in pairs] == ["user", "assistant", "assistant", "unknown"]
+    assert [block for _, block in pairs][0] == {"type": "text", "text": "one"}

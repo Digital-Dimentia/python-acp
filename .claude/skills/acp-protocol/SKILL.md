@@ -188,10 +188,14 @@ move the passthrough onto `ext_method` under a prefix: those are MCP methods on 
 wire, they addressed a process-wide server that no longer exists, and the ACP path is
 `session/new` + `session/prompt`. `ext_method` answers `-32601` by decision.
 
-Two capabilities went with it and have no ACP replacement: reading an MCP **prompt** or
-**resource** through this bridge. ACP's model is that the agent uses those internally, not
-that a client reaches through it to the server. A request to "add resources/read back" is
-a request to reopen that decision, not a gap to fill.
+Two capabilities went with it — reading an MCP **prompt** or **resource** through this
+bridge — and **`pyacp-tc5` deliberately reopened that**, on the user's call. `/promptShow`
+and `/resourceShow` in `commands.py` deliver prompt and resource content to the client
+again, through a slash command inside a turn. Treat that as a decided reversal, not a
+precedent to extend: what still stands from `sld.2` is the load-bearing half — no MCP
+method on the ACP wire, no process-wide server to address, nothing bypassing `session/new`.
+Putting `prompts/get` back on as a *method*, or onto `ext_method` under a prefix, is still
+refused.
 
 `--mcp-command` went too (`pyacp-sld.4`), because the deprecated surface was its only
 consumer. Every MCP server is named by a client in `session/new`.

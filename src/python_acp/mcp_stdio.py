@@ -225,6 +225,10 @@ class MCPStdioClient:
         # The version both sides settled on, set by initialize() and None until
         # then. A handshake that fails negotiation leaves it None.
         self.protocol_version: str | None = None
+        # What the server said it can do, kept from the initialize result. `None`
+        # until the handshake completes, and `{}` for a server that declared
+        # nothing -- two different facts, which is why the default is not `{}`.
+        self.server_capabilities: dict[str, Any] | None = None
         self._id = 0
         self._write_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -366,8 +370,32 @@ class MCPStdioClient:
         except MCPProtocolError:
             await self.stop()
             raise
+        # Kept, not read and discarded. MCP's rule runs both ways: a client MUST NOT
+        # use a capability the server did not declare, and a server that omits
+        # `prompts` answers `prompts/list` with `-32601`. Without this the only way to
+        # find that out is to ask and be refused, which cannot tell a server with no
+        # prompts from one whose listing is broken. See `supports`.
+        capabilities = result.get("capabilities")
+        self.server_capabilities = capabilities if isinstance(capabilities, dict) else {}
         await self.notify("notifications/initialized")
         return result
+
+    def supports(self, capability: str) -> bool:
+        """Whether the server declared `capability` in its `initialize` result.
+
+        Presence is the whole test: MCP capability values are option blocks
+        (`{"listChanged": true}`) and an empty one still means the feature is there,
+        so `bool(block)` would read `"prompts": {}` -- the commonest form there is --
+        as unsupported.
+
+        **True before the handshake**, because `server_capabilities` is `None` then and
+        the honest answer to "may I call this" is not "no". A caller reaching a method
+        before `initialize` has a worse problem than a capability check can describe,
+        and refusing here would replace its real error with a misleading one.
+        """
+        if self.server_capabilities is None:
+            return True
+        return capability in self.server_capabilities
 
     def _declared_capabilities(self) -> dict[str, Any]:
         """The capability block to send, refusing to promise what nobody answers.

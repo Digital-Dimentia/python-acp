@@ -2,21 +2,64 @@
 
 The turn convention is a JSON object per prompt block (`turn_mcp_router.py`), which is
 right for a program and hostile to a person: nobody types `{"tool": "echo", "arguments":
-{"message": "hi"}}` into a chat box to find out what a server offers. These two commands
-are the human door onto the same machinery.
+{"message": "hi"}}` into a chat box to find out what a server offers. These commands are
+the human door onto the same machinery, one per MCP server primitive.
 
     /tools
     /invokeTool demo/echo --message "hello world" --count 3
-
-**Neither is a new protocol surface.** They arrive as ordinary `session/prompt` text and
-answer with `agent_message_chunk` text, so nothing here reopens `pyacp-sld.2` — the
-decision that a client does not reach *through* this bridge to the MCP server. `/tools`
-reports what `available_commands` already announces every turn, in more detail; the
-listing is a rendering of information the client is given anyway.
+    /listPrompts
+    /promptShow demo/greeting --name "Ada Lovelace"
+    /promptInvoke demo/greeting --name "Ada Lovelace"
+    /listResources
+    /resourceShow demo file:///etc/hosts
 
 `/invokeTool` deliberately produces the same `Invocation` the JSON path produces, so a
 command-line call is not a second execution path: it inherits the session mode, the
 permission prompt, and the on-tool-failure policy without knowing they exist.
+
+## Three primitives, three shapes, and one of them needs a model
+
+MCP servers publish tools, prompts, and resources. Only tools were reachable here before
+`pyacp-tc5`, which had the palette showing the *model's* callables — MCP calls tools
+model-controlled — while the convention every other client follows surfaces prompts, the
+user-controlled primitive. All three are reachable now, and what each command can honestly
+do is set by decision D1, which puts no model in this runtime:
+
+| Command | MCP call | Needs a model |
+|---|---|---|
+| `/tools`, `/listPrompts`, `/listResources` | `*/list` | no — metadata |
+| `/invokeTool` | `tools/call` | no — the client named the tool and its arguments |
+| `/promptShow` | `prompts/get` | **no** — the *server* performs the substitution |
+| `/resourceShow` | `resources/read` | no — reading is the whole operation |
+| `/promptInvoke` | `prompts/get`, then act on the messages | **yes**, so it refuses |
+
+`/promptShow` and `/promptInvoke` split on exactly that line. Expanding a prompt is a
+template substitution the server does; what comes back is a list of messages addressed to
+a model, and acting on them is the part this build cannot do. `/promptInvoke` is shipped
+anyway, refusing with the reason and pointing at `/promptShow`, on the same principle that
+has `authenticate` answer `-32000` rather than going missing: a client should discover a
+boundary, not an absence.
+
+Resources have no such split. `resources/read` *is* the operation, so there is one verb.
+
+## This reopens pyacp-sld.2, deliberately
+
+`pyacp-sld.2`/`sld.3` deleted the `{"action": ...}` surface and with it the MCP
+passthrough, recording that "ACP's model is that the agent uses those internally, not that
+a client reaches through it to the server" — so reading an MCP prompt or resource through
+this bridge was decided *against*, not merely left undone.
+
+`/promptShow` and `/resourceShow` reverse that for prompt and resource **content**, and it
+is a reversal rather than a loophole: arriving as a slash command inside a turn instead of
+as a JSON-RPC method is a different door onto the same capability, and pretending
+otherwise would be worse than saying so. What stands from `sld.2` is the part that was
+actually load-bearing — there is no MCP method on the ACP wire, no process-wide server to
+address, and nothing here bypasses `session/new`. A client asks in ACP, and the agent is
+the one that speaks MCP.
+
+The listings never needed that argument. `/tools` already reports what
+`available_commands` announces every turn, in more detail, and `/listPrompts` and
+`/listResources` are the same kind of thing: a rendering of a server's own catalogue.
 """
 
 from __future__ import annotations
@@ -31,11 +74,44 @@ from typing import Any
 #: person typing by hand may or may not reach for the slash first.
 LIST_TOOLS = "tools"
 INVOKE_TOOL = "invokeTool"
+LIST_PROMPTS = "listPrompts"
+PROMPT_SHOW = "promptShow"
+PROMPT_INVOKE = "promptInvoke"
+LIST_RESOURCES = "listResources"
+RESOURCE_SHOW = "resourceShow"
 
-#: Shown in the `available_commands` announcement, and in the listing's own footer, so the
+#: Every name above, for the one place that has to recognise a command before it can parse
+#: one: an unbalanced quote is only *our* problem when the text was aimed at us. Built from
+#: the constants rather than written out again, so a new command cannot be left out of it.
+COMMAND_NAMES: frozenset[str] = frozenset(
+    {
+        LIST_TOOLS,
+        INVOKE_TOOL,
+        LIST_PROMPTS,
+        PROMPT_SHOW,
+        PROMPT_INVOKE,
+        LIST_RESOURCES,
+        RESOURCE_SHOW,
+    }
+)
+
+#: Shown in the `available_commands` announcement, and in each listing's own footer, so the
 #: syntax is discoverable from inside the thing that needs it.
 LIST_TOOLS_HINT = "list every tool on this session's MCP servers, with parameters"
 INVOKE_TOOL_HINT = "<server>/<tool> --param value [--flag]"
+LIST_PROMPTS_HINT = "list every prompt on this session's MCP servers, with arguments"
+PROMPT_SHOW_HINT = "<server>/<prompt> --argument value"
+PROMPT_INVOKE_HINT = "<server>/<prompt> --argument value  (needs a model; see /promptShow)"
+LIST_RESOURCES_HINT = "list every resource on this session's MCP servers"
+RESOURCE_SHOW_HINT = "[<server>] <uri>"
+
+#: Why `/promptInvoke` cannot run, in the words the refusal uses. A constant because the
+#: same sentence has to appear in the refusal and in the listing footer that offers the
+#: command, and two copies would drift the moment a model arrives.
+NEEDS_A_MODEL = (
+    "expands a prompt and then acts on the messages it returns, which needs a model. "
+    "This bridge routes tool calls and has none (decision D1)"
+)
 
 
 class CommandError(ValueError):
@@ -54,6 +130,72 @@ class ListTools:
 
 
 @dataclass(frozen=True)
+class ListPrompts:
+    """`/listPrompts`. `ListTools` for the other user-facing primitive."""
+
+
+@dataclass(frozen=True)
+class ListResources:
+    """`/listResources`. Metadata only — reading one is `/resourceShow`."""
+
+
+@dataclass(frozen=True)
+class ShowResource:
+    """`/resourceShow [<server>] <uri>`.
+
+    A URI, not a `<server>/<name>` pair: `file:///etc/hosts` is full of slashes and
+    `rpartition` would split it somewhere meaningless. So the server is a separate
+    positional token, present or absent, and never carved out of the second one.
+    """
+
+    server: str | None
+    uri: str
+
+
+@dataclass(frozen=True)
+class PromptCommand:
+    """What `/promptShow` and `/promptInvoke` share: which prompt, and its arguments.
+
+    Values stay raw here for the same reason `InvokeTool`'s do — validating them needs the
+    prompt's declared `arguments`, which needs an await — but they never become anything
+    other than strings. MCP types `prompts/get`'s arguments as `{[key: string]: string}`,
+    so the coercion table `InvokeTool` needs has nothing to do here. That is the whole of
+    the "shape problem" this bead was filed over: prompt arguments are named strings, and a
+    command line carries named strings natively.
+    """
+
+    server: str | None
+    name: str
+    raw_arguments: dict[str, list[str]] = field(default_factory=dict)
+    #: Arguments given with no value. Always an error for a prompt — see `prompt_arguments`
+    #: — but recorded rather than refused during parsing, so the message can name the
+    #: prompt it belongs to.
+    bare_flags: frozenset[str] = frozenset()
+
+    #: The command that produced this, for error messages. Overridden by each subclass.
+    verb: str = PROMPT_SHOW
+
+
+@dataclass(frozen=True)
+class ShowPrompt(PromptCommand):
+    """`/promptShow <server>/<prompt> --argument value`."""
+
+    verb: str = PROMPT_SHOW
+
+
+@dataclass(frozen=True)
+class InvokePrompt(PromptCommand):
+    """`/promptInvoke <server>/<prompt> --argument value`. Parsed, then refused.
+
+    Parsed rather than rejected on sight so the refusal can name the prompt and repeat the
+    arguments back as a `/promptShow` the reader can run. A refusal that cannot restate
+    what was asked for is a worse refusal.
+    """
+
+    verb: str = PROMPT_INVOKE
+
+
+@dataclass(frozen=True)
 class InvokeTool:
     """`/invokeTool <server>/<tool> --k v`, before argument types are known.
 
@@ -69,7 +211,15 @@ class InvokeTool:
     bare_flags: frozenset[str] = frozenset()
 
 
-def parse_command(text: str) -> ListTools | InvokeTool | None:
+#: Everything `parse_command` can hand back. A union rather than a base class: these have
+#: nothing in common but the fact that a person typed them, and the executor dispatches on
+#: which one it got.
+Command = (
+    ListTools | InvokeTool | ListPrompts | ShowPrompt | InvokePrompt | ListResources | ShowResource
+)
+
+
+def parse_command(text: str) -> Command | None:
     """Recognise a command, or return `None` to leave the text to the JSON convention.
 
     Returning `None` rather than raising for unrecognised text is what keeps this layer
@@ -85,7 +235,7 @@ def parse_command(text: str) -> ListTools | InvokeTool | None:
         # An unbalanced quote. Only *our* commands should complain about it; anything else
         # is likely JSON, whose own parser gives a better message about it than we can.
         head = stripped.split(None, 1)[0].lstrip("/")
-        if head not in {LIST_TOOLS, INVOKE_TOOL}:
+        if head not in COMMAND_NAMES:
             return None
         raise CommandError(
             f"/{head}: the command has an unbalanced quote. Wrap a value containing "
@@ -95,13 +245,29 @@ def parse_command(text: str) -> ListTools | InvokeTool | None:
         return None
 
     name = tokens[0].lstrip("/")
+    rest = tokens[1:]
     if name == LIST_TOOLS:
-        if len(tokens) > 1:
-            raise CommandError(f"/{LIST_TOOLS} takes no arguments, but got: {' '.join(tokens[1:])}")
-        return ListTools()
+        return _parse_bare(name, rest, ListTools())
+    if name == LIST_PROMPTS:
+        return _parse_bare(name, rest, ListPrompts())
+    if name == LIST_RESOURCES:
+        return _parse_bare(name, rest, ListResources())
     if name == INVOKE_TOOL:
-        return _parse_invocation(tokens[1:])
+        return _parse_invocation(rest)
+    if name == PROMPT_SHOW:
+        return _parse_prompt(ShowPrompt, PROMPT_SHOW, PROMPT_SHOW_HINT, rest)
+    if name == PROMPT_INVOKE:
+        return _parse_prompt(InvokePrompt, PROMPT_INVOKE, PROMPT_INVOKE_HINT, rest)
+    if name == RESOURCE_SHOW:
+        return _parse_resource(rest)
     return None
+
+
+def _parse_bare(name: str, tokens: list[str], command: Command) -> Command:
+    """One of the three listings, which take nothing at all."""
+    if tokens:
+        raise CommandError(f"/{name} takes no arguments, but got: {' '.join(tokens)}")
+    return command
 
 
 def _parse_invocation(tokens: list[str]) -> InvokeTool:
@@ -119,19 +285,91 @@ def _parse_invocation(tokens: list[str]) -> InvokeTool:
     if not tool:
         raise CommandError(f"/{INVOKE_TOOL}: {target!r} names no tool.")
 
+    raw, bare = _parse_flags(INVOKE_TOOL, tokens[1:], "parameter")
+    return InvokeTool(
+        server=server or None, tool=tool, raw_arguments=raw, bare_flags=frozenset(bare)
+    )
+
+
+def _parse_prompt(
+    kind: type[PromptCommand], verb: str, hint: str, tokens: list[str]
+) -> PromptCommand:
+    """`/promptShow` and `/promptInvoke`, which differ only in what happens afterwards.
+
+    Same `[<server>/]<name>` target as `/invokeTool`, because a prompt name is an
+    identifier the way a tool name is — the split that `/resourceShow` cannot use is fine
+    here.
+    """
+    if not tokens:
+        raise CommandError(f"/{verb} needs a prompt: /{verb} {hint}")
+    target = tokens[0]
+    if target.startswith("-"):
+        raise CommandError(
+            f"/{verb}: the first argument is the prompt, not an option. Try /{verb} {hint}"
+        )
+    server, _, name = target.rpartition("/")
+    if not name:
+        raise CommandError(f"/{verb}: {target!r} names no prompt.")
+
+    raw, bare = _parse_flags(verb, tokens[1:], "argument")
+    return kind(
+        server=server or None, name=name, raw_arguments=raw, bare_flags=frozenset(bare)
+    )
+
+
+def _parse_resource(tokens: list[str]) -> ShowResource:
+    """`/resourceShow [<server>] <uri>`, positionally.
+
+    The count is the discriminator, not the shape of either token. Sniffing for `://` to
+    decide which one is the URI would be a guess in exactly the place `_resolve_server`
+    already refuses to guess, and MCP puts no constraint on a resource URI's scheme that
+    would make the sniff safe.
+    """
+    if not tokens:
+        raise CommandError(
+            f"/{RESOURCE_SHOW} needs a resource: /{RESOURCE_SHOW} {RESOURCE_SHOW_HINT}. "
+            f"Run /{LIST_RESOURCES} to see them."
+        )
+    for token in tokens:
+        if token.startswith("--"):
+            raise CommandError(
+                f"/{RESOURCE_SHOW}: {token!r} is an option, and a resource takes none. "
+                f"It is read by URI: /{RESOURCE_SHOW} {RESOURCE_SHOW_HINT}."
+            )
+    if len(tokens) == 1:
+        return ShowResource(server=None, uri=tokens[0])
+    if len(tokens) == 2:
+        return ShowResource(server=tokens[0], uri=tokens[1])
+    raise CommandError(
+        f"/{RESOURCE_SHOW} takes a URI and an optional server before it, but got "
+        f"{len(tokens)} arguments: {' '.join(tokens)}. A URI containing spaces needs "
+        "quoting."
+    )
+
+
+def _parse_flags(
+    verb: str, tokens: list[str], noun: str
+) -> tuple[dict[str, list[str]], set[str]]:
+    """`--key value`, `--key=value` and `--key` into raw strings, for every command.
+
+    Shared by `/invokeTool` and the two prompt commands so that the one syntax a person has
+    to learn really is one syntax. What the values *mean* diverges afterwards — a tool's
+    are typed from its `inputSchema`, a prompt's are strings — and that divergence lives in
+    `coerce_arguments` and `prompt_arguments`, not here.
+    """
     raw: dict[str, list[str]] = {}
     bare: set[str] = set()
-    index = 1
+    index = 0
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--"):
             raise CommandError(
-                f"/{INVOKE_TOOL}: unexpected argument {token!r}. Every parameter is named: "
+                f"/{verb}: unexpected argument {token!r}. Every {noun} is named: "
                 f"--{token.lstrip('-') or 'name'} <value>."
             )
         key, separator, inline = token[2:].partition("=")
         if not key:
-            raise CommandError(f"/{INVOKE_TOOL}: {token!r} names no parameter.")
+            raise CommandError(f"/{verb}: {token!r} names no {noun}.")
         if separator:
             raw.setdefault(key, []).append(inline)
             index += 1
@@ -146,10 +384,7 @@ def _parse_invocation(tokens: list[str]) -> InvokeTool:
             continue
         raw.setdefault(key, []).append(following)
         index += 2
-
-    return InvokeTool(
-        server=server or None, tool=tool, raw_arguments=raw, bare_flags=frozenset(bare)
-    )
+    return raw, bare
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +511,74 @@ def _target(command: InvokeTool) -> str:
     return f"{command.server}/{command.tool}" if command.server else command.tool
 
 
+def _prompt_target(command: PromptCommand) -> str:
+    return f"{command.server}/{command.name}" if command.server else command.name
+
+
+# ---------------------------------------------------------------------------
+# Typing a prompt's arguments, which needs no typing at all
+# ---------------------------------------------------------------------------
+
+
+def prompt_arguments(
+    command: PromptCommand, declared: list[Any] | None
+) -> dict[str, str]:
+    """Check a prompt's arguments against what it declares, and hand back strings.
+
+    `coerce_arguments`' counterpart, and much shorter, because MCP types `prompts/get`'s
+    arguments as `{[key: string]: string}`. There is no `inputSchema`, no `type`, and
+    nothing to coerce — a prompt argument is a string, and the only questions left are
+    whether the prompt has an argument by that name and whether a required one is missing.
+
+    `declared` is the `arguments` array from `prompts/list`: `{name, description?,
+    required?}` per entry. `None` — a server that publishes no argument list for the
+    prompt — means nothing can be checked and everything is passed through, the same
+    latitude `coerce_arguments` gives a tool with no schema.
+    """
+    known: dict[str, dict[str, Any]] = {}
+    if isinstance(declared, list):
+        for entry in declared:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                known[entry["name"]] = entry
+
+    if known:
+        unknown = sorted(set(command.raw_arguments) - set(known))
+        if unknown:
+            offered = ", ".join(f"--{name}" for name in sorted(known)) or "none"
+            raise CommandError(
+                f"/{command.verb} {_prompt_target(command)}: no argument "
+                f"{', '.join('--' + name for name in unknown)}. It takes: {offered}."
+            )
+
+    arguments: dict[str, str] = {}
+    for key, values in command.raw_arguments.items():
+        if not values:
+            # Never a boolean the way a bare tool flag can be: there is no schema to say
+            # so, and MCP has no non-string prompt argument to say it about.
+            raise CommandError(
+                f"/{command.verb} {_prompt_target(command)}: --{key} needs a value. "
+                "A prompt argument is a string."
+            )
+        if len(values) > 1:
+            raise CommandError(
+                f"/{command.verb} {_prompt_target(command)}: --{key} was given "
+                f"{len(values)} times, and a prompt argument is a single string."
+            )
+        arguments[key] = values[0]
+
+    missing = [
+        name
+        for name, entry in sorted(known.items())
+        if entry.get("required") is True and name not in arguments
+    ]
+    if missing:
+        raise CommandError(
+            f"/{command.verb} {_prompt_target(command)}: missing required "
+            f"{', '.join('--' + name for name in missing)}."
+        )
+    return arguments
+
+
 # ---------------------------------------------------------------------------
 # Rendering, which is the whole point of `/tools`
 # ---------------------------------------------------------------------------
@@ -380,3 +683,300 @@ def _example(listings: dict[str, list[dict[str, Any]]]) -> str:
             suffix = f" --{required[0]} <value>" if required else ""
             return f"{server}/{name}{suffix}"
     return f"<server>/<tool> {INVOKE_TOOL_HINT}"
+
+
+# ---------------------------------------------------------------------------
+# Rendering the other two primitives
+# ---------------------------------------------------------------------------
+
+def _no_servers(noun: str) -> str:
+    """What every listing says when the session opened no MCP servers at all.
+
+    One function because the three listings are equally useless in that case and for the
+    same reason, and three near-identical paragraphs would drift. "No servers" and "no
+    prompts" are different problems, and only one of them is the reader's to fix.
+    """
+    return (
+        f"This session has no MCP servers, so there are no {noun}.\n"
+        "Servers are named when the session is created, in `session/new`:\n"
+        f'{_INDENT}"mcpServers": [{{"name": "demo", "command": "python", '
+        '"args": ["server.py"]}]'
+    )
+
+
+def _nothing_declared(undeclared: list[str], noun: str, capability: str) -> str:
+    """The whole answer when *every* server on the session lacks the capability.
+
+    Separate from `_undeclared_note`, which annotates a listing that has something in it.
+    Here there is nothing to annotate, and appending that note to a sentence already saying
+    the same thing would say it twice.
+    """
+    plural = "" if len(undeclared) == 1 else "s"
+    names = ", ".join(sorted(undeclared))
+    return (
+        f"No {noun}: none of this session's {len(undeclared)} MCP server{plural} declares "
+        f"the {capability} capability ({names})."
+    )
+
+
+def _undeclared_note(undeclared: list[str], capability: str) -> list[str]:
+    """Name the servers that were never asked, and say why.
+
+    A listing that silently omits a server is indistinguishable from one whose server had
+    nothing to list, and the two want different reactions from the reader: one is a server
+    that does not do this, the other is a server that does it and is empty. MCP's
+    capability block is what separates them, so it is reported rather than absorbed.
+    """
+    if not undeclared:
+        return []
+    names = ", ".join(sorted(undeclared))
+    one = len(undeclared) == 1
+    return [
+        "",
+        f"{names} {'declares' if one else 'declare'} no {capability} capability, "
+        f"so {'it was' if one else 'they were'} not asked.",
+    ]
+
+
+def render_prompt_listing(
+    listings: dict[str, list[dict[str, Any]]], undeclared: list[str] | None = None
+) -> str:
+    """The `/listPrompts` answer: every prompt, with the arguments it declares.
+
+    Same plain multi-line text as `render_tool_listing`, and for the same reason — a
+    client puts an `agent_message_chunk` in a transcript, where Markdown may show as
+    asterisks and a wide table reflows into gibberish.
+    """
+    undeclared = list(undeclared or [])
+    if not listings and not undeclared:
+        return _no_servers("prompts")
+    if not listings:
+        return _nothing_declared(undeclared, "prompts", "prompts")
+
+    lines: list[str] = []
+    total = sum(len(prompts) for prompts in listings.values())
+    lines.append(
+        f"{total} prompt{'' if total == 1 else 's'} on "
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
+    )
+    for server in sorted(listings):
+        prompts = listings[server]
+        lines.append("")
+        lines.append(f"{server} ({len(prompts)} prompt{'' if len(prompts) == 1 else 's'})")
+        if not prompts:
+            lines.append(f"{_INDENT}(this server publishes no prompts)")
+            continue
+        for prompt in prompts:
+            lines.extend(_render_prompt(server, prompt))
+
+    lines.extend(_undeclared_note(undeclared, "prompts"))
+    lines.append("")
+    lines.append("Expand one with:")
+    lines.append(f"{_INDENT}/{PROMPT_SHOW} {_prompt_example(listings)}")
+    return "\n".join(lines)
+
+
+def _render_prompt(server: str, prompt: dict[str, Any]) -> list[str]:
+    name = prompt.get("name")
+    if not isinstance(name, str):
+        return []
+    lines = ["", f"{_INDENT}{server}/{name}"]
+    description = prompt.get("description") or ""
+    if description:
+        lines.append(f"{_INDENT * 2}{description}")
+
+    arguments = [
+        entry
+        for entry in (prompt.get("arguments") or [])
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    ]
+    if not arguments:
+        lines.append(f"{_INDENT * 2}(no arguments)")
+        return lines
+
+    # Same column-sizing pass as `_render_tool`: a ragged left edge is what makes one of
+    # these unreadable, and the width is not knowable until every name is in hand.
+    flags = {str(entry["name"]): f"--{entry['name']}" for entry in arguments}
+    width = max(len(flag) for flag in flags.values())
+    for entry in sorted(arguments, key=lambda item: str(item["name"])):
+        key = str(entry["name"])
+        mark = "required" if entry.get("required") is True else ""
+        parts = [f"{flags[key]:<{width}}", f"{mark:<9}"]
+        detail = entry.get("description")
+        if isinstance(detail, str) and detail:
+            parts.append(detail)
+        lines.append(f"{_INDENT * 2}{' '.join(parts).rstrip()}")
+    return lines
+
+
+def _prompt_example(listings: dict[str, list[dict[str, Any]]]) -> str:
+    """A `/promptShow` the reader could paste, built from this session's own prompts."""
+    for server in sorted(listings):
+        for prompt in listings[server]:
+            name = prompt.get("name")
+            if not isinstance(name, str):
+                continue
+            required = [
+                entry["name"]
+                for entry in (prompt.get("arguments") or [])
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+                and entry.get("required") is True
+            ]
+            suffix = f" --{required[0]} <value>" if required else ""
+            return f"{server}/{name}{suffix}"
+    return f"<server>/<prompt> {PROMPT_SHOW_HINT}"
+
+
+def render_prompt_heading(server: str, name: str, result: dict[str, Any]) -> str:
+    """The one line that precedes an expanded prompt's messages.
+
+    Names the prompt and how many messages came back, so a reader can tell an empty
+    expansion from a failed one — the difference is invisible otherwise, since an empty
+    `messages` array emits no chunks at all.
+    """
+    messages = result.get("messages")
+    count = len(messages) if isinstance(messages, list) else 0
+    description = result.get("description")
+    heading = f"{server}/{name}"
+    if isinstance(description, str) and description:
+        heading = f"{heading} — {description}"
+    if count == 0:
+        return f"{heading}\n{_INDENT}(this prompt expanded to no messages)"
+    return f"{heading}\n{count} message{'' if count == 1 else 's'}, addressed to a model:"
+
+
+def prompt_message_blocks(result: dict[str, Any]) -> list[tuple[str, Any]]:
+    """An expanded prompt as `(role, raw MCP content block)` pairs, in order.
+
+    The blocks are handed back **unmapped**. `mcp_content.to_content_block` is what turns
+    one into ACP, and calling it here would make this module depend on the ACP schema to
+    do a job — parsing and rendering text — that it otherwise does without one. The caller
+    already imports that mapping for tool results.
+
+    MCP types `PromptMessage.content` as a single content block. A list is accepted anyway:
+    it costs one `isinstance` and a server that sends one would otherwise have its whole
+    message silently rendered as a placeholder.
+    """
+    pairs: list[tuple[str, Any]] = []
+    for message in result.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        role = role if isinstance(role, str) and role else "unknown"
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else [content]
+        pairs.extend((role, block) for block in blocks if block is not None)
+    return pairs
+
+
+def render_resource_listing(
+    listings: dict[str, list[dict[str, Any]]], undeclared: list[str] | None = None
+) -> str:
+    """The `/listResources` answer: uri, name, mime type. Never content."""
+    undeclared = list(undeclared or [])
+    if not listings and not undeclared:
+        return _no_servers("resources")
+    if not listings:
+        return _nothing_declared(undeclared, "resources", "resources")
+
+    lines: list[str] = []
+    total = sum(len(resources) for resources in listings.values())
+    lines.append(
+        f"{total} resource{'' if total == 1 else 's'} on "
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
+    )
+    for server in sorted(listings):
+        resources = listings[server]
+        lines.append("")
+        lines.append(
+            f"{server} ({len(resources)} resource{'' if len(resources) == 1 else 's'})"
+        )
+        if not resources:
+            lines.append(f"{_INDENT}(this server publishes no resources)")
+            continue
+        for resource in resources:
+            lines.extend(_render_resource(resource))
+
+    lines.extend(_undeclared_note(undeclared, "resources"))
+    lines.append("")
+    lines.append("Read one with:")
+    lines.append(f"{_INDENT}/{RESOURCE_SHOW} {_resource_example(listings)}")
+    return "\n".join(lines)
+
+
+def _render_resource(resource: dict[str, Any]) -> list[str]:
+    uri = resource.get("uri")
+    if not isinstance(uri, str):
+        return []
+    lines = ["", f"{_INDENT}{uri}"]
+    detail = " ".join(
+        str(resource[key]) for key in ("name", "mimeType") if isinstance(resource.get(key), str)
+    )
+    if detail:
+        lines.append(f"{_INDENT * 2}{detail}")
+    description = resource.get("description")
+    if isinstance(description, str) and description:
+        lines.append(f"{_INDENT * 2}{description}")
+    return lines
+
+
+def _resource_example(listings: dict[str, list[dict[str, Any]]]) -> str:
+    """A `/resourceShow` the reader could paste. Always names the server explicitly.
+
+    Unlike `/promptShow`, where omitting the server is the common case on a one-server
+    session, the two-token form is what a reader needs to see: it is the only thing that
+    says the server is a separate word rather than part of the URI.
+    """
+    for server in sorted(listings):
+        for resource in listings[server]:
+            uri = resource.get("uri")
+            if isinstance(uri, str):
+                return f"{server} {uri}"
+    return "<server> <uri>"
+
+
+def render_resource_contents(uri: str, result: dict[str, Any]) -> str:
+    """One `resources/read` result as text.
+
+    A resource is text-or-blob, exactly as an embedded resource is, and a blob is **never
+    printed**. Base64 in a chat transcript is not readable by the human it would be shown
+    to and is bounded only by the file's size; the placeholder names the type and the
+    approximate decoded size instead, which is what a reader can act on.
+    """
+    contents = result.get("contents")
+    contents = contents if isinstance(contents, list) else []
+    if not contents:
+        return f"{uri}\n{_INDENT}(this resource has no contents)"
+
+    lines = [f"{uri} — {len(contents)} content{'' if len(contents) == 1 else 's'}."]
+    for entry in contents:
+        lines.append("")
+        if not isinstance(entry, dict):
+            lines.append(f"{_INDENT}[not a resource contents object: {type(entry).__name__}]")
+            continue
+        header = str(entry.get("uri") or uri)
+        mime = entry.get("mimeType")
+        if isinstance(mime, str) and mime:
+            header = f"{header}  {mime}"
+        lines.append(header)
+        text = entry.get("text")
+        if isinstance(text, str):
+            lines.append(text)
+            continue
+        blob = entry.get("blob")
+        if isinstance(blob, str):
+            lines.append(f"{_INDENT}[binary, about {_decoded_size(blob)} bytes, not shown]")
+            continue
+        lines.append(f"{_INDENT}[this content carries neither text nor blob]")
+    return "\n".join(lines)
+
+
+def _decoded_size(blob: str) -> int:
+    """How many bytes a base64 string decodes to, without decoding it.
+
+    Four base64 characters carry three bytes, less one per `=` of padding. Computed rather
+    than measured because the whole point of the placeholder is not to materialise the
+    blob a second time to describe it.
+    """
+    return max(0, (len(blob) * 3) // 4 - blob.count("="))

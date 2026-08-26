@@ -453,26 +453,57 @@ Constructed with the `McpBackendRegistry`, not by reading one off `TurnContext`.
 directly, so the context does not widen for one executor's dependency. Servers were opened
 **and handshaked** during `session/new`, so every client here is live.
 
-## Two typed commands sit in front of the JSON convention
+## Seven typed commands sit in front of the JSON convention
 
-`/tools` and `/invokeTool` are recognised before the JSON parse, in `execute`, and only
-when the prompt is **a single text block**. A multi-block prompt is a composed request
-from a program; treating its first block as a command would silently drop the rest, which
-is a much worse failure than declining to recognise it.
+They are recognised before the JSON parse, in `execute`, and only when the prompt is **a
+single text block**. A multi-block prompt is a composed request from a program; treating
+its first block as a command would silently drop the rest, which is a much worse failure
+than declining to recognise it.
+
+| Command | What it does here | Stop reason |
+| --- | --- | --- |
+| `/tools` | `_list_tools`, from the turn's `ToolCatalogue` | `end_turn` |
+| `/invokeTool` | `_from_command` → the same `Invocation` JSON builds | the turn's |
+| `/listPrompts` | `_list_prompts` | `end_turn` |
+| `/promptShow` | `_expand_prompt` → `prompts/get`, messages emitted | `end_turn` |
+| `/promptInvoke` | `_expand_prompt`, which validates and then refuses | `refusal` |
+| `/listResources` | `_list_resources` | `end_turn` |
+| `/resourceShow` | `_show_resource` → `resources/read` | `end_turn` |
+
+`end_turn` rather than `refusal` for a listing: the turn did exactly what it was asked to
+do, and `refusal` would be the wrong stop reason for a command that worked.
 
 `/tools` answers from the turn's own `ToolCatalogue`, so it costs no `tools/list` beyond
-the one the announcement already paid, and ends the turn with `end_turn` — the turn did
-what it was asked, and `refusal` would be the wrong stop reason for a command that worked.
+the one the announcement already paid. **The other two listings have no catalogue behind
+them, deliberately.** That cache exists because `tools/list` is paid three times in one
+turn — by the announcement, by each tool call's `kind`, and by `/tools`. A prompt or
+resource listing is asked for once, by the command that asked for it, and a cache with one
+reader is a place for staleness to live.
 
 `/invokeTool` builds **the same `Invocation`** the JSON path builds. That is the whole
 design: the plan entry, the permission prompt, the session mode, the `kind` from the
 server's annotations, and the on-tool-failure policy are all downstream of `Invocation`,
 so a typed call inherits them without knowing they exist and cannot drift from them.
 
-Server resolution is `_resolve_server`. `server/tool` names it; a bare tool name is
-allowed only when the session has exactly one server. With several, picking the first that
-publishes the name would make the same command mean different things as the session's
-servers changed, so it is refused with the candidates.
+Server resolution is `_resolve_server`, shared by all four commands that name one. The
+server given wins; a bare name is allowed only when the session has exactly one server,
+because with several, picking the first that happens to publish the name would make the
+same command mean different things as the session's servers changed. It takes a
+`separator` so the suggestion it prints for an ambiguous session is one that *runs* —
+`/promptShow alpha/greeting`, but `/resourceShow alpha greeting://ada`, whose URI cannot be
+carved out of a slash-separated pair. See [commands.py](commands.md).
+
+`_require_capability` runs before every prompt or resource call. MCP's rule is that a
+client MUST NOT use a capability the server did not declare in `initialize`, and the
+practical difference is the quality of the answer: asked anyway, a server without prompts
+replies `-32601`, and `errors.py` faithfully forwards that as a JSON-RPC error naming a
+method the person never typed. Reading the handshake block instead turns it into a refusal
+naming the server and the thing it does not do. `mcp_stdio.py` keeps the block for this;
+`supports()` is what reads it.
+
+A server that *did* declare the capability and then fails is **not** absorbed — same rule
+as `ToolCatalogue.listing`. A listing is the thing being asked for, so `MCPProtocolError`
+propagates and `errors.py` forwards the backend's own code.
 
 `available_commands(session_id)` builds the same list for `agent.py` to announce when a
 session is *loaded or resumed*, through the one `_commands_for` both callers share — a
@@ -481,8 +512,15 @@ not consult `announce-tools`: that option suppresses a notification whose cost i
 repeated every turn, and a client that suppressed the repetition still needs a first list
 to show.
 
+**The palette carries the verbs, and no individual prompt or resource** (`pyacp-tc5`). MCP
+keeps tools, prompts and resources in three separate namespaces, so one server may legally
+publish a tool and a prompt both called `greeting`; per-item entries would need a naming
+rule to keep those apart, and the entry that lost the coin toss would silently shadow the
+other. `/listPrompts` and `/listResources` answer the same question without inventing one.
+
 The parsing, typing and rendering live in [commands.py](commands.md), which has the
-coercion table and the reasoning behind the one row that guesses.
+coercion table, the reasoning behind the one row that guesses, and why a prompt's arguments
+need no table at all.
 
 ## Main symbols
 
@@ -497,6 +535,10 @@ coercion table and the reasoning behind the one row that guesses.
 | `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
+| `_BUILTIN_COMMANDS` | The seven commands this executor answers itself, in announcement order. Verbs only — no per-prompt or per-resource entry |
+| `_resolve_server(verb, server, target, backends, separator)` | Which server a command goes to, and the runnable suggestion when a session has several |
+| `_require_capability(verb, server, backend, capability)` | Refuses a prompt or resource command the server's own handshake says it cannot answer |
+| `McpToolRouterExecutor._catalogue` | Every server's `prompts/list` or `resources/list`, plus the servers that declared no such capability. Two values, because "publishes none" and "does not implement it" want different reactions |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |
 | `SESSION_MODES` | The three modes, and `EXECUTE` / `DRY_RUN` / `AUTO_APPROVE` for their ids |
 | `SESSION_CONFIG_OPTIONS` | The two config options, and `ANNOUNCE_TOOLS` / `ON_TOOL_FAILURE` |

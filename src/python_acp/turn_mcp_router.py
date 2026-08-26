@@ -171,6 +171,7 @@ from acp.helpers import (
     plan_entry,
     text_block,
     tool_content,
+    update_agent_message,
     update_agent_message_text,
     update_available_commands,
     update_plan,
@@ -192,20 +193,43 @@ from acp.schema import (
     RequestPermissionResponse,
 )
 
-from python_acp.mcp_content import to_tool_call_content
+from python_acp.mcp_content import to_content_block, to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.mcp_tools import ToolCatalogue
 from python_acp.commands import (
     INVOKE_TOOL,
     INVOKE_TOOL_HINT,
+    LIST_PROMPTS,
+    LIST_PROMPTS_HINT,
+    LIST_RESOURCES,
+    LIST_RESOURCES_HINT,
     LIST_TOOLS,
     LIST_TOOLS_HINT,
+    NEEDS_A_MODEL,
+    PROMPT_INVOKE,
+    PROMPT_INVOKE_HINT,
+    PROMPT_SHOW,
+    PROMPT_SHOW_HINT,
+    RESOURCE_SHOW,
+    RESOURCE_SHOW_HINT,
+    Command,
     CommandError,
+    InvokePrompt,
     InvokeTool,
+    ListPrompts,
+    ListResources,
     ListTools,
+    PromptCommand,
+    ShowResource,
     coerce_arguments,
     parse_command,
+    prompt_arguments,
+    prompt_message_blocks,
+    render_prompt_heading,
+    render_prompt_listing,
+    render_resource_contents,
+    render_resource_listing,
     render_tool_listing,
 )
 from python_acp.paths import PathConstraintError, require_contained
@@ -402,10 +426,17 @@ SESSION_MODES = SessionModeState(
 
 
 #: Config option ids.
-#: The two commands this executor answers itself, announced beside the session's MCP
-#: tools so a client's palette shows them without being taught. `input` is ACP's only
-#: argument shape -- `UnstructuredCommandInput`, a single free-text hint -- so the syntax
-#: is a display string rather than anything the client can validate. See `commands.py`.
+#: The commands this executor answers itself, announced beside the session's MCP tools so
+#: a client's palette shows them without being taught. `input` is ACP's only argument
+#: shape -- `UnstructuredCommandInput`, a single free-text hint -- so the syntax is a
+#: display string rather than anything the client can validate. See `commands.py`.
+#:
+#: **The verbs are here; individual prompts and resources are not** (`pyacp-tc5`). MCP
+#: keeps tools, prompts and resources in three separate namespaces, so one server may
+#: legally publish a tool and a prompt both called `greeting`; per-item palette entries
+#: would need a naming rule to keep those apart, and the entry that lost the coin toss
+#: would silently shadow the other. `/listPrompts` and `/listResources` answer the same
+#: question without inventing one.
 _BUILTIN_COMMANDS: tuple[AvailableCommand, ...] = (
     AvailableCommand(
         name=LIST_TOOLS,
@@ -416,6 +447,31 @@ _BUILTIN_COMMANDS: tuple[AvailableCommand, ...] = (
         name=INVOKE_TOOL,
         description="Call one tool with command-line style parameters",
         input=AvailableCommandInput(root=UnstructuredCommandInput(hint=INVOKE_TOOL_HINT)),
+    ),
+    AvailableCommand(
+        name=LIST_PROMPTS,
+        description="List this session's MCP prompts with their arguments",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=LIST_PROMPTS_HINT)),
+    ),
+    AvailableCommand(
+        name=PROMPT_SHOW,
+        description="Expand one prompt and show the messages it returns",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=PROMPT_SHOW_HINT)),
+    ),
+    AvailableCommand(
+        name=PROMPT_INVOKE,
+        description="Expand one prompt and act on it — needs a model, so it refuses here",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=PROMPT_INVOKE_HINT)),
+    ),
+    AvailableCommand(
+        name=LIST_RESOURCES,
+        description="List this session's MCP resources",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=LIST_RESOURCES_HINT)),
+    ),
+    AvailableCommand(
+        name=RESOURCE_SHOW,
+        description="Read one resource and show its contents",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=RESOURCE_SHOW_HINT)),
     ),
 )
 
@@ -540,6 +596,14 @@ class McpToolRouterExecutor:
             command = _command_in(prompt)
             if isinstance(command, ListTools):
                 return await self._list_tools(context, backends, catalogue)
+            if isinstance(command, ListPrompts):
+                return await self._list_prompts(context, backends)
+            if isinstance(command, ListResources):
+                return await self._list_resources(context, backends)
+            if isinstance(command, ShowResource):
+                return await self._show_resource(context, backends, command)
+            if isinstance(command, PromptCommand):
+                return await self._expand_prompt(context, backends, command)
             if isinstance(command, InvokeTool):
                 invocations = [await self._from_command(command, backends, catalogue)]
             else:
@@ -653,6 +717,143 @@ class McpToolRouterExecutor:
         await context.emit(update_agent_message_text(render_tool_listing(listings)))
         return TurnResult.ended()
 
+    # ------------------------------------------------------------------
+    # Prompts and resources, MCP's other two primitives (`pyacp-tc5`)
+    # ------------------------------------------------------------------
+
+    async def _list_prompts(self, context: TurnContext, backends: Any) -> TurnResult:
+        """Answer `/listPrompts` from every server that declared the capability.
+
+        No `ToolCatalogue` equivalent behind it, deliberately. That cache exists because
+        `tools/list` is paid three times in one turn — by the announcement, by each tool
+        call's `kind`, and by `/tools`. A prompt listing is asked for once by the command
+        that asked for it, and a cache with one reader is a place for staleness to live.
+        """
+        listings, undeclared = await self._catalogue(backends, "prompts", "list_prompts")
+        await context.emit(update_agent_message_text(render_prompt_listing(listings, undeclared)))
+        return TurnResult.ended()
+
+    async def _list_resources(self, context: TurnContext, backends: Any) -> TurnResult:
+        """Answer `/listResources`. Metadata only — reading one is `/resourceShow`."""
+        listings, undeclared = await self._catalogue(backends, "resources", "list_resources")
+        await context.emit(update_agent_message_text(render_resource_listing(listings, undeclared)))
+        return TurnResult.ended()
+
+    @staticmethod
+    async def _catalogue(
+        backends: Any, capability: str, method: str
+    ) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+        """Every server's listing for one primitive, and the servers that have none.
+
+        Two return values rather than one, because "not listed" has two causes a reader
+        needs to tell apart: a server that publishes none of this primitive, and a server
+        that does not implement it at all. Silently merging them would make an empty
+        listing unactionable.
+
+        A server that declared the capability and then fails is **not** absorbed. That is
+        `ToolCatalogue.listing`'s rule too: a listing is the thing being asked for here, so
+        `MCPProtocolError` propagates and `errors.py` forwards the backend's own code.
+        """
+        listings: dict[str, list[dict[str, Any]]] = {}
+        undeclared: list[str] = []
+        for server in sorted(backends):
+            backend = backends[server]
+            supports = getattr(backend, "supports", None)
+            if supports is not None and not supports(capability):
+                undeclared.append(server)
+                continue
+            listings[server] = list(await getattr(backend, method)())
+        return listings, undeclared
+
+    async def _expand_prompt(
+        self, context: TurnContext, backends: Any, command: PromptCommand
+    ) -> TurnResult:
+        """`/promptShow` and `/promptInvoke`, which agree right up to the last step.
+
+        Both resolve the server, check the capability, and validate the arguments against
+        what the prompt declares. `/promptInvoke` then refuses, **before** `prompts/get`
+        is called: it cannot use the expansion, and issuing a request whose answer is
+        discarded would make the refusal cost a round trip and a server-side expansion for
+        nothing.
+
+        Validating first is what makes that refusal useful rather than a wall. It has the
+        prompt's real name and the arguments in hand, so it can hand back a `/promptShow`
+        that runs — and when the arguments are wrong it says *that* instead, which is the
+        error the person actually needs either way.
+        """
+        server = _resolve_server(command.verb, command.server, command.name, backends)
+        backend = backends[server]
+        _require_capability(command.verb, server, backend, "prompts")
+
+        listing = await backend.list_prompts()
+        declared: list[Any] | None = None
+        for entry in listing:
+            if isinstance(entry, dict) and entry.get("name") == command.name:
+                declared = entry.get("arguments")
+                break
+        else:
+            offered = ", ".join(
+                sorted(
+                    str(entry.get("name"))
+                    for entry in listing
+                    if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                )
+            )
+            raise CommandRefused(
+                f"/{command.verb}: {server!r} has no prompt {command.name!r}. "
+                + (f"It offers: {offered}." if offered else "It publishes no prompts.")
+                + f" Run /{LIST_PROMPTS} to see them with their arguments."
+            )
+
+        try:
+            arguments = prompt_arguments(command, declared)
+        except CommandError as exc:
+            raise CommandRefused(str(exc)) from None
+
+        if isinstance(command, InvokePrompt):
+            spelled = " ".join(f"--{key} {value!r}" for key, value in sorted(arguments.items()))
+            raise CommandRefused(
+                f"/{PROMPT_INVOKE} {NEEDS_A_MODEL}. The expansion itself needs none, so "
+                f"/{PROMPT_SHOW} {server}/{command.name}"
+                + (f" {spelled}" if spelled else "")
+                + " returns the messages this prompt would have produced."
+            )
+
+        result = await backend.get_prompt(command.name, arguments)
+        await context.emit(
+            update_agent_message_text(render_prompt_heading(server, command.name, result))
+        )
+        for role, block in prompt_message_blocks(result):
+            # A text chunk for the role, then the content mapped the way a tool result's
+            # content is mapped. Reusing `to_content_block` rather than flattening
+            # everything to text keeps an image in an expanded prompt an image: the
+            # `supported_prompt_blocks` gate governs what this agent *reads*, and this is
+            # the outbound direction. See `mcp_content.py`.
+            await context.emit(update_agent_message_text(f"{role}:"))
+            await context.emit(update_agent_message(to_content_block(block)))
+        return TurnResult.ended()
+
+    async def _show_resource(
+        self, context: TurnContext, backends: Any, command: ShowResource
+    ) -> TurnResult:
+        """`/resourceShow`. One verb, because `resources/read` *is* the operation.
+
+        There is no `/resourceInvoke` beside it the way `/promptInvoke` sits beside
+        `/promptShow`. That pair splits on a model: expanding is the server's work and
+        acting on the expansion is a model's. Reading a resource has no second half to
+        defer — the bytes are the answer.
+        """
+        server = _resolve_server(
+            RESOURCE_SHOW, command.server, command.uri, backends, separator=" "
+        )
+        backend = backends[server]
+        _require_capability(RESOURCE_SHOW, server, backend, "resources")
+        result = await backend.read_resource(command.uri)
+        await context.emit(
+            update_agent_message_text(render_resource_contents(command.uri, result))
+        )
+        return TurnResult.ended()
+
     async def _from_command(
         self, command: InvokeTool, backends: Any, catalogue: ToolCatalogue
     ) -> Invocation:
@@ -667,7 +868,7 @@ class McpToolRouterExecutor:
         file or command around a tool call, which is a JSON author's job; a person at a
         prompt asks for one tool.
         """
-        server = _resolve_server(command, backends)
+        server = _resolve_server(INVOKE_TOOL, command.server, command.tool, backends)
         schema: dict[str, Any] | None = None
         for tool in await catalogue.listing(server):
             if tool.get("name") == command.tool:
@@ -1393,7 +1594,7 @@ async def _commands_for(backends: Any, catalogue: ToolCatalogue) -> list[Availab
     return commands
 
 
-def _command_in(prompt: list[Any]) -> ListTools | InvokeTool | None:
+def _command_in(prompt: list[Any]) -> Command | None:
     """Recognise a slash command, or return `None` and leave the prompt to JSON.
 
     Only a single text block can be one. A multi-block prompt is a composed request from a
@@ -1411,34 +1612,57 @@ def _command_in(prompt: list[Any]) -> ListTools | InvokeTool | None:
         raise CommandRefused(str(exc)) from None
 
 
-def _resolve_server(command: InvokeTool, backends: Any) -> str:
-    """Which server the call goes to, refusing an ambiguous name rather than guessing.
+def _resolve_server(
+    verb: str, server: str | None, target: str, backends: Any, separator: str = "/"
+) -> str:
+    """Which server a command goes to, refusing an ambiguous name rather than guessing.
 
-    `server/tool` names it. A bare tool name is allowed only when the session has exactly
-    one server, where there is nothing to guess; with several, picking the first that
-    happens to publish the name would make the same command mean different things as the
-    session's servers changed.
+    The named server wins. A bare name is allowed only when the session has exactly one
+    server, where there is nothing to guess; with several, picking the first that happens
+    to publish it would make the same command mean different things as the session's
+    servers changed.
+
+    `separator` is what joins a server to `target` in the suggestion the ambiguous case
+    prints -- `/` for the three `<server>/<name>` commands, a space for `/resourceShow`,
+    whose URI cannot be carved out of a slash-separated pair. It is a parameter rather than
+    something derived, because those two shapes are the whole reason this is shared.
     """
     names = sorted(backends)
-    if command.server is not None:
-        if command.server not in names:
+    if server is not None:
+        if server not in names:
             offered = ", ".join(names) if names else "none"
             raise CommandRefused(
-                f"/{INVOKE_TOOL}: this session has no MCP server {command.server!r}. "
-                f"It has: {offered}."
+                f"/{verb}: this session has no MCP server {server!r}. It has: {offered}."
             )
-        return command.server
+        return server
     if not names:
         raise CommandRefused(
-            f"/{INVOKE_TOOL}: this session has no MCP servers, so there is nothing to "
-            "call. Servers are named in `session/new`."
+            f"/{verb}: this session has no MCP servers, so there is nothing to call. "
+            "Servers are named in `session/new`."
         )
     if len(names) > 1:
         raise CommandRefused(
-            f"/{INVOKE_TOOL}: this session has several MCP servers ({', '.join(names)}), "
-            f"so the tool needs one: /{INVOKE_TOOL} {names[0]}/{command.tool} ..."
+            f"/{verb}: this session has several MCP servers ({', '.join(names)}), so it "
+            f"needs one: /{verb} {names[0]}{separator}{target} ..."
         )
     return names[0]
+
+
+def _require_capability(verb: str, server: str, backend: Any, capability: str) -> None:
+    """Refuse a command the server's own handshake says it cannot answer.
+
+    MCP's rule is that a client MUST NOT use a capability the server did not declare, and
+    the practical difference is the quality of the answer. Asked anyway, the server replies
+    `-32601`, which `errors.py` faithfully forwards as a JSON-RPC error naming a method the
+    person never typed. Reading the `initialize` block instead turns that into a refusal
+    that names the server and the thing it does not do.
+    """
+    supports = getattr(backend, "supports", None)
+    if supports is not None and not supports(capability):
+        raise CommandRefused(
+            f"/{verb}: MCP server {server!r} declared no {capability} capability in its "
+            "handshake, so it has none to offer."
+        )
 
 
 def _requester(context: TurnContext):

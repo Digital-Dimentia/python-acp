@@ -62,6 +62,41 @@ async def test_list_prompts_get_prompt_and_read_resource_over_stdio() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_servers_capability_block_is_kept_for_supports_to_read() -> None:
+    """MCP's rule runs both ways: a client MUST NOT use a capability the server did not
+    declare. Discarding the block left asking-and-being-refused as the only way to find
+    out, which cannot tell a server with no prompts from one whose listing is broken."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd, env={"MOCK_MCP_CAPABILITIES": "tools,resources"}) as client:
+        await client.initialize()
+        assert client.server_capabilities == {"resources": {}, "tools": {}}
+        assert client.supports("tools") is True
+        assert client.supports("resources") is True
+        assert client.supports("prompts") is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_capability_block_still_means_supported() -> None:
+    """MCP capability values are option blocks, and `{}` -- the commonest form there is --
+    means the feature is present with no options. `bool(block)` would read it as absent."""
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        assert client.server_capabilities["prompts"] == {}
+        assert client.supports("prompts") is True
+
+
+@pytest.mark.asyncio
+async def test_supports_answers_true_before_the_handshake() -> None:
+    """`server_capabilities` is None until initialize, and the honest answer to "may I
+    call this" is not "no". A caller reaching a method before the handshake has a worse
+    problem than a capability check can describe."""
+    client = MCPStdioClient([sys.executable, str(FIXTURE_SERVER)])
+    assert client.server_capabilities is None
+    assert client.supports("prompts") is True
+
+
+@pytest.mark.asyncio
 async def test_call_tool_raises_for_unknown_tool() -> None:
     cmd = [sys.executable, str(FIXTURE_SERVER)]
     async with MCPStdioClient(cmd) as client:

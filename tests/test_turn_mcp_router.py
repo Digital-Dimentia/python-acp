@@ -49,6 +49,7 @@ from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turn_mcp_router import (
+    _BUILTIN_COMMANDS,
     CONVENTION,
     DECLINED_BLOCKS,
     SESSION_CONFIG_OPTIONS,
@@ -60,10 +61,25 @@ from python_acp.turns import TurnContext
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
+#: The commands the executor answers itself, in announcement order. Taken from the
+#: manifest rather than written out, so a test that asserts a whole palette is asserting
+#: *where the built-ins sit* — after the session's tools — rather than re-encoding a list
+#: that would then need editing every time one is added.
+BUILTINS = [command.name for command in _BUILTIN_COMMANDS]
 
-def spec(name: str) -> McpServerStdio:
+
+def spec(name: str, **env: str) -> McpServerStdio:
+    """One fixture server. Keyword arguments become environment variables for *that*
+    subprocess, which is how a session can hold a server declaring the prompts capability
+    beside one that does not — `monkeypatch.setenv` would reach both."""
     return McpServerStdio(
-        name=name, command=sys.executable, args=[str(FIXTURE_SERVER)], env=[EnvVariable(name="X", value="1")]
+        name=name,
+        command=sys.executable,
+        args=[str(FIXTURE_SERVER)],
+        env=[
+            EnvVariable(name="X", value="1"),
+            *(EnvVariable(name=key, value=value) for key, value in env.items()),
+        ],
     )
 
 
@@ -317,8 +333,10 @@ class Harness:
         capabilities: Any = None,
         client: Any = None,
         cwd: str = "/work",
+        server_env: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self.server_names = server_names
+        self.server_env = server_env or {}
         self.capabilities = capabilities
         self.backends = McpBackendRegistry()
         # Deliberately **not** closed on exit, unlike the backends: every test here
@@ -329,7 +347,10 @@ class Harness:
         self.session = SessionRegistry().create(cwd)
 
     async def __aenter__(self) -> Harness:
-        await self.backends.open(self.session.session_id, [spec(n) for n in self.server_names])
+        await self.backends.open(
+            self.session.session_id,
+            [spec(n, **self.server_env.get(n, {})) for n in self.server_names],
+        )
         self.context = TurnContext(self.session, self.client, self.capabilities)  # type: ignore[arg-type]
         self.executor = McpToolRouterExecutor(self.backends, self.terminals)
         return self
@@ -615,12 +636,12 @@ async def test_the_sessions_tools_are_announced_every_turn() -> None:
         await harness.run(block(tool="echo"))
 
     commands = harness.of("available_commands_update")[0].available_commands
-    # The server's own tools first, then the two this executor answers itself. A palette
+    # The server's own tools first, then the ones this executor answers itself. A palette
     # is read from the top, and what the session can *do* outranks how to ask about it.
-    assert [c.name for c in commands] == ["tools/echo", "tools", "invokeTool"]
+    assert [c.name for c in commands] == ["tools/echo", *BUILTINS]
     assert commands[0].description
     # The built-ins carry ACP's only argument shape: one free-text hint.
-    assert commands[-1].input.root.hint
+    assert all(c.input.root.hint for c in commands[1:])
 
 
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
@@ -632,8 +653,7 @@ async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
     assert result.stop_reason == "refusal"
     assert [c.name for c in harness.of("available_commands_update")[0].available_commands] == [
         "tools/echo",
-        "tools",
-        "invokeTool",
+        *BUILTINS,
     ]
 
 
@@ -642,7 +662,7 @@ async def test_commands_from_several_servers_are_qualified_and_ordered() -> None
         await harness.run(block(tool="echo", server="alpha"))
 
     commands = harness.of("available_commands_update")[0].available_commands
-    assert [c.name for c in commands] == ["alpha/echo", "beta/echo", "tools", "invokeTool"]
+    assert [c.name for c in commands] == ["alpha/echo", "beta/echo", *BUILTINS]
 
 
 async def test_a_plan_is_emitted_and_advanced_as_each_tool_runs() -> None:
@@ -762,8 +782,7 @@ async def test_a_declined_block_is_still_echoed_and_still_gets_the_command_list(
     assert harness.of("user_message_chunk") == []
     assert [c.name for c in harness.of("available_commands_update")[0].available_commands] == [
         "tools/echo",
-        "tools",
-        "invokeTool",
+        *BUILTINS,
     ]
 
 
@@ -2185,7 +2204,17 @@ def typed(text: str) -> TextContentBlock:
 
 
 def said(harness: Harness) -> str:
-    return "\n".join(u.content.text for u in harness.of("agent_message_chunk"))
+    """Everything the agent said this turn, joined.
+
+    Skips a chunk whose content is not text: `/promptShow` emits an expanded prompt's
+    blocks through `to_content_block`, so a prompt carrying an image puts an
+    `ImageContentBlock` on this stream and `.text` would raise.
+    """
+    return "\n".join(
+        update.content.text
+        for update in harness.of("agent_message_chunk")
+        if getattr(update.content, "text", None) is not None
+    )
 
 
 def returned(harness: Harness) -> str:
@@ -2324,3 +2353,212 @@ async def test_prose_is_still_refused_and_json_still_runs() -> None:
         ran = await harness.run(block(tool="echo", arguments={"text": "hi"}))
     assert ran.stop_reason == "end_turn"
     assert len(harness.of("tool_call")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Prompts and resources (`pyacp-tc5`)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_prompts_reports_the_servers_prompts_with_their_arguments() -> None:
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/listPrompts"))
+
+    # `ended`, not `refused`: the command did exactly what it was asked to do.
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "1 prompt on 1 server." in text
+    assert "demo/greeting" in text
+    assert "--name" in text and "required" in text
+    assert harness.of("tool_call") == []
+
+
+async def test_list_resources_reports_uri_and_mime_type() -> None:
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/listResources"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "1 resource on 1 server." in text
+    assert "greeting://{name}" in text and "text/plain" in text
+
+
+async def test_prompt_show_expands_the_prompt_and_emits_the_messages() -> None:
+    """The expansion is the *server's* work — a template substitution — which is why it
+    needs no model and `/promptShow` can answer at all."""
+    async with Harness("demo") as harness:
+        result = await harness.run(
+            typed('/promptShow demo/greeting --name "Ada Lovelace"')
+        )
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "demo/greeting — Greeting prompt" in text
+    assert "1 message" in text
+    assert "user:" in text
+    assert "Hello, Ada Lovelace!" in text
+
+
+async def test_prompt_show_resolves_a_bare_prompt_name_on_a_one_server_session() -> None:
+    async with Harness("demo") as harness:
+        await harness.run(typed("/promptShow greeting --name Ada"))
+
+    assert "Hello, Ada!" in said(harness)
+
+
+async def test_prompt_invoke_refuses_and_hands_back_a_prompt_show_that_runs() -> None:
+    """Shipped rather than omitted, on the same principle that has `authenticate` answer
+    `-32000`: a client should discover a boundary, not an absence."""
+    async with Harness("demo") as harness:
+        result = await harness.run(
+            typed("/promptInvoke demo/greeting --name Ada")
+        )
+
+    assert result.stop_reason == "refusal"
+    message = harness.refusal()
+    assert "needs a model" in message
+    assert "/promptShow demo/greeting --name 'Ada'" in message
+    # The JSON convention is not what was missed, so it is not restated.
+    assert CONVENTION not in message
+
+
+async def test_prompt_invoke_reports_a_bad_argument_rather_than_the_missing_model() -> None:
+    """Validating before refusing is what makes the refusal useful: a wrong argument is
+    the error the person actually needs, whichever verb they typed."""
+    async with Harness("demo") as harness:
+        result = await harness.run(
+            typed("/promptInvoke demo/greeting --colour red")
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "no argument --colour" in harness.refusal()
+
+
+async def test_a_missing_required_prompt_argument_is_refused_before_the_server_is_asked() -> None:
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/promptShow demo/greeting"))
+
+    assert result.stop_reason == "refusal"
+    assert "missing required --name" in harness.refusal()
+
+
+async def test_an_unknown_prompt_is_refused_with_the_ones_the_server_offers() -> None:
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/promptShow demo/nope"))
+
+    assert result.stop_reason == "refusal"
+    message = harness.refusal()
+    assert "has no prompt 'nope'" in message
+    assert "It offers: greeting." in message
+    assert "/listPrompts" in message
+
+
+async def test_resource_show_reads_the_resource() -> None:
+    async with Harness("demo") as harness:
+        result = await harness.run(
+            typed("/resourceShow demo greeting://ada")
+        )
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "greeting://ada" in text
+    assert "text/plain" in text
+    assert "Hello, ada!" in text
+
+
+async def test_a_prompt_command_on_a_multi_server_session_needs_a_server() -> None:
+    async with Harness("alpha", "beta") as harness:
+        result = await harness.run(typed("/promptShow greeting"))
+
+    assert result.stop_reason == "refusal"
+    assert "/promptShow alpha/greeting" in harness.refusal()
+
+
+async def test_resource_show_suggests_the_server_as_a_separate_word() -> None:
+    """`/resourceShow alpha/greeting://ada` would be wrong, so the ambiguous case must not
+    print it — hence the separator is a parameter of `_resolve_server`."""
+    async with Harness("alpha", "beta") as harness:
+        result = await harness.run(
+            typed("/resourceShow greeting://ada")
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "/resourceShow alpha greeting://ada" in harness.refusal()
+
+
+async def test_a_server_that_declared_no_prompts_capability_is_named_and_not_asked() -> None:
+    """MCP's rule is that a client MUST NOT use an undeclared capability. Reading the
+    handshake turns a `-32601` naming a method nobody typed into a sentence about the
+    server."""
+    async with Harness(
+        "demo", "files", server_env={"files": {"MOCK_MCP_CAPABILITIES": "tools"}}
+    ) as harness:
+        await harness.run(typed("/listPrompts"))
+
+    text = said(harness)
+    assert "1 prompt on 1 server." in text
+    assert "demo/greeting" in text
+    assert "files declares no prompts capability" in text
+
+
+async def test_showing_a_prompt_on_a_server_that_declared_none_is_refused() -> None:
+    async with Harness(
+        "files", server_env={"files": {"MOCK_MCP_CAPABILITIES": "tools"}}
+    ) as harness:
+        result = await harness.run(
+            typed("/promptShow files/greeting --name Ada")
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "declared no prompts capability" in harness.refusal()
+
+
+async def test_reading_a_resource_on_a_server_that_declared_none_is_refused() -> None:
+    async with Harness(
+        "files", server_env={"files": {"MOCK_MCP_CAPABILITIES": "tools"}}
+    ) as harness:
+        result = await harness.run(
+            typed("/resourceShow files greeting://ada")
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "declared no resources capability" in harness.refusal()
+
+
+async def test_a_session_with_no_prompts_anywhere_says_so_rather_than_looking_broken() -> None:
+    async with Harness(
+        "files", server_env={"files": {"MOCK_MCP_CAPABILITIES": "tools"}}
+    ) as harness:
+        result = await harness.run(typed("/listPrompts"))
+
+    assert result.stop_reason == "end_turn"
+    assert "declares the prompts capability" in said(harness)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [("/listPrompts", "3 prompts on 1 server."), ("/listResources", "3 resources on 1 server.")],
+)
+async def test_a_paged_listing_is_walked_to_exhaustion(
+    monkeypatch: pytest.MonkeyPatch, command: str, expected: str
+) -> None:
+    """`_list_all` is what walks `nextCursor`, and these commands are its only ACP-facing
+    callers — a listing that stopped at page one would look like a short server."""
+    monkeypatch.setenv("MOCK_MCP_LIST_PAGES", "3")
+    async with Harness("demo") as harness:
+        await harness.run(TextContentBlock(type="text", text=command))
+
+    assert expected in said(harness)
+
+
+async def test_the_new_commands_are_announced_so_a_palette_can_offer_them() -> None:
+    """Individual prompts are deliberately *not* announced: MCP keeps tools and prompts in
+    separate namespaces, so per-item entries would need a rule to stop one shadowing the
+    other."""
+    async with Harness("demo") as harness:
+        await harness.run(typed("/listPrompts"))
+
+    names = [c.name for c in harness.of("available_commands_update")[0].available_commands]
+    assert names == ["demo/echo", *BUILTINS]
+    assert "listPrompts" in names and "promptShow" in names and "resourceShow" in names
+    assert "demo/greeting" not in names

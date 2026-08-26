@@ -41,6 +41,11 @@ rather than only while one of our requests is in flight.
   server answered with, and only then sends `notifications/initialized`.
 - `MCPStdioClient.protocol_version`: the revision both sides settled on, or
   `None` before a successful handshake.
+- `MCPStdioClient.server_capabilities`: the block the server declared, kept from the
+  `initialize` result. `None` before the handshake and `{}` for a server that declared
+  nothing — two different facts, which is why the default is not `{}`.
+- `MCPStdioClient.supports(capability)`: whether the server declared it. **Presence** is
+  the whole test, and it answers `True` before the handshake — see "Server Capabilities".
 - `MCPStdioClient._agreed_protocol_version()`: validates the server's answer
   against `_SUPPORTED_MCP_PROTOCOL_VERSIONS` or raises `MCPProtocolError`.
 - `_MCP_PROTOCOL_VERSION` / `_SUPPORTED_MCP_PROTOCOL_VERSIONS`: the revision
@@ -182,6 +187,37 @@ built wrong, rather than trusting every caller to remember not to set it.
 
 An undeclared capability contributes **no key at all**, not a `false`: in MCP,
 absent means unsupported.
+
+## Server Capabilities
+
+The same promise, pointing the other way: a client MUST NOT use a capability the
+*server* did not declare. So `initialize` keeps the block instead of reading the
+protocol version out of the result and dropping the rest.
+
+| Server capability | Unlocks |
+|---|---|
+| `tools` | `tools/list`, `tools/call` |
+| `prompts` | `prompts/list`, `prompts/get` |
+| `resources` | `resources/list`, `resources/read`, `resources/templates/list`, `resources/subscribe` |
+| `logging` | `logging/setLevel`, and `notifications/message` coming back |
+| `completions` | `completion/complete` |
+
+`supports(capability)` is what reads it, and two of its rules are load-bearing:
+
+- **Presence, not truthiness.** MCP capability values are option blocks, and
+  `"prompts": {}` — the commonest form there is — means the feature is present with no
+  options to set. `bool(block)` would read it as unsupported.
+- **`True` before the handshake**, when `server_capabilities` is still `None`. The honest
+  answer to "may I call this" is not "no": a caller reaching a method before `initialize`
+  has a worse problem than a capability check can describe, and refusing here would
+  replace its real error with a misleading one.
+
+Nothing in this module enforces the check — it is a fact the caller reads.
+`turn_mcp_router._require_capability` is the one caller today, and what it buys is the
+quality of the refusal: asked anyway, a server without prompts answers `-32601`, and
+`errors.py` faithfully forwards that as a JSON-RPC error naming a method the person never
+typed. It also separates two things an empty listing cannot: a server that publishes no
+prompts from one that does not implement prompts at all.
 
 ## Protocol Version Negotiation
 

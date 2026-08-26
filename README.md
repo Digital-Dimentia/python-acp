@@ -225,34 +225,75 @@ worse than an error.
 `session/prompt` is served by a **deterministic MCP tool-router** — there is no LLM in
 this runtime, so a prompt does not get interpreted, it gets *routed*.
 
-A prompt is either one of two typed commands or, as it has always been, a JSON object per
-text block.
+A prompt is either one of seven typed commands or, as it has always been, a JSON object
+per text block.
 
-### Two commands for a person
+### Commands for a person
 
-Both are announced in `available_commands`, so a client's slash palette offers them
-without being taught, and both answer with plain multi-line text.
+All seven are announced in `available_commands`, so a client's slash palette offers them
+without being taught, and each answers with plain multi-line text. The leading slash is
+optional on input.
+
+MCP servers publish three kinds of thing, and there is a command family for each.
+
+**Tools** — what the server can *do*.
 
 ```
 /tools
-```
-
-Lists every tool on the session's MCP servers with its parameters, types, which are
-required, and an example call built from what this session actually has. It runs nothing.
-
-```
 /invokeTool demo/echo --text "hello world" --count 3
 ```
 
-Calls one tool with command-line style parameters. The server may be omitted when the
-session opened exactly one. Values are typed from the tool's own `inputSchema` — a
-`string` parameter given `3` stays `"3"` — and a parameter the schema does not declare is
-refused with the list of ones it takes, rather than forwarded to fail server-side. The
-leading slash is optional.
+`/tools` lists every tool with its parameters, types, which are required, and an example
+call built from what this session actually has. It runs nothing.
 
-A typed call builds the same invocation the JSON form builds, so it inherits the session
-mode, the permission prompt, and the on-tool-failure policy identically. See
-[commands.py](src/python_acp/commands.md).
+`/invokeTool` calls one. Values are typed from the tool's own `inputSchema` — a `string`
+parameter given `3` stays `"3"` — and a parameter the schema does not declare is refused
+with the list of ones it takes, rather than forwarded to fail server-side. A typed call
+builds the same invocation the JSON form builds, so it inherits the session mode, the
+permission prompt, and the on-tool-failure policy identically.
+
+**Prompts** — reusable messages the server templates for a model.
+
+```
+/listPrompts
+/promptShow demo/greeting --name "Ada Lovelace"
+/promptInvoke demo/greeting --name "Ada Lovelace"
+```
+
+`/listPrompts` lists them with their arguments. `/promptShow` expands one and shows the
+messages that come back: the substitution is the *server's* work, so it needs no model and
+works here.
+
+`/promptInvoke` is the one command that does not work yet. Acting on an expanded prompt is
+what needs a model, and this bridge has none — so it validates the arguments, refuses with
+the reason, and hands back the `/promptShow` that runs. It is announced rather than
+omitted so a client discovers the boundary instead of an absence.
+
+A prompt argument is always a string: MCP types them as `{[key: string]: string}`, so
+there is no `inputSchema` and no coercion. An argument the prompt does not declare, and a
+missing required one, are both refused by name before the server is asked.
+
+**Resources** — data the server can hand over.
+
+```
+/listResources
+/resourceShow demo greeting://ada
+```
+
+`/listResources` shows uri, name and mime type. `/resourceShow` reads one. Text comes back
+verbatim; a binary resource is reported as `[binary, about N bytes, not shown]` rather
+than pasted into the transcript as base64.
+
+The server may be omitted from any of these when the session opened exactly one. Note the
+shape difference: a prompt is `demo/greeting`, one token split on the slash, while a
+resource is `demo greeting://ada`, two tokens — a URI is full of slashes and cannot be
+carved out of a pair.
+
+A server that declared no `prompts` or `resources` capability in its MCP handshake is
+named in the listing and not asked, rather than producing a `-32601` about a method nobody
+typed.
+
+See [commands.py](src/python_acp/commands.md).
 
 ### The JSON form
 

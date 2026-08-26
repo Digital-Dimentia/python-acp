@@ -47,6 +47,16 @@ _annotated_tools = os.environ.get("MOCK_MCP_ANNOTATED_TOOLS") == "1"
 _protocol_version = os.environ.get("MOCK_MCP_PROTOCOL_VERSION")
 _omit_protocol_version = os.environ.get("MOCK_MCP_OMIT_PROTOCOL_VERSION") == "1"
 
+# Which primitives this server declares in its initialize capability block. All three
+# by default. A comma-separated MOCK_MCP_CAPABILITIES narrows it — `tools` alone is the
+# large population of real MCP servers that publish no prompts and no resources, and it
+# is the case a client has to read the block to distinguish from "declared, and empty".
+# The methods themselves keep answering either way, on purpose: a client that ignores
+# the block and asks anyway must be caught by the *client's* check, not by the fixture
+# refusing to reply.
+_capabilities = os.environ.get("MOCK_MCP_CAPABILITIES", "tools,prompts,resources")
+_capabilities = {name.strip() for name in _capabilities.split(",") if name.strip()}
+
 
 # Cancellation knobs. A stalled request is read and then never answered, so the
 # only thing that ends the client's wait is its own request_timeout — after which
@@ -229,7 +239,7 @@ while True:
             proposed = (req.get("params") or {}).get("protocolVersion")
             result["protocolVersion"] = _protocol_version or proposed or "2024-11-05"
         result["serverInfo"] = {"name": "mock-mcp", "version": "1.0.0"}
-        result["capabilities"] = {"tools": {}, "prompts": {}, "resources": {}}
+        result["capabilities"] = {name: {} for name in sorted(_capabilities)}
         write({"jsonrpc": "2.0", "id": req_id, "result": result})
     elif method == "tools/list":
         write(

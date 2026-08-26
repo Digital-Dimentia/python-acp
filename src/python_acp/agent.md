@@ -177,6 +177,33 @@ splats either into the same parameters, so the only difference that arrives is w
 `value` holds — and `Session.set_config_option` is what knows which of the two the named
 option can take. Two methods would mean writing that check twice.
 
+## Commands are announced where the client already knows the session id
+
+`announce_commands` emits `available_commands_update` from **`session/load` and
+`session/resume` only**, so a client reattaching to a session gets its command palette
+back without having to take a turn first. It goes out *after* `load`'s replay: the replay
+is what happened, and splicing a current listing into it would rewrite the record.
+
+**`session/new` and `session/fork` deliberately do not announce, and this is the boundary
+of the feature.** Both mint an id the client has never seen, and it reaches the client in
+the *response*. A `session/update` sent before that names a session the client cannot
+place, which a correct client drops. Sending it afterwards is not available either:
+`acp.Connection._run_request` awaits the handler and *then* writes the response, with no
+ordered send queue, so a task scheduled from inside the handler races the reply rather
+than following it. ACP has no third option here — `NewSessionResponse` carries
+`sessionId`, `modes` and `configOptions` and no command field, and there is no method for
+a client to ask. `pyacp-obt` holds what a new session would need: a response field the
+protocol does not have, or an extension request the client makes once it holds the id.
+
+Two properties make the announcement safe to add to a working session:
+
+- **Optional on the executor.** `TurnExecutor` declares `available_commands`, but an
+  executor is swappable (D3) and one written before this existed announces nothing rather
+  than raising. Read with `getattr`, like `session_modes`.
+- **Never fatal.** A listing that fails is logged and swallowed. It is a convenience laid
+  on a session that is already open; turning a `tools/list` that timed out into a failed
+  `session/load` would cost the client its session over a palette.
+
 ## Paths are validated here and nowhere else
 
 `cwd` and `additionalDirectories` must be absolute — `-32602` otherwise — and are stored

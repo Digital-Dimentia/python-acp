@@ -586,6 +586,19 @@ class TurnExecutor(Protocol):
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult: ...
 
+    async def available_commands(self, session_id: str) -> list[Any]:
+        """What this session can be asked to do, for `available_commands_update`.
+
+        A coroutine and not a declared attribute, unlike `session_modes` beside it: the
+        answer depends on the *session*, whose MCP servers were named by the client at
+        `session/new` and have to be asked what they publish. Nothing static can know it.
+
+        Called once when a session becomes usable, so a client can populate a palette
+        before the first prompt. A turn announces the same list again, because a turn is
+        where the list can change and where a refusal most needs it.
+        """
+        ...
+
 
 class IdleTurnExecutor:
     """The default: complete the turn immediately, having done nothing.
@@ -608,6 +621,10 @@ class IdleTurnExecutor:
     #: nothing to configure about the nothing.
     session_modes: SessionModeState | None = None
     session_config_options: tuple[Any, ...] = ()
+
+    async def available_commands(self, session_id: str) -> list[Any]:
+        """Nothing, which is the accurate statement: it runs nothing."""
+        return []
 
     async def execute(self, context: TurnContext, prompt: list[Any]) -> TurnResult:
         logger.warning(

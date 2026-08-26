@@ -31,7 +31,7 @@ from typing import Any
 
 from acp import RequestError
 from acp.interfaces import Client
-from acp.helpers import update_current_mode
+from acp.helpers import update_available_commands, update_current_mode
 from acp.schema import (
     AuthenticateResponse,
     ConfigOptionUpdate,
@@ -352,6 +352,14 @@ class PythonAcpAgent:
             # whole path exists to avoid, so the session goes with them.
             await self._sessions.close(session.session_id)
             raise
+        # **No command announcement here, and it is not an oversight.** The client learns
+        # this session's id from the response below, so a `session/update` sent first
+        # names a session it has never heard of and a correct client drops it. Sending it
+        # afterwards is not available either: `acp.Connection._run_request` awaits the
+        # handler and *then* writes the response, with no ordered send queue, so a task
+        # scheduled from in here races the reply rather than following it. `pyacp-obt`
+        # carries the two ways out — a response field ACP does not have, or an extension
+        # request the client makes once it holds the id.
         return NewSessionResponse(
             sessionId=session.session_id,
             modes=session.modes,
@@ -383,6 +391,10 @@ class PythonAcpAgent:
         logger.debug("Replaying %d update(s) for session %s", len(session.history), session_id)
         for update in session.history:
             await self.client.session_update(session_id=session_id, update=update)
+        # After the replay, not inside it: the replayed history is what *happened*, and
+        # splicing a fresh listing into it would rewrite the record. This one describes
+        # the session as it is now, which is why it goes last.
+        await self.announce_commands(session_id)
         return LoadSessionResponse(
             modes=session.modes,
             configOptions=list(session.config_options) or None,
@@ -442,6 +454,7 @@ class PythonAcpAgent:
         except Exception:
             await self._sessions.close(forked.session_id)
             raise
+        # Same ordering problem as `new_session`: the fork's id is news to the client.
         return ForkSessionResponse(
             sessionId=forked.session_id,
             modes=forked.modes,
@@ -472,6 +485,7 @@ class PythonAcpAgent:
         # invalid and unused.
         normalize_roots(cwd, additional_directories)
         session = self._sessions.resume(session_id)
+        await self.announce_commands(session_id)
         return ResumeSessionResponse(
             modes=session.modes,
             configOptions=list(session.config_options) or None,
@@ -522,6 +536,51 @@ class PythonAcpAgent:
         await self.client.session_update(
             session_id=session.session_id,
             update=update_current_mode(session.modes.current_mode_id),
+        )
+
+    async def announce_commands(self, session_id: str) -> None:
+        """Emit `available_commands_update` for a session that has just become usable.
+
+        **Only from `session/load` and `session/resume`.** Both take the session id as a
+        *parameter*, so the client already knows which session an update is about. The
+        paths that mint a new id — `session/new` and `session/fork` — deliberately do not
+        call this: their id reaches the client in the response, and a notification sent
+        before that response names a session the client has never heard of. See the
+        comment in `new_session`, and `pyacp-obt` for what a new session would need.
+
+        What it buys where it does apply: a client that reconnects to an existing session
+        gets its command palette back without having to take a turn first.
+
+        One door, for the same reason as `announce_mode`: a second client attached to the
+        same session, and any later internal change, say it the same way.
+
+        Optional on the executor. `TurnExecutor` declares it, but an executor is
+        swappable (D3) and a third-party one written before this existed is not broken by
+        it — it simply announces nothing, which is what it could honestly say anyway.
+
+        A failure here is logged and swallowed. The list is a convenience laid on top of a
+        session that is already open and working; turning a `tools/list` that timed out
+        into a failed `session/new` would cost the client its session over a palette.
+        """
+        if self._client is None:
+            # No connection, so nobody to notify. `session/new` never needed a client
+            # before this announcement existed — an embedder driving the agent directly
+            # still gets its session, and making a convenience notification the thing
+            # that requires a connection would be a regression dressed as a feature.
+            return
+        build = getattr(self._executor, "available_commands", None)
+        if build is None:
+            return
+        try:
+            commands = await build(session_id)
+        except Exception as exc:  # noqa: BLE001 - see the docstring: never fatal
+            logger.warning(
+                "Could not list commands for session %s: %s", session_id, exc
+            )
+            return
+        await self.client.session_update(
+            session_id=session_id,
+            update=update_available_commands(list(commands)),
         )
 
     def _modes(self) -> SessionModeState | None:

@@ -1165,8 +1165,9 @@ async def test_the_default_executor_is_the_mcp_tool_router() -> None:
     )
 
     assert result.stop_reason == "refusal"
-    # An empty prompt echoes nothing, so the turn's updates are the command list (empty:
-    # this session opened no MCP servers) and the refusal that names the convention.
+    # One command list, from the turn. `session/new` deliberately announces nothing: the
+    # client learns this session's id from the response, so an update sent first would
+    # name a session it has never heard of.
     kinds = [update.session_update for _session_id, update in client.updates]
     assert kinds == ["available_commands_update", "agent_message_chunk"]
     assert '"tool"' in client.updates[-1][1].content.text
@@ -1185,6 +1186,103 @@ async def _lifecycle_agent(**kwargs):
     router = build_agent_router(agent, use_unstable_protocol=True)
     created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
     return agent, router, client, created.session_id
+
+
+async def test_load_announces_the_sessions_commands_after_the_replay() -> None:
+    """A reconnecting client gets its palette back without having to take a turn.
+
+    After the replay, not inside it: the replayed history is what *happened*, and
+    splicing a fresh listing into it would rewrite the record.
+    """
+    agent, router, client, session_id = await _lifecycle_agent()
+    client.updates.clear()
+
+    await router(
+        "session/load", {"cwd": "/work", "sessionId": session_id, "mcpServers": []}, False
+    )
+
+    kinds = [update.session_update for _session_id, update in client.updates]
+    assert kinds[-1] == "available_commands_update"
+
+
+async def test_resume_announces_the_sessions_commands() -> None:
+    """`session/resume` reattaches to a session that is still held — closing it first
+    would delete it, and resume would be `-32602`."""
+    agent, router, client, session_id = await _lifecycle_agent()
+    client.updates.clear()
+
+    await router("session/resume", {"cwd": "/work", "sessionId": session_id}, False)
+
+    kinds = [update.session_update for _session_id, update in client.updates]
+    assert "available_commands_update" in kinds
+
+
+async def test_new_and_fork_announce_nothing_because_the_id_is_news_to_the_client() -> None:
+    """The ordering rule this feature is bounded by.
+
+    `session/new` hands back an id the client has never seen. A `session/update` sent
+    before that response names a session the client cannot place, and a correct client
+    drops it — so the announcement is deliberately absent from both paths that mint an
+    id, and `pyacp-obt` stays open for what a new session would need instead.
+    """
+    agent = make_agent()
+    client = RecordingClient()
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    assert client.updates == [], "nothing may precede the response that names the session"
+
+    await router("session/fork", {"cwd": "/work", "sessionId": created.session_id}, False)
+    assert client.updates == []
+
+
+async def test_an_executor_without_the_hook_is_not_broken_by_it() -> None:
+    """The executor is swappable (D3), so `available_commands` is read defensively: one
+    written before this existed announces nothing rather than raising."""
+
+    class Ancient:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    agent, router, client, session_id = await _lifecycle_agent(executor=Ancient())
+    client.updates.clear()
+
+    await router(
+        "session/load", {"cwd": "/work", "sessionId": session_id, "mcpServers": []}, False
+    )
+
+    assert client.updates == []
+
+
+async def test_a_listing_that_fails_does_not_cost_the_client_its_session() -> None:
+    """The list is a convenience laid on an already-working session. Turning a failed
+    `tools/list` into a failed `session/load` would be a bad trade."""
+
+    class Broken:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        async def available_commands(self, session_id):  # noqa: ANN001, ANN202
+            raise RuntimeError("the server went away")
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    agent, router, client, session_id = await _lifecycle_agent(executor=Broken())
+    client.updates.clear()
+
+    result = await router(
+        "session/load", {"cwd": "/work", "sessionId": session_id, "mcpServers": []}, False
+    )
+
+    assert result == {}, "the session loaded"
+    assert client.updates == []
 
 
 async def test_load_replays_the_sessions_transcript() -> None:

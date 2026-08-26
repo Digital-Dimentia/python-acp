@@ -474,6 +474,13 @@ allowed only when the session has exactly one server. With several, picking the 
 publishes the name would make the same command mean different things as the session's
 servers changed, so it is refused with the candidates.
 
+`available_commands(session_id)` builds the same list for `agent.py` to announce when a
+session is *loaded or resumed*, through the one `_commands_for` both callers share — a
+palette that disagreed with what a turn accepts would be worse than no palette. It does
+not consult `announce-tools`: that option suppresses a notification whose cost is being
+repeated every turn, and a client that suppressed the repetition still needs a first list
+to show.
+
 The parsing, typing and rendering live in [commands.py](commands.md), which has the
 coercion table and the reasoning behind the one row that guesses.
 

@@ -619,22 +619,22 @@ class McpToolRouterExecutor:
         """
         if not _option(context, ANNOUNCE_TOOLS, True):
             return
-        commands: list[AvailableCommand] = []
-        for server in sorted(backends):
-            for tool in await catalogue.listing(server):
-                name = tool.get("name")
-                if not isinstance(name, str):
-                    continue
-                commands.append(
-                    AvailableCommand(
-                        name=f"{server}/{name}",
-                        description=tool.get("description") or f"MCP tool {name!r}",
-                    )
-                )
-        # The built-ins go last, after the server's own tools: a palette is read from the
-        # top, and what the session can *do* is more interesting than how to ask about it.
-        commands.extend(_BUILTIN_COMMANDS)
-        await context.emit(update_available_commands(commands))
+        await context.emit(update_available_commands(await _commands_for(backends, catalogue)))
+
+    async def available_commands(self, session_id: str) -> list[AvailableCommand]:
+        """The session's commands, for the announcement that precedes the first turn.
+
+        Same list the turn announces, built by the same function, because a palette that
+        disagreed with what a turn accepts would be worse than no palette. It costs one
+        `tools/list` per server, paid once when the session becomes usable.
+
+        `announce-tools` is deliberately **not** consulted here. That option turns off a
+        per-turn notification whose cost is being repeated on every turn; this fires once,
+        and a client that suppressed the repetition still needs the first list to have
+        something to show.
+        """
+        backends = self._backends.backends(session_id)
+        return await _commands_for(backends, ToolCatalogue(backends))
 
     async def _list_tools(
         self, context: TurnContext, backends: Any, catalogue: ToolCatalogue
@@ -1366,6 +1366,31 @@ class McpToolRouterExecutor:
 #: Option id to kind, for reading an answer back. Built from `PERMISSION_OPTIONS` so the
 #: two cannot disagree about what an id means.
 _KIND_BY_OPTION: dict[str, str] = {option.option_id: option.kind for option in PERMISSION_OPTIONS}
+
+
+async def _commands_for(backends: Any, catalogue: ToolCatalogue) -> list[AvailableCommand]:
+    """Every MCP tool on the session, then the two built-ins.
+
+    One function with two callers — the per-turn announcement and the one the agent sends
+    when a session opens — so the palette a client is given before its first prompt cannot
+    differ from the one a turn announces.
+    """
+    commands: list[AvailableCommand] = []
+    for server in sorted(backends):
+        for tool in await catalogue.listing(server):
+            name = tool.get("name")
+            if not isinstance(name, str):
+                continue
+            commands.append(
+                AvailableCommand(
+                    name=f"{server}/{name}",
+                    description=tool.get("description") or f"MCP tool {name!r}",
+                )
+            )
+    # The built-ins go last, after the server's own tools: a palette is read from the top,
+    # and what the session can *do* is more interesting than how to ask about it.
+    commands.extend(_BUILTIN_COMMANDS)
+    return commands
 
 
 def _command_in(prompt: list[Any]) -> ListTools | InvokeTool | None:

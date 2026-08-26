@@ -204,9 +204,32 @@ Two platforms are deliberately excluded:
 - `make release-bundle` — build only (no container build of its own; it includes the
   container tar if a previous target left one), tarred to
   `artifacts/python-acp-release-bundle.tar.gz`.
-- `make run` — starts the bridge against `tests/fixtures/mock_mcp_server.py` on
-  `ws://127.0.0.1:8766`. Both the bridge and the MCP subprocess run on
-  `$(VENV_DIR)/bin/python`, so they cannot drift onto different interpreters.
+- `make run` — starts the bridge on `ws://127.0.0.1:8765`, the CLI's own default and the
+  port the README and the container examples advertise; it bound 8766 until `run` moved
+  to the start script, which made every pasted client URL wrong. It does **not** start
+  `tests/fixtures/mock_mcp_server.py` — there is no process-wide MCP server any more, so
+  the demo command is printed for pasting into `session/new`, not executed.
+- `make debug` — the same bind with `--debug`: the WebSocket handshake and every MCP
+  message in both directions.
+- Both run [scripts/start-ws.sh](scripts/start-ws.sh) rather than `$(VENV_DIR)/bin/python`
+  directly, because the script **activates** the venv. The difference only shows one level
+  down: an MCP server a client names in `session/new` as a bare `python` inherits this
+  process's PATH, and without activation it resolves to whatever interpreter the caller
+  had. Both accept `LOG=1` to tee diagnostics to `logs/python-acp-ws.log` (or `LOG=<path>`),
+  and `HOST`/`PORT` as before. The script captures **stderr only**, leaving stdout a clean
+  protocol wire, so it is safe to reuse for `--transport stdio`.
+- **Both mint a fresh access key per start** and print the whole connect string —
+  `ws://127.0.0.1:8765/?key=<secret>` — so the banner is a working example rather than a
+  template to fill in. An existing `PYTHON_ACP_WS_KEY` in the environment is used as-is
+  instead; `NO_KEY=1` starts with none, which loopback permits. The key is **exported,
+  never passed as an argument**, because `argv` is world-readable through `ps` — the same
+  reason the CLI has no `--ws-key` flag (see `ACCESS_KEY_ENV` in
+  [transport_ws.py](src/python_acp/transport_ws.py)). The printed key is percent-encoded,
+  since a key arriving from the environment need not be URL-safe the way a generated one is.
+- A key is **admission control, not encryption.** There is no TLS here: off loopback the
+  key and every message after it cross the network in cleartext, and a query parameter is
+  where secrets end up in access logs. To reach the bridge from another machine, terminate
+  TLS in a reverse proxy and keep the bind on loopback. `pyacp-smj` owns the better answer.
 
 CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make docs-check && make test && make build`
 across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version

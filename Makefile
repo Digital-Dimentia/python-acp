@@ -34,8 +34,25 @@ RELEASE_PLATFORMS := linux/amd64,linux/arm64
 CONTAINER_FLAGS := $(if $(strip $(REQUIRE_CONTAINER)),--require,) \
 	$(if $(strip $(PLATFORMS)),--platform $(strip $(PLATFORMS)),)
 DEMO_MCP_COMMAND ?= $(PYTHON_BIN) tests/fixtures/mock_mcp_server.py
+START_WS := scripts/start-ws.sh
 HOST ?= 127.0.0.1
-PORT ?= 8766
+# 8765 is the CLI's own default and the port the README, the container examples
+# and transport_ws.md all advertise. `run` used to bind 8766 for no reason anyone
+# recorded, which made every copied-and-pasted client URL wrong.
+PORT ?= 8765
+
+# LOG is optional and off by default. LOG=1 takes the start script's default path
+# (logs/python-acp-ws.log); any other value is used as the path itself.
+LOG ?=
+RUN_LOG_FLAG := $(if $(strip $(LOG)),$(if $(filter 1,$(strip $(LOG))),--log,--log=$(strip $(LOG))),)
+
+# NO_KEY=1 runs `run`/`debug` with no access key at all. The default is to mint a
+# fresh one per start, so the URL the banner prints is a complete, working example
+# rather than something to be edited before it can be pasted. On loopback a key is
+# optional -- the server only *refuses* a keyless bind off loopback -- but it costs
+# nothing here and it stops another local account from opening a session, which
+# `session/new` would let it use to run commands as whoever started this.
+NO_KEY ?=
 
 # Opt-in escape hatch for a TLS-intercepting proxy whose CA pip does not trust.
 # Empty by default, so nothing is exported and no verification is relaxed on a
@@ -50,7 +67,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint docs-check test stats stats-check transcripts build wheel sdist container-image print-release-platforms package release-bundle run clean clean-outputs clean-venv distclean
+.PHONY: venv sync install lint docs-check test stats stats-check transcripts build wheel sdist container-image print-release-platforms package release-bundle run debug clean clean-outputs clean-venv distclean
 
 venv: $(VENV_STAMP)
 
@@ -147,13 +164,54 @@ release-bundle: build
 	printf 'Created %s\n' "$(ARTIFACTS_DIR)/python-acp-release-bundle.tar.gz"; \
 	ls -l $(ARTIFACTS_DIR)
 
+## Both `run` and `debug` go through $(START_WS) rather than calling the interpreter
+## directly, because the script *activates* the venv instead of merely running its
+## python. That difference is invisible here and load-bearing one level down: an MCP
+## server a client names in `session/new` as a bare `python` inherits PATH from this
+## process, so without activation it would resolve to whatever interpreter the caller
+## happened to have -- one without this project's dependencies installed.
+##
+## $(1) labels the banner, $(2) is any extra CLI flag. The key is **exported**, never
+## passed as an argument: argv is world-readable through `ps`, so a flag would publish
+## the secret to every other user of the machine at the moment it is meant to protect
+## it. That is the same reasoning that keeps a --ws-key flag out of the CLI; see
+## ACCESS_KEY_ENV in transport_ws.py. An exported empty string reads as "no key", which
+## is exactly what access_key_from_env() does with it.
+define start_bridge
+	@key=""; \
+	if [ -n "$${PYTHON_ACP_WS_KEY:-}" ]; then \
+		key="$$PYTHON_ACP_WS_KEY"; \
+	elif [ -z "$(strip $(NO_KEY))" ]; then \
+		key=$$($(PYTHON_BIN) -c 'import secrets; print(secrets.token_urlsafe(32))'); \
+	fi; \
+	printf 'Starting python-acp$(1)...\n'; \
+	if [ -n "$$key" ]; then \
+		: 'Percent-encode for the URL. A generated key is already URL-safe base64,'; \
+		: 'but one supplied through the environment need not be, and a raw & or'; \
+		: 'space would make the banner print a URL that quietly does not work.'; \
+		: 'Handed over in the environment, not argv, for the reason above.'; \
+		enc=$$(PYACP_RAW_KEY="$$key" $(PYTHON_BIN) -c \
+			'import os, urllib.parse; print(urllib.parse.quote(os.environ["PYACP_RAW_KEY"], safe=""))'); \
+		printf 'Connect to: ws://$(HOST):$(PORT)/?key=%s\n' "$$enc"; \
+	else \
+		printf 'Connect to: ws://$(HOST):$(PORT)   (no key; loopback clients only)\n'; \
+	fi; \
+	printf 'Name your MCP servers in session/new; there is no process-wide one.\n'; \
+	printf 'The demo server is: $(DEMO_MCP_COMMAND)\n'; \
+	printf 'Press Ctrl+C to stop.\n'; \
+	export PYTHON_ACP_WS_KEY="$$key"; \
+	exec $(START_WS) --host $(HOST) --port $(PORT) $(2) $(RUN_LOG_FLAG)
+endef
+
 run: venv
-	@printf 'Starting python-acp...\n'
-	@printf 'Connect to: ws://$(HOST):$(PORT)\n'
-	@printf 'Name your MCP servers in session/new; there is no process-wide one.\n'
-	@printf 'The demo server is: $(DEMO_MCP_COMMAND)\n'
-	@printf 'Press Ctrl+C to stop.\n'
-	$(PYTHON_BIN) -m python_acp.cli --host $(HOST) --port $(PORT)
+	$(call start_bridge,,)
+
+## Same bind, with --debug: the WebSocket handshake and every MCP message in both
+## directions, each line now naming the logger that emitted it. Add LOG=1 to keep a
+## copy in logs/python-acp-ws.log, since debug output scrolls past faster than it can
+## be read.
+debug: venv
+	$(call start_bridge, (debug),--debug)
 
 ## Build outputs and tool caches. **Leaves the virtual environment alone.**
 ##

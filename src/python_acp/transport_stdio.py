@@ -68,6 +68,15 @@ async def run_stdio(agent: Agent, *, use_unstable_protocol: bool = True) -> None
             use_unstable_protocol=use_unstable_protocol,
         )
 
+    # `run_agent` returns on EOF and on nothing else, so reaching this line means the
+    # client hung up. Saying so is worth a line: without it a clean shutdown is
+    # indistinguishable from a crash at the far end — the process simply stops, and the
+    # obvious reading is that the *agent* died mid-conversation. It is almost always the
+    # parent closing the write end of the pipe (`communicate()`, `child.stdin.end()`, a
+    # `stdin=DEVNULL` spawn). An exception propagates instead of arriving here, which is
+    # what keeps this from claiming a graceful exit for a failed one.
+    logger.info("client closed stdin; python-acp exiting")
+
 
 @contextlib.contextmanager
 def _stdout_reserved() -> Iterator[None]:

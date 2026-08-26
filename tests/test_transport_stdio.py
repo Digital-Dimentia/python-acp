@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -328,6 +330,46 @@ def test_stdio_is_selectable() -> None:
 def test_an_unknown_transport_is_rejected() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--mcp-command", "echo", "--transport", "carrier-pigeon"])
+
+
+def test_a_clean_shutdown_says_what_ended_it() -> None:
+    """EOF on stdin is a normal exit, and it has to look like one from the outside.
+
+    `run_agent` returns on EOF and on nothing else, so the process simply stops — which
+    from a parent reads exactly like the agent dying mid-conversation, and was reported
+    as "the agent exits after initialize" when the parent was closing the pipe itself.
+    The line costs nothing and turns that into a one-look diagnosis; a real failure
+    propagates its exception instead of reaching it.
+
+    Driven with a plain `subprocess.run` rather than the SDK client because what is under
+    test is the *last* thing the process does, and only stderr and the exit status carry
+    it.
+    """
+    request = (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}},
+            }
+        )
+        + "\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, *AGENT_ARGV],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "client closed stdin; python-acp exiting" in result.stderr
+    # ...and it said so *after* serving, not instead of it.
+    assert result.stderr.index("serving ACP over stdio") < result.stderr.index("closed stdin")
+    assert json.loads(result.stdout.strip())["id"] == 1
 
 
 def test_logging_is_configured_onto_stderr() -> None:

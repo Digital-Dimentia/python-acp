@@ -211,14 +211,31 @@ Two platforms are deliberately excluded:
   the demo command is printed for pasting into `session/new`, not executed.
 - `make debug` — the same bind with `--debug`: the WebSocket handshake and every MCP
   message in both directions.
-- Both run [scripts/start-ws.sh](scripts/start-ws.sh) rather than `$(VENV_DIR)/bin/python`
+- `make stdio` — the same agent on `--transport stdio`, speaking ACP on make's own stdin
+  and stdout, which is how an editor spawns it and the quickest way to replay a client's
+  handshake by hand. `DEBUG=1` adds `--debug`. It prints its banner to **stderr** and has
+  no `venv` prerequisite: the bootstrap logs to stdout, and under this transport stdout is
+  the protocol wire, so the target runs that step itself with stdout folded onto stderr.
+  It mints no access key — a key is admission control for a socket, and there is no socket.
+- **All three are launchable from any working directory**, because another program starts
+  them — an editor spawning the agent, a supervisor bringing up the bridge — and it may
+  reach this file as `make -f /path/to/python-acp/Makefile run`. `make -C` chdirs; `-f`
+  does not, and every path in the Makefile is relative. So each recipe `cd`s to
+  `$(MAKEFILE_DIR)` first (`stdio` per line, since make gives every recipe line its own
+  shell), and **none of the three has a `venv` prerequisite**: make resolves a
+  prerequisite's own paths against the *caller's* cwd, so `venv` failed with `No rule to
+  make target 'pyproject.toml'` before any recipe could run, which no chdir inside a
+  recipe can fix. They call `$(ENSURE_VENV)` after the chdir instead — a stamp check per
+  launch. `tests/test_makefile_targets.py` covers this and the `stdio` stdout rule.
+- All three also run [scripts/start-ws.sh](scripts/start-ws.sh) rather than `$(VENV_DIR)/bin/python`
   directly, because the script **activates** the venv. The difference only shows one level
   down: an MCP server a client names in `session/new` as a bare `python` inherits this
   process's PATH, and without activation it resolves to whatever interpreter the caller
-  had. Both accept `LOG=1` to tee diagnostics to `logs/python-acp-ws.log` (or `LOG=<path>`),
-  and `HOST`/`PORT` as before. The script captures **stderr only**, leaving stdout a clean
-  protocol wire, so it is safe to reuse for `--transport stdio`.
-- **Both mint a fresh access key per start** and print the whole connect string —
+  had. All accept `LOG=1` to tee diagnostics to `logs/python-acp-ws.log` (or `LOG=<path>`);
+  `HOST`/`PORT` apply to `run` and `debug` only. The script captures **stderr only**,
+  leaving stdout a clean protocol wire — which is what makes it reusable for
+  `--transport stdio` rather than needing a second script.
+- **`run` and `debug` mint a fresh access key per start** and print the whole connect string —
   `ws://127.0.0.1:8765/?key=<secret>` — so the banner is a working example rather than a
   template to fill in. An existing `PYTHON_ACP_WS_KEY` in the environment is used as-is
   instead; `NO_KEY=1` starts with none, which loopback permits. The key is **exported,

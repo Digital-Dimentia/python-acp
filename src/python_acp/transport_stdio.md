@@ -54,6 +54,27 @@ and leave the client hearing nothing at all. On POSIX the transport holds the pi
 mode — because this backstop should never be the only thing standing between a banner
 and the wire.
 
+## Shutdown is silent unless it says so
+
+`run_agent` returns when the reader hits EOF, and on nothing else — an error propagates
+instead. So the one place `run_stdio` can reach after it is a *clean* shutdown, and it
+logs one line there:
+
+```
+client closed stdin; python-acp exiting
+```
+
+Without it the process just stops. From the parent that is indistinguishable from the
+agent crashing mid-conversation, and the natural reading is the wrong one: it was almost
+certainly the parent closing the write end of the pipe — `communicate()`, Node's
+`child.stdin.end()`, a `stdin=DEVNULL` spawn, or a shell pipeline that hangs up after
+one request. The agent lives exactly as long as stdin does.
+
+Read it with the exit status. **Exit 0 plus that line is a normal hangup**; a failure
+exits non-zero with a traceback and never reaches the line at all.
+`tests/test_transport_stdio.py::test_a_clean_shutdown_says_what_ended_it` pins both
+halves, including the ordering against the startup line.
+
 ## Buffer limit
 
 `_STDIO_BUFFER_LIMIT_BYTES` is 50 MiB, mirroring the SDK's own default for `run_agent`.

@@ -100,6 +100,21 @@ python-acp --transport stdio
 `--host` and `--port` are ignored in this mode, **stdout carries the JSON-RPC wire and
 nothing else**, and all diagnostics go to stderr.
 
+From a checkout, `make stdio` is the same thing through the repo venv — `DEBUG=1` adds
+`--debug`, `LOG=1` tees the diagnostics to `logs/python-acp-ws.log`:
+
+```bash
+make stdio DEBUG=1
+```
+
+`run`, `debug` and `stdio` can all be started from any working directory — they chdir to
+the Makefile's own directory before doing anything, so a program that launches the agent
+can point at the file from wherever it happens to be:
+
+```bash
+make -f /path/to/python-acp/Makefile stdio
+```
+
 The agent serves `initialize`, the full session lifecycle (`new`, `prompt`, `cancel`,
 `load`, `list`, `fork`, `resume`, `close`), and refuses `authenticate`.
 **Every routed ACP method is implemented** — nothing answers `-32601` any more except a

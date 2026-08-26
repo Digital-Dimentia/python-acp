@@ -12,6 +12,26 @@ VENV_DIR ?= .venv
 PYTHON_BIN := $(VENV_DIR)/bin/python
 VENV_STAMP := $(VENV_DIR)/.python-acp-venv.json
 VENV_BOOTSTRAP := scripts/venv_bootstrap.py
+# The directory holding this Makefile, resolved absolutely and computed before any
+# include could move MAKEFILE_LIST's last word. `run`, `debug` and `stdio` are launched
+# by *other programs* -- an editor spawning the agent, a supervisor starting the bridge
+# -- which pick their own cwd and may reach this file as
+# `make -f /path/to/python-acp/Makefile run`. `make -C` chdirs; `-f` does not, so every
+# relative path here (`scripts/`, `.venv/`) would resolve against the caller's directory
+# instead. See ENSURE_VENV and the three recipes.
+MAKEFILE_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+# Spelled once because the launch targets run the same step themselves (see ENSURE_VENV
+# and the `stdio` recipe); two copies of this line would drift.
+VENV_BOOTSTRAP_CMD = $(PYTHON) $(VENV_BOOTSTRAP) --venv-dir $(VENV_DIR) --python $(PYTHON) $(VENV_FLAGS)
+
+# What `run`, `debug` and `stdio` use *instead of* a `venv` prerequisite. make resolves a
+# prerequisite -- and the prerequisites of that prerequisite -- against its own cwd, so
+# `make -f /path/to/python-acp/Makefile run` from elsewhere dies on `No rule to make
+# target 'pyproject.toml', needed by '.venv/.python-acp-venv.json'` before a single
+# recipe line runs, and no amount of chdir'ing inside the recipe can help. Doing it here
+# costs a stamp check per launch and buys a target another program can call from any
+# directory. The other targets keep the prerequisite: nothing launches `make test`.
+ENSURE_VENV = cd '$(MAKEFILE_DIR)' && $(VENV_BOOTSTRAP_CMD)
 BUILD_DIR := dist
 ARTIFACTS_DIR := artifacts
 CONTAINER_SCRIPT := scripts/container_image.py
@@ -46,6 +66,12 @@ PORT ?= 8765
 LOG ?=
 RUN_LOG_FLAG := $(if $(strip $(LOG)),$(if $(filter 1,$(strip $(LOG))),--log,--log=$(strip $(LOG))),)
 
+# DEBUG=1 adds --debug to `stdio`. The ws side spells that as a second target
+# (`run` / `debug`) because the two differ in the banner they print as well; over
+# stdio there is no banner on stdout to differ in, so a knob is the whole story.
+DEBUG ?=
+STDIO_DEBUG_FLAG := $(if $(strip $(DEBUG)),--debug,)
+
 # NO_KEY=1 runs `run`/`debug` with no access key at all. The default is to mint a
 # fresh one per start, so the URL the banner prints is a complete, working example
 # rather than something to be edited before it can be pasted. On loopback a key is
@@ -67,7 +93,7 @@ endif
 OFFLINE ?=
 VENV_FLAGS := $(if $(strip $(OFFLINE)),--offline,)
 
-.PHONY: venv sync install lint docs-check test stats stats-check transcripts build wheel sdist container-image print-release-platforms package release-bundle run debug clean clean-outputs clean-venv distclean
+.PHONY: venv sync install lint docs-check test stats stats-check transcripts build wheel sdist container-image print-release-platforms package release-bundle run debug stdio clean clean-outputs clean-venv distclean
 
 venv: $(VENV_STAMP)
 
@@ -75,7 +101,7 @@ venv: $(VENV_STAMP)
 # built for. It is why `make test` no longer runs `pip install` (and therefore
 # no longer needs the network) on every invocation.
 $(VENV_STAMP): pyproject.toml $(VENV_BOOTSTRAP)
-	$(PYTHON) $(VENV_BOOTSTRAP) --venv-dir $(VENV_DIR) --python $(PYTHON) $(VENV_FLAGS)
+	$(VENV_BOOTSTRAP_CMD)
 
 # Force a dependency install even when the stamp is current (dependencies
 # changed outside pyproject.toml, or a half-finished install needs repairing).
@@ -177,8 +203,15 @@ release-bundle: build
 ## it. That is the same reasoning that keeps a --ws-key flag out of the CLI; see
 ## ACCESS_KEY_ENV in transport_ws.py. An exported empty string reads as "no key", which
 ## is exactly what access_key_from_env() does with it.
+##
+## The whole body is one shell command, so the leading `cd $(MAKEFILE_DIR)` covers every
+## line of it -- unlike `stdio`, which needs one per line. It is here for the same reason
+## it is there: these targets are launched by other programs, which choose their own cwd
+## and may reach this file as `make -f /path/to/python-acp/Makefile run`. `-f` does not
+## chdir, and `$(START_WS)`, `$(PYTHON_BIN)` and `$(VENV_DIR)` are all relative.
 define start_bridge
-	@key=""; \
+	@cd '$(MAKEFILE_DIR)' || exit 1; \
+	key=""; \
 	if [ -n "$${PYTHON_ACP_WS_KEY:-}" ]; then \
 		key="$$PYTHON_ACP_WS_KEY"; \
 	elif [ -z "$(strip $(NO_KEY))" ]; then \
@@ -203,15 +236,47 @@ define start_bridge
 	exec $(START_WS) --host $(HOST) --port $(PORT) $(2) $(RUN_LOG_FLAG)
 endef
 
-run: venv
+run:
+	@$(ENSURE_VENV)
 	$(call start_bridge,,)
 
 ## Same bind, with --debug: the WebSocket handshake and every MCP message in both
 ## directions, each line now naming the logger that emitted it. Add LOG=1 to keep a
 ## copy in logs/python-acp-ws.log, since debug output scrolls past faster than it can
 ## be read.
-debug: venv
+debug:
+	@$(ENSURE_VENV)
 	$(call start_bridge, (debug),--debug)
+
+## `stdio` speaks ACP on *this* process's stdin and stdout -- the transport an editor
+## uses when it spawns the agent itself, and the one to reach for when reproducing a
+## client's handshake by hand. Add DEBUG=1 for --debug, LOG=1 to keep a copy of the
+## diagnostics in logs/python-acp-ws.log.
+##
+## Two things the ws targets do are deliberately absent:
+##
+##   - **Nothing is written to stdout.** stdout is the protocol wire here (decision B6),
+##     and one stray byte on it desynchronizes the client, so the banner goes to stderr
+##     -- and there is no `venv` prerequisite, because the bootstrap logs to stdout and
+##     make would run it *before* the redirection below could catch it. The same step
+##     runs here with stdout folded onto stderr instead. It is cheap to repeat: the
+##     script re-checks the stamp itself and skips pip, which is what lets this be
+##     unconditional where the ws targets lean on make's timestamp rule.
+##   - **No access key is minted.** A key is admission control for a socket and there is
+##     no socket; whoever can write to this stdin is already the parent process.
+##
+## Both commands `cd $(MAKEFILE_DIR)` first, and each needs its own: make runs every
+## recipe line in a fresh shell, so a chdir does not carry. The launched agent then
+## inherits that cwd through the start script, which chdirs to the same place -- an MCP
+## server a session names by a relative path, and `--log` with a relative one, resolve
+## against the repo rather than against whatever directory the editor happened to be in.
+stdio:
+	@$(ENSURE_VENV) 1>&2
+	@printf 'Starting python-acp (stdio$(if $(strip $(DEBUG)), debug,))...\n' >&2
+	@printf 'ACP on stdin/stdout; diagnostics on stderr. Ctrl+C (or EOF) to stop.\n' >&2
+	@printf 'Name your MCP servers in session/new; there is no process-wide one.\n' >&2
+	@printf 'The demo server is: $(DEMO_MCP_COMMAND)\n' >&2
+	@cd '$(MAKEFILE_DIR)' && exec $(START_WS) --transport stdio $(STDIO_DEBUG_FLAG) $(RUN_LOG_FLAG)
 
 ## Build outputs and tool caches. **Leaves the virtual environment alone.**
 ##

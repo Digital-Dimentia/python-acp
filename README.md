@@ -29,6 +29,7 @@
   - [turns.py](src/python_acp/turns.md)
   - [turn_mcp_router.py](src/python_acp/turn_mcp_router.md)
   - [cli.py](src/python_acp/cli.md)
+  - [commands.py](src/python_acp/commands.md)
   - [elicitation.py](src/python_acp/elicitation.md)
   - [mcp_content.py](src/python_acp/mcp_content.md)
   - [mcp_registry.py](src/python_acp/mcp_registry.md)
@@ -222,8 +223,40 @@ worse than an error.
 ### Running a tool
 
 `session/prompt` is served by a **deterministic MCP tool-router** — there is no LLM in
-this runtime, so a prompt does not get interpreted, it gets *routed*. Each text content
-block must be a JSON object naming an MCP tool:
+this runtime, so a prompt does not get interpreted, it gets *routed*.
+
+A prompt is either one of two typed commands or, as it has always been, a JSON object per
+text block.
+
+### Two commands for a person
+
+Both are announced in `available_commands`, so a client's slash palette offers them
+without being taught, and both answer with plain multi-line text.
+
+```
+/tools
+```
+
+Lists every tool on the session's MCP servers with its parameters, types, which are
+required, and an example call built from what this session actually has. It runs nothing.
+
+```
+/invokeTool demo/echo --text "hello world" --count 3
+```
+
+Calls one tool with command-line style parameters. The server may be omitted when the
+session opened exactly one. Values are typed from the tool's own `inputSchema` — a
+`string` parameter given `3` stays `"3"` — and a parameter the schema does not declare is
+refused with the list of ones it takes, rather than forwarded to fail server-side. The
+leading slash is optional.
+
+A typed call builds the same invocation the JSON form builds, so it inherits the session
+mode, the permission prompt, and the on-tool-failure policy identically. See
+[commands.py](src/python_acp/commands.md).
+
+### The JSON form
+
+Each text content block is a JSON object naming an MCP tool:
 
 ```json
 {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {

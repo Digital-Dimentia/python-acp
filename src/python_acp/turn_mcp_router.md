@@ -453,6 +453,30 @@ Constructed with the `McpBackendRegistry`, not by reading one off `TurnContext`.
 directly, so the context does not widen for one executor's dependency. Servers were opened
 **and handshaked** during `session/new`, so every client here is live.
 
+## Two typed commands sit in front of the JSON convention
+
+`/tools` and `/invokeTool` are recognised before the JSON parse, in `execute`, and only
+when the prompt is **a single text block**. A multi-block prompt is a composed request
+from a program; treating its first block as a command would silently drop the rest, which
+is a much worse failure than declining to recognise it.
+
+`/tools` answers from the turn's own `ToolCatalogue`, so it costs no `tools/list` beyond
+the one the announcement already paid, and ends the turn with `end_turn` — the turn did
+what it was asked, and `refusal` would be the wrong stop reason for a command that worked.
+
+`/invokeTool` builds **the same `Invocation`** the JSON path builds. That is the whole
+design: the plan entry, the permission prompt, the session mode, the `kind` from the
+server's annotations, and the on-tool-failure policy are all downstream of `Invocation`,
+so a typed call inherits them without knowing they exist and cannot drift from them.
+
+Server resolution is `_resolve_server`. `server/tool` names it; a bare tool name is
+allowed only when the session has exactly one server. With several, picking the first that
+publishes the name would make the same command mean different things as the session's
+servers changed, so it is refused with the candidates.
+
+The parsing, typing and rendering live in [commands.py](commands.md), which has the
+coercion table and the reasoning behind the one row that guesses.
+
 ## Main symbols
 
 | Symbol | Purpose |

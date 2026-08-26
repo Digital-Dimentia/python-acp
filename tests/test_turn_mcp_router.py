@@ -615,8 +615,12 @@ async def test_the_sessions_tools_are_announced_every_turn() -> None:
         await harness.run(block(tool="echo"))
 
     commands = harness.of("available_commands_update")[0].available_commands
-    assert [c.name for c in commands] == ["tools/echo"]
+    # The server's own tools first, then the two this executor answers itself. A palette
+    # is read from the top, and what the session can *do* outranks how to ask about it.
+    assert [c.name for c in commands] == ["tools/echo", "tools", "invokeTool"]
     assert commands[0].description
+    # The built-ins carry ACP's only argument shape: one free-text hint.
+    assert commands[-1].input.root.hint
 
 
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
@@ -627,7 +631,9 @@ async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
 
     assert result.stop_reason == "refusal"
     assert [c.name for c in harness.of("available_commands_update")[0].available_commands] == [
-        "tools/echo"
+        "tools/echo",
+        "tools",
+        "invokeTool",
     ]
 
 
@@ -636,7 +642,7 @@ async def test_commands_from_several_servers_are_qualified_and_ordered() -> None
         await harness.run(block(tool="echo", server="alpha"))
 
     commands = harness.of("available_commands_update")[0].available_commands
-    assert [c.name for c in commands] == ["alpha/echo", "beta/echo"]
+    assert [c.name for c in commands] == ["alpha/echo", "beta/echo", "tools", "invokeTool"]
 
 
 async def test_a_plan_is_emitted_and_advanced_as_each_tool_runs() -> None:
@@ -755,7 +761,9 @@ async def test_a_declined_block_is_still_echoed_and_still_gets_the_command_list(
     # Nothing to echo — the echo is text-only — but the client still learns what exists.
     assert harness.of("user_message_chunk") == []
     assert [c.name for c in harness.of("available_commands_update")[0].available_commands] == [
-        "tools/echo"
+        "tools/echo",
+        "tools",
+        "invokeTool",
     ]
 
 
@@ -2164,3 +2172,155 @@ async def test_a_session_with_no_servers_says_the_same_thing() -> None:
     assert result.stop_reason == "refusal"
     assert "opened no MCP servers" in harness.refusal()
     assert "'env'" in harness.refusal()
+
+
+# ---------------------------------------------------------------------------
+# `/tools` and `/invokeTool`: the same machinery, reachable by hand (commands.py)
+# ---------------------------------------------------------------------------
+
+
+def typed(text: str) -> TextContentBlock:
+    """A prompt someone typed, as opposed to `block()`, which a program composed."""
+    return TextContentBlock(type="text", text=text)
+
+
+def said(harness: Harness) -> str:
+    return "\n".join(u.content.text for u in harness.of("agent_message_chunk"))
+
+
+def returned(harness: Harness) -> str:
+    """What the tools actually sent back, which rides `tool_call_update`, not a message."""
+    texts = []
+    for update in harness.of("tool_call_update"):
+        for item in update.content or []:
+            text = getattr(getattr(item, "content", None), "text", None)
+            if isinstance(text, str):
+                texts.append(text)
+    return "\n".join(texts)
+
+
+async def test_slash_tools_lists_the_sessions_tools_with_their_parameters() -> None:
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/tools"))
+
+    assert result.stop_reason == "end_turn"
+    listing = said(harness)
+    assert "tools/echo" in listing
+    assert "Echoes text" in listing
+    # The parameter spec is the point of the command: the announcement already carries
+    # the name and description, and nothing before this carried the arguments.
+    assert "--text" in listing
+    assert "<string>" in listing
+    assert "required" in listing
+    # It answered a question; it did not call anything.
+    assert harness.tool_calls() == []
+
+
+async def test_tools_is_accepted_without_the_slash() -> None:
+    """A client filling its composer from `available_commands` sends the bare name."""
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("tools"))
+
+    assert result.stop_reason == "end_turn"
+    assert "tools/echo" in said(harness)
+
+
+async def test_slash_tools_on_a_session_with_no_servers_says_how_to_add_one() -> None:
+    """"No tools" and "no servers" are different problems, and only one is the reader's."""
+    async with Harness() as harness:
+        result = await harness.run(typed("/tools"))
+
+    assert result.stop_reason == "end_turn"
+    answer = said(harness)
+    assert "no MCP servers" in answer
+    assert "session/new" in answer
+
+
+async def test_invoketool_calls_the_tool_and_reports_it_like_any_other_invocation() -> None:
+    async with Harness("tools") as harness:
+        result = await harness.run(typed('/invokeTool tools/echo --text "hello world"'))
+
+    assert result.stop_reason == "end_turn"
+    calls = harness.of("tool_call")
+    assert len(calls) == 1, "a typed call is reported exactly like a JSON one"
+    # The result rides `tool_call_update`, exactly as it does for a JSON invocation --
+    # which is the point: the command builds the same `Invocation` and nothing downstream
+    # can tell the two apart.
+    assert "hello world" in returned(harness)
+
+
+async def test_invoketool_takes_a_bare_tool_name_when_there_is_one_server() -> None:
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/invokeTool echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    assert len(harness.of("tool_call")) == 1
+
+
+async def test_invoketool_refuses_a_bare_name_when_several_servers_could_answer() -> None:
+    """Picking the first server that happens to publish the name would make the same
+    command mean different things as the session's servers changed."""
+    async with Harness("alpha", "beta") as harness:
+        result = await harness.run(typed("/invokeTool echo --text hi"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "alpha" in answer and "beta" in answer
+    assert harness.tool_calls() == []
+
+
+async def test_invoketool_names_the_tools_it_does_have_when_the_name_is_wrong() -> None:
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/invokeTool tools/ecoh --text hi"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "echo" in answer, "a refusal that lists the alternatives is actionable"
+    assert harness.tool_calls() == []
+
+
+async def test_invoketool_refuses_a_parameter_the_schema_does_not_declare() -> None:
+    """Forwarding a typo would return someone else's validation error about a tool the
+    reader named correctly."""
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/invokeTool tools/echo --txet hi"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "--txet" in answer
+    assert "--text" in answer, "the refusal names what it does take"
+    assert harness.tool_calls() == []
+
+
+async def test_invoketool_refuses_a_missing_required_parameter() -> None:
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/invokeTool tools/echo"))
+
+    assert result.stop_reason == "refusal"
+    assert "--text" in said(harness)
+    assert harness.tool_calls() == []
+
+
+async def test_a_declared_string_parameter_is_not_guessed_into_a_number() -> None:
+    """The schema is what makes typing a fact rather than a guess: `echo.text` is a
+    string, so `3` must reach the server as "3" and not 3."""
+    async with Harness("tools") as harness:
+        await harness.run(typed("/invokeTool tools/echo --text 3"))
+        typed_call = returned(harness)
+
+    # The fixture echoes `text` back verbatim, so a coerced `3` would come back as the
+    # JSON number and fail the server's own string schema before that.
+    assert typed_call == "3"
+
+
+async def test_prose_is_still_refused_and_json_still_runs() -> None:
+    """The command layer is additive: text that is not a command takes the path it took
+    before this module existed."""
+    async with Harness("tools") as harness:
+        refused = await harness.run(typed("please echo something"))
+    assert refused.stop_reason == "refusal"
+
+    async with Harness("tools") as harness:
+        ran = await harness.run(block(tool="echo", arguments={"text": "hi"}))
+    assert ran.stop_reason == "end_turn"
+    assert len(harness.of("tool_call")) == 1

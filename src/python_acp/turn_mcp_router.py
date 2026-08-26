@@ -178,6 +178,8 @@ from acp.helpers import (
 )
 from acp.schema import (
     AvailableCommand,
+    AvailableCommandInput,
+    UnstructuredCommandInput,
     EnvVariable,
     PermissionOption,
     SessionConfigOptionBoolean,
@@ -194,6 +196,18 @@ from python_acp.mcp_content import to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.mcp_tools import ToolCatalogue
+from python_acp.commands import (
+    INVOKE_TOOL,
+    INVOKE_TOOL_HINT,
+    LIST_TOOLS,
+    LIST_TOOLS_HINT,
+    CommandError,
+    InvokeTool,
+    ListTools,
+    coerce_arguments,
+    parse_command,
+    render_tool_listing,
+)
 from python_acp.paths import PathConstraintError, require_contained
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turns import Gate, TurnContext, TurnResult
@@ -244,6 +258,17 @@ class PromptConventionError(ValueError):
     #: the convention wrong; false when the prompt was written correctly and the answer is
     #: still no, where restating the convention would only misdirect.
     explains_convention: bool = True
+
+
+class CommandRefused(PromptConventionError):
+    """A `/tools` or `/invokeTool` that was recognised and then found to be wrong.
+
+    Refused on the same path as any other bad prompt, but with the JSON convention footer
+    suppressed: someone who typed a slash command is not reaching for the JSON convention,
+    and `commands.py` has already said what the right syntax is.
+    """
+
+    explains_convention = False
 
 
 class UnsupportedByClientError(PromptConventionError):
@@ -377,6 +402,23 @@ SESSION_MODES = SessionModeState(
 
 
 #: Config option ids.
+#: The two commands this executor answers itself, announced beside the session's MCP
+#: tools so a client's palette shows them without being taught. `input` is ACP's only
+#: argument shape -- `UnstructuredCommandInput`, a single free-text hint -- so the syntax
+#: is a display string rather than anything the client can validate. See `commands.py`.
+_BUILTIN_COMMANDS: tuple[AvailableCommand, ...] = (
+    AvailableCommand(
+        name=LIST_TOOLS,
+        description="List this session's MCP tools with their parameters",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=LIST_TOOLS_HINT)),
+    ),
+    AvailableCommand(
+        name=INVOKE_TOOL,
+        description="Call one tool with command-line style parameters",
+        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=INVOKE_TOOL_HINT)),
+    ),
+)
+
 ANNOUNCE_TOOLS = "announce-tools"
 ON_TOOL_FAILURE = "on-tool-failure"
 
@@ -495,7 +537,13 @@ class McpToolRouterExecutor:
         await self._announce_tools(context, backends, catalogue)
 
         try:
-            invocations = self._parse(context, prompt, backends)
+            command = _command_in(prompt)
+            if isinstance(command, ListTools):
+                return await self._list_tools(context, backends, catalogue)
+            if isinstance(command, InvokeTool):
+                invocations = [await self._from_command(command, backends, catalogue)]
+            else:
+                invocations = self._parse(context, prompt, backends)
         except PromptConventionError as exc:
             return await self._refuse(context, exc)
 
@@ -583,7 +631,67 @@ class McpToolRouterExecutor:
                         description=tool.get("description") or f"MCP tool {name!r}",
                     )
                 )
+        # The built-ins go last, after the server's own tools: a palette is read from the
+        # top, and what the session can *do* is more interesting than how to ask about it.
+        commands.extend(_BUILTIN_COMMANDS)
         await context.emit(update_available_commands(commands))
+
+    async def _list_tools(
+        self, context: TurnContext, backends: Any, catalogue: ToolCatalogue
+    ) -> TurnResult:
+        """Answer `/tools` with the listing, and end the turn without running anything.
+
+        `TurnResult.ended()` rather than `refused()`: the turn did exactly what it was
+        asked to do. Refusing would be the wrong stop reason for a command that worked.
+
+        The listing comes from the same per-turn `ToolCatalogue` the announcement uses, so
+        asking for it costs no extra `tools/list` beyond the one the turn already paid.
+        """
+        listings: dict[str, list[dict[str, Any]]] = {}
+        for server in sorted(backends):
+            listings[server] = list(await catalogue.listing(server))
+        await context.emit(update_agent_message_text(render_tool_listing(listings)))
+        return TurnResult.ended()
+
+    async def _from_command(
+        self, command: InvokeTool, backends: Any, catalogue: ToolCatalogue
+    ) -> Invocation:
+        """Turn `/invokeTool server/tool --k v` into the same `Invocation` JSON produces.
+
+        Deliberately the same dataclass: everything after this point — the plan entry, the
+        permission prompt, the session mode, the `kind` from the tool's annotations, the
+        on-tool-failure policy — is machinery this command never has to know about, and
+        cannot diverge from because it does not have its own copy.
+
+        `read`, `write` and `run` are not offered here. They exist for a caller composing a
+        file or command around a tool call, which is a JSON author's job; a person at a
+        prompt asks for one tool.
+        """
+        server = _resolve_server(command, backends)
+        schema: dict[str, Any] | None = None
+        for tool in await catalogue.listing(server):
+            if tool.get("name") == command.tool:
+                raw = tool.get("inputSchema")
+                schema = raw if isinstance(raw, dict) else None
+                break
+        else:
+            offered = ", ".join(
+                sorted(
+                    str(tool.get("name"))
+                    for tool in await catalogue.listing(server)
+                    if isinstance(tool.get("name"), str)
+                )
+            )
+            raise CommandRefused(
+                f"/{INVOKE_TOOL}: {server!r} has no tool {command.tool!r}. "
+                + (f"It offers: {offered}." if offered else "It publishes no tools.")
+                + f" Run /{LIST_TOOLS} to see them with their parameters."
+            )
+        try:
+            arguments = coerce_arguments(command, schema)
+        except CommandError as exc:
+            raise CommandRefused(str(exc)) from None
+        return Invocation(tool=command.tool, arguments=arguments, server=server)
 
     async def _emit_plan(self, context: TurnContext, plan: list[PlanEntry]) -> None:
         """Send the plan, if the client accepts plans and there is one.
@@ -1258,6 +1366,54 @@ class McpToolRouterExecutor:
 #: Option id to kind, for reading an answer back. Built from `PERMISSION_OPTIONS` so the
 #: two cannot disagree about what an id means.
 _KIND_BY_OPTION: dict[str, str] = {option.option_id: option.kind for option in PERMISSION_OPTIONS}
+
+
+def _command_in(prompt: list[Any]) -> ListTools | InvokeTool | None:
+    """Recognise a slash command, or return `None` and leave the prompt to JSON.
+
+    Only a single text block can be one. A multi-block prompt is a composed request from a
+    program, and treating the first block of one as a command would silently drop the
+    rest — a much worse failure than declining to recognise it.
+    """
+    if len(prompt) != 1:
+        return None
+    text = getattr(prompt[0], "text", None)
+    if not isinstance(text, str):
+        return None
+    try:
+        return parse_command(text)
+    except CommandError as exc:
+        raise CommandRefused(str(exc)) from None
+
+
+def _resolve_server(command: InvokeTool, backends: Any) -> str:
+    """Which server the call goes to, refusing an ambiguous name rather than guessing.
+
+    `server/tool` names it. A bare tool name is allowed only when the session has exactly
+    one server, where there is nothing to guess; with several, picking the first that
+    happens to publish the name would make the same command mean different things as the
+    session's servers changed.
+    """
+    names = sorted(backends)
+    if command.server is not None:
+        if command.server not in names:
+            offered = ", ".join(names) if names else "none"
+            raise CommandRefused(
+                f"/{INVOKE_TOOL}: this session has no MCP server {command.server!r}. "
+                f"It has: {offered}."
+            )
+        return command.server
+    if not names:
+        raise CommandRefused(
+            f"/{INVOKE_TOOL}: this session has no MCP servers, so there is nothing to "
+            "call. Servers are named in `session/new`."
+        )
+    if len(names) > 1:
+        raise CommandRefused(
+            f"/{INVOKE_TOOL}: this session has several MCP servers ({', '.join(names)}), "
+            f"so the tool needs one: /{INVOKE_TOOL} {names[0]}/{command.tool} ..."
+        )
+    return names[0]
 
 
 def _requester(context: TurnContext):

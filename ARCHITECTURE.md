@@ -405,6 +405,7 @@ sequenceDiagram
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [MCP tool annotations module](src/python_acp/mcp_tools.md)
+- [Typed command module](src/python_acp/commands.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 

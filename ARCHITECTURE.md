@@ -403,6 +403,7 @@ sequenceDiagram
 - [CLI module](src/python_acp/cli.md)
 - [MCP elicitation forwarding module](src/python_acp/elicitation.md)
 - [MCP content mapping module](src/python_acp/mcp_content.md)
+- [MCP catalogue module](src/python_acp/mcp_catalogue.md)
 - [MCP backend registry module](src/python_acp/mcp_registry.md)
 - [MCP stdio module](src/python_acp/mcp_stdio.md)
 - [MCP tool annotations module](src/python_acp/mcp_tools.md)

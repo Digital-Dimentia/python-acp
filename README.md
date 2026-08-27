@@ -32,6 +32,7 @@
   - [cli.py](src/python_acp/cli.md)
   - [commands.py](src/python_acp/commands.md)
   - [elicitation.py](src/python_acp/elicitation.md)
+  - [mcp_catalogue.py](src/python_acp/mcp_catalogue.md)
   - [mcp_content.py](src/python_acp/mcp_content.md)
   - [mcp_registry.py](src/python_acp/mcp_registry.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)

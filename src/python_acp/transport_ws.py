@@ -63,6 +63,7 @@ from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.http11 import Request, Response
 
 from python_acp.agent import PythonAcpAgent
+from python_acp.announcer import command_announcer
 from python_acp.errors import to_error_object
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
@@ -439,6 +440,11 @@ async def serve_websocket(
             agent,
             input_stream=transport,
             use_unstable_protocol=use_unstable_protocol,
+            # The one hook that fires *after* a response is written, and so the only way
+            # `session/new` can announce its own commands. `transport_stdio` passes the
+            # same observer, for the reason in this module's docstring: the two transports
+            # must not answer differently. See `announcer.py`.
+            observers=[command_announcer(agent.announce_commands)],
         )
     finally:
         # The sessions stay — another connection may resume them — but the terminals this

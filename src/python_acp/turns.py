@@ -593,9 +593,10 @@ class TurnExecutor(Protocol):
         answer depends on the *session*, whose MCP servers were named by the client at
         `session/new` and have to be asked what they publish. Nothing static can know it.
 
-        Called once when a session becomes usable, so a client can populate a palette
-        before the first prompt. A turn announces the same list again, because a turn is
-        where the list can change and where a refusal most needs it.
+        Called once when a session becomes usable — created, forked, loaded or resumed —
+        so a client can populate a palette before the first prompt. A turn announces the
+        same list again, because a turn is where the list can change and where a refusal
+        most needs it.
         """
         ...
 

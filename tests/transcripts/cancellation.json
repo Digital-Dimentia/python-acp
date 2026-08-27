@@ -132,6 +132,74 @@
     }
   },
   {
+    "dir": "agent->client",
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "<session-1>",
+        "update": {
+          "availableCommands": [
+            {
+              "name": "tools/echo",
+              "description": "Echoes text"
+            },
+            {
+              "name": "tools",
+              "description": "List this session's MCP tools with their parameters",
+              "input": {
+                "hint": "list every tool on this session's MCP servers, with parameters"
+              }
+            },
+            {
+              "name": "invokeTool",
+              "description": "Call one tool with command-line style parameters",
+              "input": {
+                "hint": "<server>/<tool> --param value [--flag]"
+              }
+            },
+            {
+              "name": "listPrompts",
+              "description": "List this session's MCP prompts with their arguments",
+              "input": {
+                "hint": "list every prompt on this session's MCP servers, with arguments"
+              }
+            },
+            {
+              "name": "promptShow",
+              "description": "Expand one prompt and show the messages it returns",
+              "input": {
+                "hint": "<server>/<prompt> --argument value"
+              }
+            },
+            {
+              "name": "promptInvoke",
+              "description": "Expand one prompt and act on it \u2014 needs a model, so it refuses here",
+              "input": {
+                "hint": "<server>/<prompt> --argument value  (needs a model; see /promptShow)"
+              }
+            },
+            {
+              "name": "listResources",
+              "description": "List this session's MCP resources",
+              "input": {
+                "hint": "list every resource on this session's MCP servers"
+              }
+            },
+            {
+              "name": "resourceShow",
+              "description": "Read one resource and show its contents",
+              "input": {
+                "hint": "[<server>] <uri>"
+              }
+            }
+          ],
+          "sessionUpdate": "available_commands_update"
+        }
+      }
+    }
+  },
+  {
     "dir": "client->agent",
     "message": {
       "jsonrpc": "2.0",

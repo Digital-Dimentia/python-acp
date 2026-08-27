@@ -353,13 +353,12 @@ class PythonAcpAgent:
             await self._sessions.close(session.session_id)
             raise
         # **No command announcement here, and it is not an oversight.** The client learns
-        # this session's id from the response below, so a `session/update` sent first
-        # names a session it has never heard of and a correct client drops it. Sending it
-        # afterwards is not available either: `acp.Connection._run_request` awaits the
-        # handler and *then* writes the response, with no ordered send queue, so a task
-        # scheduled from in here races the reply rather than following it. `pyacp-obt`
-        # carries the two ways out — a response field ACP does not have, or an extension
-        # request the client makes once it holds the id.
+        # this session's id from the response below, so a `session/update` sent from in
+        # here goes out *first*, names a session it has never heard of, and is dropped by
+        # a correct client. A `create_task` is no better — the SDK has no ordered send
+        # queue, so it races the reply. The announcement happens on the far side of that
+        # write instead, from the stream observer in `announcer.py`, which is a hook the
+        # SDK fires only after the response bytes have gone.
         return NewSessionResponse(
             sessionId=session.session_id,
             modes=session.modes,
@@ -454,7 +453,8 @@ class PythonAcpAgent:
         except Exception:
             await self._sessions.close(forked.session_id)
             raise
-        # Same ordering problem as `new_session`: the fork's id is news to the client.
+        # Same ordering as `new_session`, and the same answer: the fork's id is news to
+        # the client, so its commands are announced by `announcer.py` after this reply.
         return ForkSessionResponse(
             sessionId=forked.session_id,
             modes=forked.modes,
@@ -541,15 +541,18 @@ class PythonAcpAgent:
     async def announce_commands(self, session_id: str) -> None:
         """Emit `available_commands_update` for a session that has just become usable.
 
-        **Only from `session/load` and `session/resume`.** Both take the session id as a
-        *parameter*, so the client already knows which session an update is about. The
-        paths that mint a new id — `session/new` and `session/fork` — deliberately do not
-        call this: their id reaches the client in the response, and a notification sent
-        before that response names a session the client has never heard of. See the
-        comment in `new_session`, and `pyacp-obt` for what a new session would need.
+        Called two ways, and the difference is *when*, not what. `session/load` and
+        `session/resume` call it inline: both take the session id as a *parameter*, so the
+        client already knows which session an update is about. The paths that mint a new
+        id — `session/new` and `session/fork` — cannot, because their id reaches the
+        client in the response and a notification sent before it names a session the
+        client has never heard of; for those, the stream observer in
+        [announcer.py](announcer.md) calls this *after* the response is on the wire.
+        Either way the client holds the id before the update arrives, which is the only
+        property that matters.
 
-        What it buys where it does apply: a client that reconnects to an existing session
-        gets its command palette back without having to take a turn first.
+        What it buys: a client gets its command palette as soon as it has a session,
+        without having to take a turn first.
 
         One door, for the same reason as `announce_mode`: a second client attached to the
         same session, and any later internal change, say it the same way.

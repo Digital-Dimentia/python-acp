@@ -25,7 +25,9 @@ from acp.stdio import spawn_agent_process
 
 from python_acp import __version__
 from python_acp.cli import build_parser, configure_logging
-from python_acp.transport_stdio import _stdout_reserved
+from python_acp.agent import PythonAcpAgent
+from python_acp.sessions import SessionRegistry
+from python_acp.transport_stdio import _observers, _stdout_reserved
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mock_mcp_server.py"
 
@@ -113,6 +115,52 @@ async def test_a_real_client_runs_the_create_prompt_cycle_over_stdio() -> None:
     # The default executor is the MCP tool-router; prose is not an invocation, so it
     # refuses rather than pretending to have understood.
     assert result.stop_reason == "refusal"
+
+
+def test_an_agent_without_a_command_listing_gets_no_observer() -> None:
+    """`run_stdio` is typed to the SDK's `Agent`, so an embedder's agent need not have
+    `announce_commands`. Skipping the observer is the honest answer there — there is
+    nothing it could announce — and it must not be a crash on connect."""
+
+    class Bare:
+        pass
+
+    assert _observers(Bare()) == []
+    assert len(_observers(PythonAcpAgent(SessionRegistry()))) == 1
+
+
+async def test_a_new_session_is_told_its_commands_over_stdio() -> None:
+    """`pyacp-p8v`: both transports wire the announcer, or one client sees two agents.
+
+    Over a spawned process and the SDK's own client, so what is proven is that the
+    observer reached `run_agent` on this transport too. The *ordering* it depends on is
+    asserted in `test_transport_ws.py`, where the raw frames are visible — a client-side
+    view cannot distinguish "sent after the response" from "dispatched after it".
+    """
+    client = _NullClient()
+    async with spawn_agent_process(client, sys.executable, *AGENT_ARGV) as (conn, _proc):
+        await asyncio.wait_for(conn.initialize(protocol_version=PROTOCOL_VERSION), timeout=30)
+        created = await asyncio.wait_for(
+            conn.new_session(cwd="/tmp", mcp_servers=[]), timeout=30
+        )
+        announced = await asyncio.wait_for(
+            _await_commands(client, created.session_id), timeout=30
+        )
+
+    assert [command.name for command in announced.available_commands]
+
+
+async def _await_commands(client: _NullClient, session_id: str) -> Any:
+    """The first `available_commands_update` for `session_id`.
+
+    A poll rather than an event because `_NullClient` is a list, and the notification is
+    in flight while `new_session` is already returning.
+    """
+    while True:
+        for seen_id, update in client.updates:
+            if seen_id == session_id and getattr(update, "available_commands", None) is not None:
+                return update
+        await asyncio.sleep(0.01)
 
 
 async def test_cancelling_over_the_wire_reaches_the_session() -> None:

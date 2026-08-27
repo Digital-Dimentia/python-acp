@@ -21,6 +21,7 @@
 - [System architecture](ARCHITECTURE.md)
 - Module docs:
   - [agent.py](src/python_acp/agent.md)
+  - [announcer.py](src/python_acp/announcer.md)
   - [capabilities.py](src/python_acp/capabilities.md)
   - [errors.py](src/python_acp/errors.md)
   - [paths.py](src/python_acp/paths.md)
@@ -342,6 +343,13 @@ streams, in this order:
    call. Only when the client advertised `clientCapabilities.plan`;
 4. `tool_call` and `tool_call_update` — real `pending` → `in_progress` →
    `completed`/`failed` transitions carrying the tool's own output.
+
+**One `available_commands_update` arrives before any of that**, on every path that opens
+a session — `session/new`, `session/fork`, `session/load` and `session/resume` — so a
+client can populate a command palette without first taking a turn. On the two that *mint*
+an id it follows the response rather than preceding it, because the response is where the
+client learns the id; [announcer.py](src/python_acp/announcer.md) is the hook that makes
+that ordering a guarantee.
 
 `agent_thought_chunk` and `usage_update` are never sent: there is no LLM here, so there
 is no reasoning trace and no token count to report. The full disposition of every

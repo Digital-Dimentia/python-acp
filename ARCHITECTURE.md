@@ -393,6 +393,7 @@ sequenceDiagram
 
 - [ACP agent module](src/python_acp/agent.md)
 - [Capability manifest module](src/python_acp/capabilities.md)
+- [Post-response announcement module](src/python_acp/announcer.md)
 - [Error mapping module](src/python_acp/errors.md)
 - [Path constraints module](src/python_acp/paths.md)
 - [Session registry module](src/python_acp/sessions.md)

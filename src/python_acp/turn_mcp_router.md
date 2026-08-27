@@ -506,7 +506,8 @@ as `ToolCatalogue.listing`. A listing is the thing being asked for, so `MCPProto
 propagates and `errors.py` forwards the backend's own code.
 
 `available_commands(session_id)` builds the same list for `agent.py` to announce when a
-session is *loaded or resumed*, through the one `_commands_for` both callers share — a
+session *opens* — created, forked, loaded or resumed — through the one `_commands_for`
+both callers share — a
 palette that disagreed with what a turn accepts would be worse than no palette. It does
 not consult `announce-tools`: that option suppresses a notification whose cost is being
 repeated every turn, and a client that suppressed the repetition still needs a first list

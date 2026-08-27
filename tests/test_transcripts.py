@@ -370,6 +370,27 @@ async def test_initialize_transcript() -> None:
     assert len(entries) == 2, "a handshake is one request and one response"
 
 
+
+async def _drain_new_session_announcement(socket: RecordingSocket, session_id: str) -> None:
+    """Wait for the `available_commands_update` `session/new` sends after its response.
+
+    `pyacp-p8v` announces a new session's commands from a stream observer, which fires
+    once the response is on the wire — so it is in flight while the driver is already
+    free to send the next request, and where it lands relative to that request depends on
+    how long the listing took. With a real MCP server behind it that is a subprocess round
+    trip. Draining it here is what a client wanting the palette does anyway, and it keeps
+    the recorded order a property of the agent rather than of that timing.
+    """
+    while True:
+        message = await socket.next_message()
+        update = (message.get("params") or {}).get("update") or {}
+        if (
+            message.get("method") == "session/update"
+            and message["params"].get("sessionId") == session_id
+            and update.get("sessionUpdate") == "available_commands_update"
+        ):
+            return
+
 async def test_session_lifecycle_transcript() -> None:
     """new -> prompt -> close, and the refusal a prompt that names no tool earns."""
     async with recording_socket() as socket:
@@ -379,6 +400,7 @@ async def test_session_lifecycle_transcript() -> None:
              "params": {"cwd": "/tmp", "mcpServers": []}}
         )
         session_id = created["result"]["sessionId"]
+        await _drain_new_session_announcement(socket, session_id)
         await socket.ask(
             {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
              "params": {"sessionId": session_id, "prompt": []}}
@@ -412,6 +434,7 @@ async def test_streaming_transcript() -> None:
              "params": {"cwd": "/tmp", "mcpServers": [_mcp_server()]}}
         )
         session_id = created["result"]["sessionId"]
+        await _drain_new_session_announcement(socket, session_id)
 
         socket.feed(
             {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
@@ -473,6 +496,7 @@ async def test_cancellation_transcript() -> None:
              "params": {"cwd": "/tmp", "mcpServers": [_mcp_server()]}}
         )
         session_id = created["result"]["sessionId"]
+        await _drain_new_session_announcement(socket, session_id)
 
         # `stall` is read by the fixture and never answered, so the turn is still inside
         # the tool call when the cancellation lands — which is the case worth recording.
@@ -533,10 +557,8 @@ async def test_a_reordering_of_notifications_fails_the_suite() -> None:
         )
         entries = list(socket.log)
 
-    positions = indices_of_updates(entries)
-    assert len(positions) >= 2, "this flow needs two updates to swap"
+    first, second = _two_distinguishable_updates(entries)
     scrambled = list(entries)
-    first, second = positions[0], positions[1]
     scrambled[first], scrambled[second] = scrambled[second], scrambled[first]
 
     # The same comparison the flow tests run, against a transcript only reordering broke.
@@ -544,6 +566,23 @@ async def test_a_reordering_of_notifications_fails_the_suite() -> None:
     assert canonicalize(entries) != canonicalize(scrambled)
     assert canonicalize(scrambled)[: len(golden)] != golden
 
+
+
+def _two_distinguishable_updates(entries: list[dict[str, Any]]) -> tuple[int, int]:
+    """Positions of two `session/update`s that differ, for the swap to have an effect.
+
+    This flow emits `available_commands_update` twice with the same payload — once when
+    `session/new` announces the session's commands, and again at the start of the turn —
+    and swapping two byte-identical notifications is not a reordering any comparison
+    could catch, or would want to. The probe has to pick a pair that carries order
+    information, which means a pair that differs.
+    """
+    positions = indices_of_updates(entries)
+    for i, first in enumerate(positions):
+        for second in positions[i + 1 :]:
+            if entries[first] != entries[second]:
+                return first, second
+    raise AssertionError("this flow needs two distinguishable updates to swap")
 
 #: Absolute paths a golden transcript is allowed to contain. Every one is a literal the
 #: flows choose on purpose and that means the same thing on every machine — not something

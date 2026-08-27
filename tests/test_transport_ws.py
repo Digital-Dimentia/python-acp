@@ -261,6 +261,89 @@ async def test_a_websocket_client_can_run_the_session_lifecycle() -> None:
     assert prompted["result"]["stopReason"] == "refusal"
 
 
+async def test_a_new_session_is_told_its_commands_after_the_response() -> None:
+    """`pyacp-p8v`: the palette arrives without the client having to take a turn.
+
+    The **order** is the whole test. `session/new` mints the id, and the client learns it
+    from the response — so an announcement sent before that names a session the client
+    cannot place and a correct client drops it. The observer in `announcer.py` fires on
+    the far side of the SDK's write, and this asserts that the SDK still behaves that way:
+    it is the canary for the guarantee the module is built on.
+    """
+    async with bound_socket() as websocket:
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+        created = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/new",
+             "params": {"cwd": "/tmp", "mcpServers": [FIXTURE_SPEC]}}
+        )
+        session_id = created["result"]["sessionId"]
+        announced = await websocket.next_reply()
+
+    assert announced["method"] == "session/update"
+    assert announced["params"]["sessionId"] == session_id
+    update = announced["params"]["update"]
+    assert update["sessionUpdate"] == "available_commands_update"
+    # The fixture server's tools, and the built-ins the router always offers.
+    names = [command["name"] for command in update["availableCommands"]]
+    assert any(name.startswith("tools/") for name in names)
+    assert "invokeTool" in names
+
+    order = [
+        index
+        for index, message in enumerate(websocket.sent)
+        if message.get("id") == 2 or message.get("method") == "session/update"
+    ]
+    assert websocket.sent[order[0]].get("id") == 2, "the response must come first"
+
+
+async def test_a_fork_is_told_its_commands_too() -> None:
+    """A fork mints an id the same way, and had the same gap."""
+    async with bound_socket() as websocket:
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+        created = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/new",
+             "params": {"cwd": "/tmp", "mcpServers": []}}
+        )
+        await websocket.next_reply()  # the new session's own announcement
+        forked = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 3, "method": "session/fork",
+             "params": {"sessionId": created["result"]["sessionId"], "cwd": "/tmp"}}
+        )
+        announced = await websocket.next_reply()
+
+    fork_id = forked["result"]["sessionId"]
+    assert fork_id != created["result"]["sessionId"]
+    assert announced["params"]["sessionId"] == fork_id
+    assert announced["params"]["update"]["sessionUpdate"] == "available_commands_update"
+
+
+async def test_a_refused_session_is_never_announced() -> None:
+    """An error response carries no session id, so there is nothing to announce — and
+    nothing left pending that a later id could collide with."""
+    async with bound_socket() as websocket:
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": PROTOCOL_VERSION}}
+        )
+        refused = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/new",
+             "params": {"cwd": "relative/path", "mcpServers": []}}
+        )
+        # A round trip the agent must answer, to give any stray announcement time to land.
+        await websocket.ask(
+            {"jsonrpc": "2.0", "id": 3, "method": "session/list", "params": {}}
+        )
+
+    assert refused["error"]["code"] == -32602
+    assert [m for m in websocket.sent if m.get("method") == "session/update"] == []
+
+
 async def test_sessions_outlive_the_connection_that_created_them() -> None:
     """One registry per process: a reconnecting client must find its session again.
 

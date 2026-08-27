@@ -32,10 +32,13 @@ import contextlib
 import logging
 import platform
 import sys
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 
 from acp import run_agent, stdio_streams
+from acp.connection import StreamEvent
 from acp.interfaces import Agent
+
+from python_acp.announcer import command_announcer
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,7 @@ async def run_stdio(agent: Agent, *, use_unstable_protocol: bool = True) -> None
             input_stream=writer,
             output_stream=reader,
             use_unstable_protocol=use_unstable_protocol,
+            observers=_observers(agent),
         )
 
     # `run_agent` returns on EOF and on nothing else, so reaching this line means the
@@ -76,6 +80,20 @@ async def run_stdio(agent: Agent, *, use_unstable_protocol: bool = True) -> None
     # `stdin=DEVNULL` spawn). An exception propagates instead of arriving here, which is
     # what keeps this from claiming a graceful exit for a failed one.
     logger.info("client closed stdin; python-acp exiting")
+
+
+def _observers(agent: Agent) -> list[Callable[[StreamEvent], Awaitable[None]]]:
+    """The stream observers this connection runs, which today is the command announcer.
+
+    `transport_ws` wires the same one unconditionally; here it is behind a `getattr`
+    because this function is typed to the SDK's `Agent` interface rather than to
+    `PythonAcpAgent`, so an embedder may pass an agent that never heard of
+    `announce_commands`. Skipping it then is the honest answer — an agent with no
+    command listing has nothing to announce. See `announcer.py` for why the hook has to
+    live out here rather than in the `session/new` handler.
+    """
+    announce = getattr(agent, "announce_commands", None)
+    return [] if announce is None else [command_announcer(announce)]
 
 
 @contextlib.contextmanager

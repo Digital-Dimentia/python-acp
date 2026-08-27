@@ -177,25 +177,27 @@ splats either into the same parameters, so the only difference that arrives is w
 `value` holds — and `Session.set_config_option` is what knows which of the two the named
 option can take. Two methods would mean writing that check twice.
 
-## Commands are announced where the client already knows the session id
+## Commands are announced once the client can place the session id
 
-`announce_commands` emits `available_commands_update` from **`session/load` and
-`session/resume` only**, so a client reattaching to a session gets its command palette
-back without having to take a turn first. It goes out *after* `load`'s replay: the replay
-is what happened, and splicing a current listing into it would rewrite the record.
+`announce_commands` emits `available_commands_update` so a client gets its command
+palette as soon as it holds a session, without having to take a turn first. It is one
+method with **two callers**, and the difference between them is timing, not content.
 
-**`session/new` and `session/fork` deliberately do not announce, and this is the boundary
-of the feature.** Both mint an id the client has never seen, and it reaches the client in
-the *response*. A `session/update` sent before that names a session the client cannot
-place, which a correct client drops. Sending it afterwards is not available either:
-`acp.Connection._run_request` awaits the handler and *then* writes the response, with no
-ordered send queue, so a task scheduled from inside the handler races the reply rather
-than following it. ACP has no third option here — `NewSessionResponse` carries
-`sessionId`, `modes` and `configOptions` and no command field, and there is no method for
-a client to ask. `pyacp-obt` holds what a new session would need: a response field the
-protocol does not have, or an extension request the client makes once it holds the id.
+**Inline, from `session/load` and `session/resume`.** Both take the session id as a
+parameter, so the client already knows which session an update is about and the handler
+can simply send it. On `load` it goes out *after* the replay: the replay is what
+happened, and splicing a current listing into it would rewrite the record.
 
-Two properties make the announcement safe to add to a working session:
+**From a stream observer, for `session/new` and `session/fork`.** Both mint an id the
+client has never seen, and it reaches the client in the *response* — so a `session/update`
+sent from inside the handler goes out first, names a session the client cannot place, and
+is dropped. Nor can the handler schedule one: the SDK has no ordered outgoing queue, so a
+`create_task` races the reply. The hook that works is on the far side of the write —
+`acp.Connection._run_request` sends the response and *then* notifies its stream observers.
+[announcer.py](announcer.md) owns that observer and the request-id matching it needs;
+this module stays free of both, as its own docstring promises.
+
+Two properties make the announcement safe to lay on a working session:
 
 - **Optional on the executor.** `TurnExecutor` declares `available_commands`, but an
   executor is swappable (D3) and one written before this existed announces nothing rather
@@ -203,6 +205,10 @@ Two properties make the announcement safe to add to a working session:
 - **Never fatal.** A listing that fails is logged and swallowed. It is a convenience laid
   on a session that is already open; turning a `tools/list` that timed out into a failed
   `session/load` would cost the client its session over a palette.
+
+What it still cannot carry is *richer* data: `AvailableCommand` is a flat
+`{name, description, hint}` with no server grouping and no MCP input schema. `pyacp-mth`
+holds the extension request a client would need to ask for more than that.
 
 ## Paths are validated here and nowhere else
 

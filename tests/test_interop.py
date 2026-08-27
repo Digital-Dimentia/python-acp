@@ -88,7 +88,11 @@ def test_a_foreign_client_creates_a_session_with_its_own_mcp_server(report: dict
 def test_a_foreign_client_runs_a_tool_and_sees_the_whole_update_stream(report: dict) -> None:
     """The payoff for decision D2: strict ACP v1 means something outside this repo."""
     assert report["stopReason"] == "end_turn"
-    assert report["updates"][:5] == [
+    # The first one is not part of the turn at all: `session/new` announces the session's
+    # commands once its id has reached the client (`pyacp-p8v`), which is what lets a
+    # palette be populated before the first prompt. The turn then announces its own.
+    assert report["updates"][:6] == [
+        "available_commands_update",
         "user_message_chunk",
         "available_commands_update",
         "plan",

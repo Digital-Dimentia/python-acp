@@ -65,6 +65,7 @@ from websockets.http11 import Request, Response
 from python_acp.agent import PythonAcpAgent
 from python_acp.announcer import command_announcer
 from python_acp.errors import to_error_object
+from python_acp.mcp_catalogue import McpCatalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
@@ -304,6 +305,7 @@ class WebSocketAgentServer:
         backends: McpBackendRegistry | None = None,
         terminals: TerminalRegistry | None = None,
         executor: TurnExecutor | None = None,
+        catalogue: McpCatalogue | None = None,
         use_unstable_protocol: bool = True,
     ) -> None:
         # Before anything else, and in the constructor rather than in `start()`: the point
@@ -318,6 +320,9 @@ class WebSocketAgentServer:
         self._backends = backends if backends is not None else McpBackendRegistry()
         self._terminals = terminals if terminals is not None else TerminalRegistry()
         self._executor = executor
+        # The operator's MCP servers, shared by every connection for the same reason the
+        # registries are: it is process configuration, read once at startup.
+        self._catalogue = catalogue
         self._use_unstable_protocol = use_unstable_protocol
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
         self._server: Server | None = None
@@ -401,6 +406,7 @@ class WebSocketAgentServer:
                 backends=self._backends,
                 terminals=self._terminals,
                 executor=self._executor,
+                catalogue=self._catalogue,
                 use_unstable_protocol=self._use_unstable_protocol,
             )
         finally:
@@ -414,6 +420,7 @@ async def serve_websocket(
     backends: McpBackendRegistry | None = None,
     terminals: TerminalRegistry | None = None,
     executor: TurnExecutor | None = None,
+    catalogue: McpCatalogue | None = None,
     use_unstable_protocol: bool = True,
 ) -> None:
     """Bind one already-accepted socket to a fresh agent and run until EOF.
@@ -434,6 +441,7 @@ async def serve_websocket(
         executor,
         backends if backends is not None else McpBackendRegistry(),
         live_terminals,
+        catalogue=catalogue,
     )
     try:
         await run_agent(

@@ -6,6 +6,8 @@ import logging
 import sys
 
 from python_acp.agent import PythonAcpAgent
+from python_acp.mcp_catalogue import CatalogueError, McpCatalogue
+from python_acp.mcp_catalogue import load as load_catalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import TerminalRegistry
@@ -39,6 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--port", type=int, default=8765, help="WebSocket port to bind (--transport ws only)."
+    )
+    parser.add_argument(
+        "--mcp-config",
+        metavar="PATH",
+        help=(
+            "A catalogue of MCP servers this agent offers, which a client selects from "
+            "with session config options instead of naming command lines itself. TOML, "
+            "or JSON with the mcpServers shape editors already write. Optional: without "
+            "it a session's servers are exactly the ones its client named."
+        ),
     )
     parser.add_argument(
         "--debug",
@@ -83,14 +95,27 @@ def configure_logging(debug: bool) -> None:
 async def _run(args: argparse.Namespace) -> None:
     """Build the process-wide registries and bind them to one transport.
 
-    **No process-wide MCP server is started, and there is no flag to ask for one.**
+    **No process-wide MCP server is started, and there is still no flag to ask for one.**
     `--mcp-command` and the `MCPStdioClient` it built existed for the deprecated action
     surface, which predated sessions and had nowhere else to look; `pyacp-sld.3` removed
     that surface and `pyacp-sld.4` removed this with it. Every MCP server this process
-    talks to is now named by a client in `session/new` and lives and dies with its
-    session — which is the arrangement ACP v1 asks for, and now the only one.
+    talks to is spawned **per session** and lives and dies with it — the arrangement ACP
+    v1 asks for.
+
+    `--mcp-config` does not change that, and is not that flag returning. It supplies a
+    catalogue of **recipes** a client may select from, which is a different thing from a
+    running server: each session still spawns its own subprocesses from them, still gets
+    its own isolated backends, and still tears them down at `session/close`. What it
+    changes is where a recipe may come from — the operator, as well as the client — which
+    matters because on a socket, accepting `command` and `args` from a client is accepting
+    a request to execute an arbitrary binary. See `mcp_catalogue.py`.
+
+    The catalogue is read **here, at startup**, so a bad file fails before a port is bound
+    rather than at the first `session/new`.
     """
     configure_logging(args.debug)
+
+    catalogue = _load_catalogue(getattr(args, "mcp_config", None))
 
     # Both registries are process-wide, and both are created here because this is the
     # only place that constructs both: a session must outlive the connection that
@@ -120,7 +145,11 @@ async def _run(args: argparse.Namespace) -> None:
         if args.transport == "stdio":
             # No disconnect hook here on purpose: over stdio the client going away *is*
             # this process ending, so the shutdown path below is the same event.
-            await run_stdio(PythonAcpAgent(sessions, backends=backends, terminals=terminals))
+            await run_stdio(
+                PythonAcpAgent(
+                    sessions, backends=backends, terminals=terminals, catalogue=catalogue
+                )
+            )
             return
 
         # The key is read from the environment, never from argv — see `ACCESS_KEY_ENV`.
@@ -135,6 +164,7 @@ async def _run(args: argparse.Namespace) -> None:
             sessions=sessions,
             backends=backends,
             terminals=terminals,
+            catalogue=catalogue,
         )
         await server.start()
         # Never print(): under --transport stdio that corrupts the wire, and one logging
@@ -147,11 +177,35 @@ async def _run(args: argparse.Namespace) -> None:
         await sessions.close_all()
 
 
+def _load_catalogue(path: str | None) -> McpCatalogue:
+    """Read `--mcp-config`, or hand back the empty catalogue.
+
+    Empty is the ordinary state and is not a mode: an agent with no catalogue advertises
+    no extra config options and opens exactly the servers each client named, which is what
+    every deployment did before this flag existed.
+    """
+    if not path:
+        return McpCatalogue()
+    catalogue = load_catalogue(path)
+    logger.info(
+        "MCP catalogue: %d server(s) offered — %s",
+        len(catalogue),
+        ", ".join(catalogue.names) or "none",
+    )
+    return catalogue
+
+
 def run() -> None:
     parser = build_parser()
     args = parser.parse_args()
     try:
         asyncio.run(_run(args))
+    except CatalogueError as refusal:
+        # Same exit code and the same reasoning as the bind refusal below: the operator
+        # asked for something that cannot be done, and the one sentence saying which line
+        # of their file was wrong is worth more than a traceback around it.
+        logger.error("%s", refusal)
+        raise SystemExit(2) from None
     except UnauthenticatedBindError as refusal:
         # Exit 2, matching argparse's own code for "you asked for something I will not
         # do", and log rather than print so the message goes to stderr like every other

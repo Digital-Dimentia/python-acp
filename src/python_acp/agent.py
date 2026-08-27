@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from acp import RequestError
@@ -61,6 +62,7 @@ from python_acp.capabilities import (
 from python_acp.elicitation import ConnectedClient, Forwarder
 from python_acp.elicitation import forwarder as elicitation_forwarder
 from python_acp.errors import as_request_error
+from python_acp.mcp_catalogue import McpCatalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
 from python_acp.sessions import (
@@ -98,6 +100,7 @@ class PythonAcpAgent:
         backends: McpBackendRegistry | None = None,
         terminals: TerminalRegistry | None = None,
         *,
+        catalogue: McpCatalogue | None = None,
         unstable: bool = True,
     ) -> None:
         # `sessions` is required rather than defaulted, and that is the point. One
@@ -130,6 +133,11 @@ class PythonAcpAgent:
         # may advertise, because the SDK's router refuses `session/close`, `/fork`, and
         # `/resume` outright when the flag is off — see `capabilities.py`.
         self._unstable = unstable
+        # The servers an *operator* configured, which a client selects from rather than
+        # supplying. Empty is the ordinary state and costs nothing: no config options, no
+        # specs, and every path below behaves exactly as it did before it existed. See
+        # `mcp_catalogue.py`, including why this is not `--mcp-command` returning.
+        self._catalogue = catalogue if catalogue is not None else McpCatalogue()
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
 
@@ -323,16 +331,27 @@ class PythonAcpAgent:
         for a relative one — and stored tidied. See `paths.py` for why they are
         normalised but not resolved, and for the containment rule Phase 4.2 builds on.
 
-        `modes` and `configOptions` both come from the executor, which is the only thing
-        that can act on either — the same arrangement as `promptCapabilities`.
+        `modes` come from the executor, which is the only thing that can act on them — the
+        same arrangement as `promptCapabilities`. `configOptions` come from the executor
+        *and* from the MCP catalogue, one boolean per configured server; see
+        `_config_options`.
+
+        **The servers this session opens are the client's plus the catalogue's**, not one
+        or the other. `mcpServers` is untouched by the catalogue existing: an editor that
+        knows its own servers keeps naming them. See `_with_catalogue`, and
+        `mcp_catalogue.py` for why an agent-side list exists at all.
         """
-        stdio_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
+        client_servers = self._reject_unsupported_mcp_servers(mcp_servers or [])
+        config_options = self._config_options()
+        # Before `create`, like the path validation below it and for the same reason: a
+        # refused request must leave nothing behind.
+        stdio_servers = self._with_catalogue(client_servers, config_options)
         root, extra = normalize_roots(cwd, additional_directories)
         session = self._sessions.create(
             root,
             additional_directories=extra,
             modes=self._modes(),
-            config_options=self._config_options(),
+            config_options=config_options,
         )
         try:
             # Two things go with the servers, and both are promises made in the
@@ -432,10 +451,22 @@ class PythonAcpAgent:
         decision; this method is where the two meet.
 
         `mcpServers` is optional here and means "use the parent's recipe" when omitted,
-        which is why `mcp_registry` keeps the specs rather than only the clients.
+        which is why `mcp_registry` keeps the specs rather than only the clients. That
+        recipe already contains whatever catalogue entries the parent had on, including
+        ones toggled after it was created — so omitting `mcpServers` inherits the parent's
+        *selection*, not the catalogue file's defaults.
+
+        A client that names its own servers here gets the same additive treatment as
+        `session/new`: its list, plus the catalogue entries this fork's inherited config
+        options have switched on.
         """
         stdio_servers = (
-            None if mcp_servers is None else self._reject_unsupported_mcp_servers(mcp_servers)
+            None
+            if mcp_servers is None
+            else self._with_catalogue(
+                self._reject_unsupported_mcp_servers(mcp_servers),
+                self._sessions.get(session_id).config_options,
+            )
         )
         root, extra = normalize_roots(cwd, additional_directories)
         forked = self._sessions.fork(session_id, cwd=root, additional_directories=extra)
@@ -635,15 +666,74 @@ class PythonAcpAgent:
         )
 
     def _config_options(self) -> tuple[Any, ...]:
-        """The config options a new session starts with — the executor's, deep-copied.
+        """The config options a new session starts with, deep-copied.
+
+        Two sources, in this order: the **executor's**, which are about how a turn behaves,
+        and the **catalogue's**, one boolean per configured MCP server. The catalogue's go
+        last because they are the operator's list and can be long, and a client renders
+        these in the order they arrive.
 
         Copied for the same reason as the modes: `set_config_option` mutates
-        `current_value` in place, and the declaration is shared by every session.
+        `current_value` in place, and both declarations are shared by every session.
+
+        The catalogue's ids are namespaced `mcp/<name>`, so an entry cannot shadow one of
+        the executor's — see `mcp_catalogue.CONFIG_ID_PREFIX`.
         """
-        return tuple(
-            option.model_copy(deep=True)
-            for option in getattr(self._executor, "session_config_options", ())
+        declared = (
+            *getattr(self._executor, "session_config_options", ()),
+            *self._catalogue.config_options(),
         )
+        return tuple(option.model_copy(deep=True) for option in declared)
+
+    def _catalogue_specs(self, config_options: Iterable[Any]) -> tuple[McpServerStdio, ...]:
+        """The catalogue servers a session with these options has switched **on**.
+
+        Reads the session's own options rather than the catalogue's `enabled` defaults,
+        because the two diverge the moment a client toggles anything — and a fork inherits
+        its parent's selection, not the file's.
+        """
+        chosen = [
+            entry.name
+            for option in config_options
+            if (entry := self._catalogue.entry_for_config_id(option.id)) is not None
+            and getattr(option, "current_value", False) is True
+        ]
+        return self._catalogue.specs(chosen)
+
+    def _with_catalogue(
+        self, client_servers: Sequence[McpServerStdio], config_options: Iterable[Any]
+    ) -> list[McpServerStdio]:
+        """Everything a session should open: what the client named, plus what it selected.
+
+        The two sources are **additive**, which is the whole point — an editor that knows
+        its own servers keeps naming them, a thin client selects from the catalogue, and
+        one session can have both.
+
+        A name in both is `-32602` naming both sources. `McpBackendRegistry.open` already
+        refuses duplicates, but its message says "in `session/new`", which would be a
+        misleading thing to tell someone whose collision came from a config file they may
+        not have written.
+        """
+        catalogue_servers = self._catalogue_specs(config_options)
+        if not catalogue_servers:
+            return list(client_servers)
+        clashes = sorted(
+            {server.name for server in client_servers}
+            & {server.name for server in catalogue_servers}
+        )
+        if clashes:
+            raise RequestError.invalid_params(
+                {
+                    "error": (
+                        f"MCP server name(s) {clashes} are both named in this request and "
+                        f"configured in this agent's catalogue. A session routes tool "
+                        f"calls by server name, so the two cannot both answer to it — "
+                        f"rename yours, or turn the catalogue entry off."
+                    ),
+                    "servers": clashes,
+                }
+            )
+        return [*client_servers, *catalogue_servers]
 
     # ------------------------------------------------------------------
     # Prompt turn — body arrives in Phase 3

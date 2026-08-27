@@ -166,10 +166,27 @@ exists so that when something does, it does not invent a second way to say so.
 
 `announce_config_options` is its twin, for the same reasons.
 
-Modes and config options both come from the **executor** (`TurnExecutor.session_modes`,
-`session_config_options`), the only thing that can act on either — the same arrangement as
-`promptCapabilities`. Each session gets a deep copy, because both `set_mode` and
+Modes come from the **executor** (`TurnExecutor.session_modes`), the only thing that can
+act on them — the same arrangement as `promptCapabilities`. Config options come from the
+executor *and* from the **MCP catalogue**, one boolean per configured server, appended
+after the executor's. Each session gets a deep copy of both, because `set_mode` and
 `set_config_option` mutate in place.
+
+That second source is how a client **selects** MCP servers instead of supplying them.
+ACP's `select` variant is single-choice, so a set of booleans is what a multi-select looks
+like; no extension is involved, because the options ride `NewSessionResponse.configOptions`
+and `session/set_config_option` already changes them. The ids are namespaced `mcp/<name>`
+so a catalogue entry cannot shadow one of the executor's — `Session.set_config_option`
+looks options up by id alone. See [mcp_catalogue.py](mcp_catalogue.md) for why an
+agent-side list exists at all, and why it is not `--mcp-command` returning.
+
+**`session/new` opens the client's servers *and* the catalogue's**, not one or the other:
+an editor that knows its own keeps naming them, a thin client selects, and one session can
+have both. A name in both is `-32602` naming both sources — `McpBackendRegistry.open`
+would refuse the duplicate anyway, but its message says "in `session/new`", which is a
+misleading thing to tell someone whose collision came from a config file they may not have
+written. `session/fork` inherits the parent's actual *selection*, including entries
+toggled after it was created, because that is what `mcp_registry` kept the specs for.
 
 **`set_config_option` is one implementation for two request shapes.** The SDK
 discriminates `SetSessionConfigOptionBooleanRequest` from its select twin on `type` and

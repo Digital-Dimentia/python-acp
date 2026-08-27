@@ -18,7 +18,9 @@ client-facing transport. It owns no protocol logic of its own.
 
 ## Main Symbols
 
-- `build_parser()`: defines `--transport`, `--host`, `--port`, `--debug`.
+- `build_parser()`: defines `--transport`, `--host`, `--port`, `--mcp-config`, `--debug`.
+- `_load_catalogue(path)`: reads `--mcp-config`, or the empty catalogue when it was
+  not given. Called before a port is bound, so a bad file fails at startup.
 - `configure_logging(debug)`: installs the root handler on `sys.stderr`, with the
   bare message at INFO and `%(name)s: %(message)s` under `--debug`.
 - `_run(args)`: async runtime bootstrap and service startup sequence.
@@ -177,11 +179,39 @@ The flag is not merely ignored — it is **rejected**, and
 still passes it should fail loudly at startup rather than run while quietly never using
 the server it named.
 
+## `--mcp-config` is not that flag returning
+
+It names a **catalogue of recipes** a client may select from, not a server this process
+runs. Nothing about the lifetime changes:
+
+| | `--mcp-command` (removed) | `--mcp-config` |
+| --- | --- | --- |
+| What starts at bootstrap | one MCP server subprocess | nothing — the file is read, that is all |
+| Servers per process | one, shared by every client | one subprocess set **per session**, as today |
+| Torn down when | the process exits | the session closes, as today |
+| Client reaches it by | a passthrough method on the socket | `session/prompt`, like any other tool |
+| Client chooses | nothing | which entries its session uses |
+
+What it changes is where a recipe may come from. That matters because on a socket,
+accepting `command` and `args` from a client is accepting a request to **execute an
+arbitrary binary** — unremarkable when the client is the editor that spawned you, and a
+different thing entirely when it is whoever got past the access key. A catalogue lets a
+deployment offer a list the operator approved.
+
+It is optional and additive: without it a session's servers are exactly the ones its
+client named, and with it they are the client's **plus** the catalogue entries that
+session has switched on. The reasoning, the file format, and why its validation is loud
+are in [mcp_catalogue.py](mcp_catalogue.md).
+
+The file is read **here**, before a port is bound, so a mistyped path or key fails at
+startup with exit 2 rather than at the first `session/new`.
+
 ## Related
 
 - [Repository architecture](../../ARCHITECTURE.md)
 - [agent.py docs](agent.md)
 - [transport_stdio.py docs](transport_stdio.md)
+- [mcp_catalogue.py docs](mcp_catalogue.md)
 - [mcp_stdio.py docs](mcp_stdio.md)
 - [mcp_registry.py docs](mcp_registry.md)
 - [transport_ws.py docs](transport_ws.md)

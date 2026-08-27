@@ -24,7 +24,7 @@ from acp import PROTOCOL_VERSION, RequestError
 from acp.stdio import spawn_agent_process
 
 from python_acp import __version__
-from python_acp.cli import build_parser, configure_logging
+from python_acp.cli import _load_catalogue, build_parser, configure_logging
 from python_acp.agent import PythonAcpAgent
 from python_acp.sessions import SessionRegistry
 from python_acp.transport_stdio import _observers, _stdout_reserved
@@ -378,6 +378,51 @@ def test_stdio_is_selectable() -> None:
 def test_an_unknown_transport_is_rejected() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--mcp-command", "echo", "--transport", "carrier-pigeon"])
+
+
+def test_the_mcp_catalogue_is_optional_and_absent_by_default() -> None:
+    """No flag means the agent offers nothing and opens exactly what each client named,
+    which is what every deployment did before the catalogue existed."""
+    assert build_parser().parse_args([]).mcp_config is None
+
+
+def test_the_mcp_catalogue_path_is_taken_on_both_transports() -> None:
+    for transport in ("ws", "stdio"):
+        args = build_parser().parse_args(
+            ["--transport", transport, "--mcp-config", "servers.toml"]
+        )
+        assert args.mcp_config == "servers.toml"
+
+
+def test_a_catalogue_that_cannot_be_read_stops_the_process_before_it_serves(
+    tmp_path: Path,
+) -> None:
+    """Exit 2, at startup — not a traceback, and not a failure at the first session/new.
+
+    An operator who mistyped a path or a key needs the one sentence saying which, and a
+    port that never binds rather than an agent advertising servers it cannot spawn.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "python_acp.cli", "--mcp-config", str(tmp_path / "gone.toml")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 2
+    assert "gone.toml" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_catalogue_is_loaded_and_reported_at_startup(tmp_path: Path) -> None:
+    """The names go to the log, because a catalogue silently loading as empty — a typo in
+    the table name, a file the process cannot see — looks exactly like no flag at all."""
+    catalogue = tmp_path / "servers.toml"
+    catalogue.write_text('[servers.demo]\ncommand = "true"\nenabled = false\n')
+    loaded = _load_catalogue(str(catalogue))
+
+    assert loaded.names == ("demo",)
+    assert loaded.specs() == ()  # enabled = false: offered, not opened
 
 
 def test_a_clean_shutdown_says_what_ended_it() -> None:

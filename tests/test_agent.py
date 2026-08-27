@@ -28,6 +28,7 @@ from python_acp import __version__
 from python_acp.agent import PythonAcpAgent
 from python_acp.capabilities import SUPPORTED_PROTOCOL_VERSIONS, build_agent_capabilities
 from python_acp.errors import as_request_error
+from python_acp.mcp_catalogue import CatalogueEntry, McpCatalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.mcp_stdio import MCPProtocolError
@@ -1721,3 +1722,204 @@ async def test_a_session_with_no_options_announces_nothing() -> None:
     await agent.announce_config_options(agent.sessions.get(session_id))
 
     assert client.updates == []
+
+
+# ---------------------------------------------------------------------------
+# The operator's MCP catalogue (`pyacp-lx7`)
+# ---------------------------------------------------------------------------
+
+
+def a_catalogue(*names: str, enabled: bool = True) -> McpCatalogue:
+    """A catalogue whose entries are all the real fixture server, under given names."""
+    return McpCatalogue(
+        [
+            CatalogueEntry(
+                name=name,
+                command=sys.executable,
+                args=(str(FIXTURE_SERVER),),
+                description=f"{name} from the catalogue",
+                enabled=enabled,
+            )
+            for name in names
+        ]
+    )
+
+
+async def test_a_session_with_no_catalogue_is_exactly_what_it_was() -> None:
+    """The regression that matters most: the feature costs nothing when unused."""
+    router = make_router(agent=make_agent())
+    result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    assert [option.id for option in result.config_options or []] == [
+        "announce-tools",
+        "on-tool-failure",
+    ]
+
+
+async def test_the_catalogue_is_advertised_as_one_boolean_per_server() -> None:
+    """Selection is native ACP: `configOptions` on the response a client already reads."""
+    backends = McpBackendRegistry()
+    router = make_router(
+        agent=make_agent(backends=backends, catalogue=a_catalogue("alpha", "beta"))
+    )
+    try:
+        result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    finally:
+        await backends.close_all()
+
+    options = {option.id: option for option in result.config_options or []}
+    assert "mcp/alpha" in options and "mcp/beta" in options
+    assert options["mcp/alpha"].type == "boolean"
+    assert options["mcp/alpha"].description == "alpha from the catalogue"
+    # The executor's own options come first and are untouched by the catalogue existing.
+    assert [option.id for option in result.config_options or []][:2] == [
+        "announce-tools",
+        "on-tool-failure",
+    ]
+
+
+async def test_new_session_opens_the_catalogue_servers_it_is_offered() -> None:
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends, catalogue=a_catalogue("alpha")))
+
+    result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        opened = backends.backends(result.session_id)
+        assert list(opened) == ["alpha"]
+        assert [tool["name"] for tool in await opened["alpha"].list_tools()] == ["echo"]
+    finally:
+        await backends.close_all()
+
+
+async def test_an_entry_that_is_off_by_default_is_offered_but_not_opened() -> None:
+    """`enabled = false` in the file: the operator publishes it, the client opts in."""
+    backends = McpBackendRegistry()
+    router = make_router(
+        agent=make_agent(backends=backends, catalogue=a_catalogue("alpha", enabled=False))
+    )
+
+    result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        options = {option.id: option for option in result.config_options or []}
+        assert options["mcp/alpha"].current_value is False
+        assert backends.backends(result.session_id) == {}
+    finally:
+        await backends.close_all()
+
+
+async def test_the_client_and_the_catalogue_are_additive() -> None:
+    """The whole point: an editor keeps naming its own, a thin client selects, and one
+    session can have both."""
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends, catalogue=a_catalogue("alpha")))
+
+    result = await router(
+        "session/new",
+        {
+            "cwd": "/work",
+            "mcpServers": [
+                {"name": "mine", "command": sys.executable,
+                 "args": [str(FIXTURE_SERVER)], "env": []}
+            ],
+        },
+        False,
+    )
+    try:
+        assert sorted(backends.backends(result.session_id)) == ["alpha", "mine"]
+    finally:
+        await backends.close_all()
+
+
+async def test_a_name_in_both_is_invalid_params_naming_both_sources() -> None:
+    """A session routes by server name, so two servers answering to one name would make
+    which of them ran a matter of dict ordering."""
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry()
+    router = make_router(
+        agent=make_agent(sessions=sessions, backends=backends, catalogue=a_catalogue("tools"))
+    )
+
+    with pytest.raises(RequestError) as excinfo:
+        await router(
+            "session/new",
+            {
+                "cwd": "/work",
+                "mcpServers": [
+                    {"name": "tools", "command": sys.executable,
+                     "args": [str(FIXTURE_SERVER)], "env": []}
+                ],
+            },
+            False,
+        )
+
+    assert excinfo.value.code == -32602
+    assert "catalogue" in str(excinfo.value.data)
+    # Refused before anything was created, so nothing is left behind.
+    assert len(sessions) == 0
+    assert len(backends) == 0
+
+
+async def test_a_fork_that_names_no_servers_inherits_the_parents_selection() -> None:
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends, catalogue=a_catalogue("alpha")))
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        forked = await router(
+            "session/fork", {"sessionId": created.session_id, "cwd": "/work"}, False
+        )
+        assert list(backends.backends(forked.session_id)) == ["alpha"]
+        # Its own subprocess, not the parent's — `session/close` on one must not tear
+        # down the other's tools.
+        assert (
+            backends.get(forked.session_id, "alpha")
+            is not backends.get(created.session_id, "alpha")
+        )
+    finally:
+        await backends.close_all()
+
+
+async def test_a_fork_that_names_its_own_servers_still_gets_the_catalogue() -> None:
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends, catalogue=a_catalogue("alpha")))
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        forked = await router(
+            "session/fork",
+            {
+                "sessionId": created.session_id,
+                "cwd": "/work",
+                "mcpServers": [
+                    {"name": "mine", "command": sys.executable,
+                     "args": [str(FIXTURE_SERVER)], "env": []}
+                ],
+            },
+            False,
+        )
+        assert sorted(backends.backends(forked.session_id)) == ["alpha", "mine"]
+    finally:
+        await backends.close_all()
+
+
+async def test_the_catalogue_options_are_not_shared_between_sessions() -> None:
+    """`set_config_option` mutates `current_value` in place, so a shared declaration would
+    let one session's toggle move another's."""
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends, catalogue=a_catalogue("alpha")))
+
+    try:
+        first = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+        second = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    finally:
+        await backends.close_all()
+
+    def option_of(result: object) -> object:
+        return next(
+            option
+            for option in result.config_options or []  # type: ignore[attr-defined]
+            if option.id == "mcp/alpha"
+        )
+
+    assert option_of(first) is not option_of(second)
+

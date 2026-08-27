@@ -216,32 +216,65 @@ option can take. Two methods would mean writing that check twice.
 
 ## Commands are announced once the client can place the session id
 
-`announce_commands` emits `available_commands_update` so a client gets its command
-palette as soon as it holds a session, without having to take a turn first. It is one
-method with **two callers**, and the difference between them is timing, not content.
+`available_commands_update` gives a client its command palette as soon as it holds a
+session, without having to take a turn first. There are **two doors onto one write**,
+and the difference between them is when the list is built, not what is in it.
 
 **Inline, from `session/load` and `session/resume`.** Both take the session id as a
 parameter, so the client already knows which session an update is about and the handler
-can simply send it. On `load` it goes out *after* the replay: the replay is what
-happened, and splicing a current listing into it would rewrite the record.
+can simply send it. `announce_commands` builds the list and sends it. On `load` it goes
+out *after* the replay: the replay is what happened, and splicing a current listing into
+it would rewrite the record. Every re-announcement later in a session — a catalogue
+server toggled on, a turn refreshing the palette — takes this door too, and must, because
+the list changes.
 
 **From a stream observer, for `session/new` and `session/fork`.** Both mint an id the
 client has never seen, and it reaches the client in the *response* — so a `session/update`
 sent from inside the handler goes out first, names a session the client cannot place, and
-is dropped. Nor can the handler schedule one: the SDK has no ordered outgoing queue, so a
-`create_task` races the reply. The hook that works is on the far side of the write —
-`acp.Connection._run_request` sends the response and *then* notifies its stream observers.
-[announcer.py](announcer.md) owns that observer and the request-id matching it needs;
-this module stays free of both, as its own docstring promises.
+is dropped. Nor can the handler schedule one: a `create_task` can reach the transport
+while the handler is still running, so it races the reply. The hook that works is on the
+far side of the write — `acp.Connection._run_request` sends the response and *then*
+notifies its stream observers. [announcer.py](announcer.md) owns that observer and the
+request-id matching it needs; this module stays free of both, as its own docstring
+promises.
+
+### Why the minting paths build the list before they answer
+
+Following the response is necessary but not sufficient, and the gap is what `pyacp-svt`
+turned up: the interop test failed on Python 3.11 four runs in five while passing every
+time on 3.14.
+
+An observer is a *task*, and a client may pipeline — the SDK's own client sends
+`session/prompt` the moment `session/new` returns. Building the palette costs a
+`tools/list` per backend, and awaiting that inside the observer parks it on real
+subprocess I/O. The pipelined request is read and answered in the meantime, so the turn's
+first `session/update` reaches the wire first and the palette arrives *after* the updates
+it exists to precede. Which of the two sub-millisecond round trips wins is scheduling
+luck.
+
+So `session/new` and `session/fork` call `_prepare_commands` before they return, stashing
+the list against the new id, and the observer is given `announce_prepared_commands` — a
+door whose **first await is the send**. `acp.task.MessageSender` is an ordered queue
+behind the stdio transport, so wire order is enqueue order; and the observer task is
+created while `_run_request` is still on the ready queue, ahead of anything the loop's
+next poll could schedule. Enqueueing without suspending therefore puts the announcement
+in front of everything the pipelined request produces. The ordering stops being a race.
+
+The stash is **one-shot and private to that door**. `announce_commands` never reads it, so
+a re-announcement always rebuilds; a stash that could be consumed by the general door
+would pin the palette to whatever the session started with. If nothing was prepared —
+the executor has no listing, or its `tools/list` failed — `announce_prepared_commands`
+falls back to building, losing the ordering guarantee rather than the palette.
 
 Two properties make the announcement safe to lay on a working session:
 
 - **Optional on the executor.** `TurnExecutor` declares `available_commands`, but an
   executor is swappable (D3) and one written before this existed announces nothing rather
   than raising. Read with `getattr`, like `session_modes`.
-- **Never fatal.** A listing that fails is logged and swallowed. It is a convenience laid
-  on a session that is already open; turning a `tools/list` that timed out into a failed
-  `session/load` would cost the client its session over a palette.
+- **Never fatal.** A listing that fails is logged and swallowed — in `_prepare_commands`
+  too, where it now runs *inside* `session/new` and so has a session to cost. It is a
+  convenience laid on a session that is already open; turning a `tools/list` that timed
+  out into a failed `session/new` would cost the client its session over a palette.
 
 What it still cannot carry is *richer* data: `AvailableCommand` is a flat
 `{name, description, hint}` with no server grouping and no MCP input schema. `pyacp-mth`

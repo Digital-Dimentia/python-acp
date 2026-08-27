@@ -87,12 +87,21 @@ def _observers(agent: Agent) -> list[Callable[[StreamEvent], Awaitable[None]]]:
 
     `transport_ws` wires the same one unconditionally; here it is behind a `getattr`
     because this function is typed to the SDK's `Agent` interface rather than to
-    `PythonAcpAgent`, so an embedder may pass an agent that never heard of
-    `announce_commands`. Skipping it then is the honest answer — an agent with no
-    command listing has nothing to announce. See `announcer.py` for why the hook has to
-    live out here rather than in the `session/new` handler.
+    `PythonAcpAgent`, so an embedder may pass an agent that has neither door. Skipping it
+    then is the honest answer — an agent with no command listing has nothing to announce.
+    See `announcer.py` for why the hook has to live out here rather than in the
+    `session/new` handler, and `agent._prepare_commands` for why the *prepared* door is
+    preferred: it is the one that awaits nothing before it sends, so the announcement
+    cannot lose its place to a client that pipelines.
+
+    `announce_commands` is still accepted as a fallback. An embedder's agent written
+    against the older single door keeps its palette; what it loses is the ordering
+    guarantee, which is the same trade `announce_prepared_commands` itself makes when
+    nothing was prepared.
     """
-    announce = getattr(agent, "announce_commands", None)
+    announce = getattr(agent, "announce_prepared_commands", None) or getattr(
+        agent, "announce_commands", None
+    )
     return [] if announce is None else [command_announcer(announce)]
 
 

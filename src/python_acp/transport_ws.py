@@ -452,7 +452,7 @@ async def serve_websocket(
             # `session/new` can announce its own commands. `transport_stdio` passes the
             # same observer, for the reason in this module's docstring: the two transports
             # must not answer differently. See `announcer.py`.
-            observers=[command_announcer(agent.announce_commands)],
+            observers=[command_announcer(agent.announce_prepared_commands)],
         )
     finally:
         # The sessions stay — another connection may resume them — but the terminals this

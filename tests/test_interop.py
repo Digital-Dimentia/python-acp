@@ -91,6 +91,13 @@ def test_a_foreign_client_runs_a_tool_and_sees_the_whole_update_stream(report: d
     # The first one is not part of the turn at all: `session/new` announces the session's
     # commands once its id has reached the client (`pyacp-p8v`), which is what lets a
     # palette be populated before the first prompt. The turn then announces its own.
+    #
+    # **This index is a real ordering guarantee, not luck** — and it was luck until
+    # `pyacp-svt`. This client pipelines: it sends `session/prompt` the instant
+    # `new_session` returns, so the announcement has to be enqueued before the agent can
+    # even read that request. It is, because `agent._prepare_commands` builds the list
+    # inside `session/new` and leaves the stream observer nothing to await but the send.
+    # If this assertion starts flapping, that is what broke; see `announcer.md`.
     assert report["updates"][:6] == [
         "available_commands_update",
         "user_message_chunk",

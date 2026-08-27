@@ -119,7 +119,7 @@ async def test_a_real_client_runs_the_create_prompt_cycle_over_stdio() -> None:
 
 def test_an_agent_without_a_command_listing_gets_no_observer() -> None:
     """`run_stdio` is typed to the SDK's `Agent`, so an embedder's agent need not have
-    `announce_commands`. Skipping the observer is the honest answer there — there is
+    either announcing door. Skipping the observer is the honest answer there — there is
     nothing it could announce — and it must not be a crash on connect."""
 
     class Bare:
@@ -127,6 +127,19 @@ def test_an_agent_without_a_command_listing_gets_no_observer() -> None:
 
     assert _observers(Bare()) == []
     assert len(_observers(PythonAcpAgent(SessionRegistry()))) == 1
+
+
+def test_an_embedders_older_agent_keeps_its_announcer() -> None:
+    """`announce_prepared_commands` is the door this transport prefers (`pyacp-svt`), and
+    an embedder's agent written before it existed has only `announce_commands`. Falling
+    back keeps its palette; what it gives up is the ordering guarantee, which is the same
+    thing the prepared door gives up when nothing was prepared."""
+
+    class Older:
+        async def announce_commands(self, session_id: str) -> None:
+            """Never called here — its presence is the whole assertion."""
+
+    assert len(_observers(Older())) == 1
 
 
 async def test_a_new_session_is_told_its_commands_over_stdio() -> None:

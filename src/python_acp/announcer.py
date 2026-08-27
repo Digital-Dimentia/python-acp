@@ -5,9 +5,9 @@ Anything the agent wants to say *about* that session — its command palette, ab
 is therefore unsendable from inside the handler: `acp.Connection._run_request` awaits the
 handler and only then writes the reply, so a `session/update` emitted in there goes out
 **first**, naming a session the client has never heard of. A correct client drops it. A
-task scheduled with `create_task` from inside the handler is no better: the SDK has no
-ordered outgoing queue — every sender awaits the transport directly — so it races the
-reply rather than following it.
+task scheduled with `create_task` from inside the handler is no better: it can reach the
+transport while the handler is still running, so it races the reply rather than following
+it.
 
 The SDK does have one hook on the far side of that write. `_run_request` is::
 
@@ -18,6 +18,23 @@ The SDK does have one hook on the far side of that write. `_run_request` is::
 so a **stream observer** runs strictly after the response bytes are on the wire, and a
 notification it sends names an id the client already holds. Observers are public API and
 reach a `run_agent` caller through `**connection_kwargs`.
+
+## The observer must not await anything before it sends
+
+Following the response is necessary but not sufficient. An observer is a *task*, and the
+client is free to pipeline — the SDK's own client sends `session/prompt` the moment
+`session/new` returns. If the observer awaits real I/O before its notification reaches
+the transport, that request is read and its turn's first `session/update` is written in
+the meantime, and the palette arrives after the updates it was meant to precede.
+
+What makes the ordering deterministic is that the send is the observer's *first* await.
+`acp.task.MessageSender` is an ordered queue behind the stdio transport, so wire order is
+enqueue order; and the observer task is created while `_run_request` is still on the ready
+queue, ahead of any task the loop's next poll could create. So enqueueing without
+suspending puts the announcement in front of everything the pipelined request produces.
+
+That is why `agent._prepare_commands` builds the list during `session/new` — a
+`tools/list` per backend, which is precisely the I/O this observer must not do.
 
 This module is separate from [agent.py](agent.md) on purpose: that module's contract is
 that nothing in it parses a request id or knows a transport exists, and matching raw

@@ -1238,6 +1238,144 @@ async def test_new_and_fork_announce_nothing_because_the_id_is_news_to_the_clien
     assert client.updates == []
 
 
+async def test_a_minting_session_builds_its_commands_before_it_answers() -> None:
+    """The ordering fix behind `announcer.py`, asserted where it is implemented.
+
+    The announcement for `session/new` has to follow the response, so it rides a stream
+    observer — a *task*. A client is free to pipeline `session/prompt` on the heels of
+    `session/new`, and the SDK's own client does; if the observer had to walk `tools/list`
+    before it could send, that turn's first update would beat the palette onto the wire
+    and the palette would arrive after the updates it exists to precede. It did, on a
+    fast enough machine, and it failed on Python 3.11 four runs in five.
+
+    The property that fixes it is "the announcement is a pure send", and this is what
+    that looks like from the outside: `session/new` consults the executor, and
+    `announce_prepared_commands` — the door the observer is given — afterwards does not.
+    """
+
+    class Counting:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def available_commands(self, session_id):  # noqa: ANN001, ANN202
+            self.calls.append(session_id)
+            return []
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    executor = Counting()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+    assert executor.calls == [session_id], "session/new pays for the listing"
+    assert client.updates == [], "and still says nothing before its own response"
+
+    await agent.announce_prepared_commands(session_id)
+
+    assert executor.calls == [session_id], "the announcement asked the executor nothing"
+    kinds = [update.session_update for _session_id, update in client.updates]
+    assert kinds == ["available_commands_update"]
+
+
+async def test_a_fork_prepares_its_own_commands() -> None:
+    """A fork mints an id the same way, so it has the same gap and the same fix."""
+
+    class Counting:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def available_commands(self, session_id):  # noqa: ANN001, ANN202
+            self.calls.append(session_id)
+            return []
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    executor = Counting()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+    forked = await router("session/fork", {"cwd": "/work", "sessionId": session_id}, False)
+
+    assert executor.calls == [session_id, forked.session_id]
+    await agent.announce_prepared_commands(forked.session_id)
+    assert executor.calls == [session_id, forked.session_id]
+
+
+async def test_the_prepared_list_is_spent_once_and_never_repeated() -> None:
+    """The stash is one-shot, not a cache — and `announce_commands` never touches it.
+
+    The list changes: a catalogue server switched on mid-session changes it. Every
+    announcement but the session's first must therefore ask the executor again, which is
+    why the two doors are separate. A stash that survived its send, or one the general
+    door could consume, would pin the palette to whatever the session started with.
+    """
+
+    class Counting:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def available_commands(self, session_id):  # noqa: ANN001, ANN202
+            self.calls.append(session_id)
+            return []
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    executor = Counting()
+    agent, router, client, session_id = await _lifecycle_agent(executor=executor)
+
+    await agent.announce_prepared_commands(session_id)  # spends the prepared list
+    assert executor.calls == [session_id], "spent, not rebuilt"
+
+    await agent.announce_prepared_commands(session_id)  # nothing left: builds
+    await agent.announce_commands(session_id)  # the general door always builds
+
+    assert executor.calls == [session_id] * 3
+
+
+async def test_a_listing_that_fails_before_the_response_still_creates_the_session() -> None:
+    """`_prepare_commands` runs inside `session/new`, so its failure has a session to cost.
+
+    It must not. The listing is a convenience laid on a session that is already open and
+    working, and the announcer falls back to building the list itself — losing the
+    ordering guarantee, which is the right trade against losing the session.
+    """
+
+    class Broken:
+        supported_prompt_blocks = frozenset({"text"})
+        session_modes = None
+        session_config_options = ()
+
+        async def available_commands(self, session_id):  # noqa: ANN001, ANN202
+            raise RuntimeError("the server went away")
+
+        async def execute(self, context, prompt):  # noqa: ANN001, ANN202
+            raise AssertionError("not reached")
+
+    agent = make_agent(executor=Broken())
+    client = RecordingClient()
+    agent.on_connect(client)  # type: ignore[arg-type]
+    router = build_agent_router(agent, use_unstable_protocol=True)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+
+    assert created.session_id, "the session was created"
+    # Nothing was stashed, so the observer's door falls back to building — which fails
+    # the same way, and stays just as silent.
+    await agent.announce_prepared_commands(created.session_id)
+    assert client.updates == [], "and the failed listing announced nothing"
+
+
 async def test_an_executor_without_the_hook_is_not_broken_by_it() -> None:
     """The executor is swappable (D3), so `available_commands` is read defensively: one
     written before this existed announces nothing rather than raising."""

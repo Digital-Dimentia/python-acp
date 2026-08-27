@@ -140,6 +140,11 @@ class PythonAcpAgent:
         self._catalogue = catalogue if catalogue is not None else McpCatalogue()
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
+        # Commands built *before* a minting response is written, for the announcer to
+        # send *after* it. Keyed by session id, and normally empty: an entry lives only
+        # for the moment between `session/new` returning and the observer firing. See
+        # `_prepare_commands`, and `announcer.py` for why that moment is so narrow.
+        self._prepared_commands: dict[str, list[Any]] = {}
 
     @property
     def sessions(self) -> SessionRegistry:
@@ -374,10 +379,14 @@ class PythonAcpAgent:
         # **No command announcement here, and it is not an oversight.** The client learns
         # this session's id from the response below, so a `session/update` sent from in
         # here goes out *first*, names a session it has never heard of, and is dropped by
-        # a correct client. A `create_task` is no better — the SDK has no ordered send
-        # queue, so it races the reply. The announcement happens on the far side of that
-        # write instead, from the stream observer in `announcer.py`, which is a hook the
-        # SDK fires only after the response bytes have gone.
+        # a correct client. The announcement happens on the far side of that write
+        # instead, from the stream observer in `announcer.py`, which is a hook the SDK
+        # fires only after the response bytes have gone.
+        #
+        # What *is* done here is the expensive half. The observer must not await MCP I/O
+        # before it sends, or a client that pipelines `session/prompt` beats it to the
+        # wire; see `_prepare_commands`.
+        await self._prepare_commands(session.session_id)
         return NewSessionResponse(
             sessionId=session.session_id,
             modes=session.modes,
@@ -485,7 +494,9 @@ class PythonAcpAgent:
             await self._sessions.close(forked.session_id)
             raise
         # Same ordering as `new_session`, and the same answer: the fork's id is news to
-        # the client, so its commands are announced by `announcer.py` after this reply.
+        # the client, so its commands are announced by `announcer.py` after this reply —
+        # and built here, so that announcement is a pure send. See `_prepare_commands`.
+        await self._prepare_commands(forked.session_id)
         return ForkSessionResponse(
             sessionId=forked.session_id,
             modes=forked.modes,
@@ -532,6 +543,10 @@ class PythonAcpAgent:
         notification-shaped silence is not available on a request.
         """
         await self._sessions.close(session_id)
+        # Normally a no-op: the announcer pops it the instant the response goes out. It
+        # is here for the session whose client hung up in between, so a long-lived stdio
+        # process does not accumulate command lists nobody will ever be sent.
+        self._prepared_commands.pop(session_id, None)
         return CloseSessionResponse()
 
     @as_request_error
@@ -612,10 +627,70 @@ class PythonAcpAgent:
                 "Could not list commands for session %s: %s", session_id, exc
             )
             return
+        await self._send_commands(session_id, commands)
+
+    async def announce_prepared_commands(self, session_id: str) -> None:
+        """Send the list `session/new` or `session/fork` already built. The announcer's door.
+
+        The one caller is the stream observer in [announcer.py](announcer.md), and the
+        difference from `announce_commands` beside it is the whole point: this **awaits
+        nothing before it sends**. See `_prepare_commands` for why that matters and what
+        breaks without it.
+
+        Falls back to building when nothing was prepared — an executor with no listing, or
+        one whose `tools/list` failed a moment ago. That costs the ordering guarantee and
+        keeps the palette, which is the better half to lose.
+        """
+        commands = self._prepared_commands.pop(session_id, None)
+        if commands is None:
+            await self.announce_commands(session_id)
+            return
+        if self._client is None:
+            return
+        await self._send_commands(session_id, commands)
+
+    async def _send_commands(self, session_id: str, commands: Iterable[Any]) -> None:
+        """The one `available_commands_update` write, shared by both doors above."""
         await self.client.session_update(
             session_id=session_id,
             update=update_available_commands(list(commands)),
         )
+
+    async def _prepare_commands(self, session_id: str) -> None:
+        """Build a minting session's commands *before* its response is written.
+
+        **This is an ordering fix, not a cache.** The announcement for `session/new` and
+        `session/fork` has to follow the response — see `announcer.py` — and the SDK
+        gives it a stream observer to ride on. But an observer is a *task*, and building
+        the list costs a `tools/list` round trip per backend. Awaiting that inside the
+        observer parks it on real subprocess I/O, and a client that pipelines
+        `session/prompt` straight after `session/new` — the SDK's own client does — has
+        its turn's first `session/update` on the wire before the announcement gets back.
+        The palette then arrives *after* the updates it was supposed to precede.
+
+        Building here closes that gap. The observer is left with a pure send, and
+        `acp.task.MessageSender` is an ordered queue, so the first thing the observer
+        does is enqueue — before the loop can even read the pipelined request, let alone
+        run the turn that answers it. The ordering stops being a race and becomes a
+        consequence of when the two coroutines are scheduled.
+
+        Failure is silent for the same reason `announce_commands` swallows its own: a
+        `tools/list` that timed out must not cost the client the session it is attached
+        to. Nothing is stashed, and the announcer falls back to building the list itself
+        — losing the ordering guarantee, which is the right trade against losing the
+        palette entirely.
+        """
+        if self._client is None:
+            return
+        build = getattr(self._executor, "available_commands", None)
+        if build is None:
+            return
+        try:
+            self._prepared_commands[session_id] = list(await build(session_id))
+        except Exception as exc:  # noqa: BLE001 - never fatal to the session
+            logger.warning(
+                "Could not pre-list commands for session %s: %s", session_id, exc
+            )
 
     def _modes(self) -> SessionModeState | None:
         """The modes a new session starts with — the executor's, deep-copied.

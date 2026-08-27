@@ -1923,3 +1923,216 @@ async def test_the_catalogue_options_are_not_shared_between_sessions() -> None:
 
     assert option_of(first) is not option_of(second)
 
+
+async def test_toggling_a_catalogue_server_on_spawns_it() -> None:
+    """An `mcp/*` option is an action, not a stored flag."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha", enabled=False))
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        assert backends.backends(created.session_id) == {}
+        result = await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "mcp/alpha",
+             "type": "boolean", "value": True},
+            False,
+        )
+        opened = backends.backends(created.session_id)
+        assert list(opened) == ["alpha"]
+        assert [tool["name"] for tool in await opened["alpha"].list_tools()] == ["echo"]
+        # The response carries every option, not a diff — a client re-renders the panel.
+        options = {o["id"]: o for o in result["configOptions"]}
+        assert options["mcp/alpha"]["currentValue"] is True
+    finally:
+        await backends.close_all()
+
+
+async def test_toggling_a_catalogue_server_off_tears_its_subprocess_down() -> None:
+    """The conftest leak guard is the real assertion here: absence from the map would be
+    satisfied by a process that is still running."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha"))
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        assert list(backends.backends(created.session_id)) == ["alpha"]
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "mcp/alpha",
+             "type": "boolean", "value": False},
+            False,
+        )
+        assert backends.backends(created.session_id) == {}
+    finally:
+        await backends.close_all()
+
+
+async def test_a_toggle_announces_the_options_and_then_the_palette() -> None:
+    """The palette names the session's tools, so a selection change makes it stale. This
+    is what `announce_commands` was built for (`pyacp-p8v`)."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha", enabled=False))
+    client = RecordingClient()
+    agent.on_connect(client)
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        client.updates.clear()
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "mcp/alpha",
+             "type": "boolean", "value": True},
+            False,
+        )
+        kinds = [update.session_update for _, update in client.updates]
+        assert kinds == ["config_option_update", "available_commands_update"]
+        names = [c.name for _, u in client.updates if u.session_update == "available_commands_update"
+                 for c in u.available_commands]
+        assert "alpha/echo" in names
+    finally:
+        await backends.close_all()
+
+
+async def test_a_toggle_while_a_turn_is_running_is_refused() -> None:
+    """Closing a backend under a live `tools/call` turns it into a broken pipe, and the
+    client would see a backend error for something it did on purpose."""
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry()
+    router = make_router(
+        agent=make_agent(sessions=sessions, backends=backends, catalogue=a_catalogue("alpha"))
+    )
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        session = sessions.get(created.session_id)
+        forever: asyncio.Task[None] = asyncio.create_task(asyncio.Event().wait())
+        session.attach_turn(forever)
+        try:
+            with pytest.raises(RequestError) as excinfo:
+                await router(
+                    "session/set_config_option",
+                    {"sessionId": created.session_id, "configId": "mcp/alpha",
+                     "type": "boolean", "value": False},
+                    False,
+                )
+        finally:
+            forever.cancel()
+            session.detach_turn()
+
+        assert excinfo.value.code == -32602
+        assert "session/cancel" in str(excinfo.value.data)
+        # Neither the servers nor the option moved.
+        assert list(backends.backends(created.session_id)) == ["alpha"]
+        assert session.config_option("mcp/alpha").current_value is True
+    finally:
+        await backends.close_all()
+
+
+async def test_a_spawn_that_fails_leaves_the_option_off_and_the_session_alive() -> None:
+    """`open`'s all-or-nothing rule, at one server's granularity."""
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry()
+    catalogue = McpCatalogue(
+        [
+            CatalogueEntry(name="alpha", command=sys.executable, args=(str(FIXTURE_SERVER),)),
+            CatalogueEntry(
+                name="broken", command=sys.executable, args=["-c", "raise SystemExit(1)"],
+                enabled=False,
+            ),
+        ]
+    )
+    router = make_router(
+        agent=make_agent(sessions=sessions, backends=backends, catalogue=catalogue)
+    )
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        with pytest.raises(RequestError):
+            await router(
+                "session/set_config_option",
+                {"sessionId": created.session_id, "configId": "mcp/broken",
+                 "type": "boolean", "value": True},
+                False,
+            )
+        session = sessions.get(created.session_id)
+        assert session.config_option("mcp/broken").current_value is False
+        # The session was working a moment ago and still is.
+        assert created.session_id in sessions
+        assert list(backends.backends(created.session_id)) == ["alpha"]
+    finally:
+        await backends.close_all()
+
+
+async def test_a_fork_after_a_toggle_inherits_the_toggled_selection() -> None:
+    """`mcp_registry` keeps the specs so a fork can respawn them; a toggle has to move
+    that recipe, or a fork would resurrect a server its parent turned off."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha"))
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "mcp/alpha",
+             "type": "boolean", "value": False},
+            False,
+        )
+        forked = await router(
+            "session/fork", {"sessionId": created.session_id, "cwd": "/work"}, False
+        )
+        assert backends.backends(forked.session_id) == {}
+    finally:
+        await backends.close_all()
+
+
+async def test_setting_the_same_value_twice_does_not_respawn() -> None:
+    """A client re-sending a value it already set is ordinary; respawning would strand the
+    first subprocess while looking like it worked."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha"))
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        before = backends.get(created.session_id, "alpha")
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "mcp/alpha",
+             "type": "boolean", "value": True},
+            False,
+        )
+        assert backends.get(created.session_id, "alpha") is before
+    finally:
+        await backends.close_all()
+
+
+async def test_an_executor_option_still_behaves_exactly_as_before() -> None:
+    """The catalogue must not have turned every config option into a subprocess action."""
+    backends = McpBackendRegistry()
+    agent = make_agent(backends=backends, catalogue=a_catalogue("alpha"))
+    client = RecordingClient()
+    agent.on_connect(client)
+    router = make_router(agent=agent)
+
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        client.updates.clear()
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "configId": "announce-tools",
+             "type": "boolean", "value": False},
+            False,
+        )
+        assert [u.session_update for _, u in client.updates] == ["config_option_update"]
+        assert list(backends.backends(created.session_id)) == ["alpha"]
+    finally:
+        await backends.close_all()

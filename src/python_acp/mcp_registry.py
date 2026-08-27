@@ -290,6 +290,57 @@ class McpBackendRegistry:
         forked_roots = self._roots.get(parent_id, ()) if roots is None else tuple(roots)
         return await self.open(child_id, specs, forked_roots, elicit)
 
+    async def add(
+        self, session_id: str, server: McpServerStdio, elicit: Forwarder | None = None
+    ) -> MCPStdioClient:
+        """Open **one more** server on a session that is already running.
+
+        `open` is all-or-nothing for a whole session and refuses one that already has
+        backends, which is right at `session/new` and useless afterwards. This is the
+        single-server form, for a client switching a catalogue entry on mid-session
+        (`mcp_catalogue.py`).
+
+        The session's `roots` are reused rather than taken again: they are `cwd` +
+        `additionalDirectories` and cannot change for the life of a session, so a caller
+        being asked for them again could only get them wrong.
+
+        Opening a name that is already open is a **no-op returning the running client**.
+        A client re-sending a value it already set is ordinary, and respawning would
+        strand the first subprocess while looking like it worked.
+
+        The spec is appended to the session's recipe, so a later `fork` inherits what the
+        session actually has rather than what it was created with.
+        """
+        opened = self._backends.setdefault(session_id, {})
+        running = opened.get(server.name)
+        if running is not None:
+            return running
+        logger.debug("Adding MCP server %r to session %s", server.name, session_id)
+        client = await self._connect(server, self._roots.get(session_id, ()), elicit)
+        opened[server.name] = client
+        self._specs[session_id] = (*self._specs.get(session_id, ()), server)
+        return client
+
+    async def remove(self, session_id: str, name: str) -> bool:
+        """Stop one of a session's servers, leaving the rest running. `False` if it was
+        not open.
+
+        Dropped from the map **before** it is stopped, for the same reason `close` empties
+        the entry first: a stop that raises must not leave the session addressing a dead
+        backend. The spec goes with it, so a later `fork` does not respawn something the
+        session turned off.
+        """
+        opened = self._backends.get(session_id)
+        if not opened or name not in opened:
+            return False
+        client = opened.pop(name)
+        self._specs[session_id] = tuple(
+            spec for spec in self._specs.get(session_id, ()) if spec.name != name
+        )
+        logger.debug("Removing MCP server %r from session %s", name, session_id)
+        await self._stop_all([client])
+        return True
+
     def backends(self, session_id: str) -> Mapping[str, MCPStdioClient]:
         """Every server this session opened. Empty for a session that opened none.
 

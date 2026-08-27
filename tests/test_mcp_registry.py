@@ -264,6 +264,126 @@ async def test_declared_env_reaches_the_subprocess_on_top_of_our_own() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Adding and removing one server on a live session (`pyacp-lx7.3`)
+# ---------------------------------------------------------------------------
+
+
+async def test_add_opens_one_more_server_on_a_running_session() -> None:
+    """`open` is all-or-nothing for a whole session and refuses one that already has
+    backends, which is right at `session/new` and useless afterwards."""
+    registry, connector = fake_registry()
+    await registry.open("s1", [spec("alpha")], roots=["/work"])
+
+    client = await registry.add("s1", spec("beta"))
+
+    assert sorted(registry.backends("s1")) == ["alpha", "beta"]
+    assert client is registry.get("s1", "beta")
+
+
+async def test_add_reuses_the_sessions_roots_rather_than_taking_them_again() -> None:
+    """`cwd` + `additionalDirectories` cannot change for the life of a session, so a
+    caller asked for them a second time could only get them wrong."""
+    registry, connector = fake_registry()
+    await registry.open("s1", [spec("alpha")], roots=["/work", "/extra"])
+
+    await registry.add("s1", spec("beta"))
+
+    assert connector.roots[-1] == ("/work", "/extra")
+
+
+async def test_add_hands_the_new_backend_its_sessions_forwarder() -> None:
+    async def forwarder(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+    registry, connector = fake_registry()
+    await registry.open("s1", [spec("alpha")])
+
+    await registry.add("s1", spec("beta"), forwarder)
+
+    assert connector.elicit[-1] is forwarder
+
+
+async def test_adding_a_name_already_open_is_a_no_op() -> None:
+    """A client re-sending a value it already set is ordinary; respawning would strand
+    the first subprocess while looking like it worked."""
+    registry, connector = fake_registry()
+    await registry.open("s1", [spec("alpha")])
+    before = registry.get("s1", "alpha")
+
+    assert await registry.add("s1", spec("alpha")) is before
+    assert len(connector.opened) == 1
+
+
+async def test_add_appends_to_the_recipe_a_fork_inherits() -> None:
+    registry, _ = fake_registry()
+    await registry.open("s1", [spec("alpha")])
+    await registry.add("s1", spec("beta"))
+
+    await registry.fork("s1", "s2")
+
+    assert sorted(registry.backends("s2")) == ["alpha", "beta"]
+
+
+async def test_a_failed_add_leaves_the_session_as_it_was() -> None:
+    registry, _ = fake_registry(fail_on={"broken"})
+    await registry.open("s1", [spec("alpha")])
+
+    with pytest.raises(MCPProtocolError):
+        await registry.add("s1", spec("broken"))
+
+    assert list(registry.backends("s1")) == ["alpha"]
+    await registry.fork("s1", "s2")
+    assert list(registry.backends("s2")) == ["alpha"]
+
+
+async def test_remove_stops_one_server_and_leaves_the_rest() -> None:
+    registry, _ = fake_registry()
+    await registry.open("s1", [spec("alpha"), spec("beta")])
+    alpha = registry.get("s1", "alpha")
+
+    assert await registry.remove("s1", "alpha") is True
+
+    assert list(registry.backends("s1")) == ["beta"]
+    assert alpha.stopped == 1
+    assert registry.get("s1", "beta").stopped == 0
+
+
+async def test_remove_drops_the_spec_so_a_fork_does_not_resurrect_it() -> None:
+    registry, _ = fake_registry()
+    await registry.open("s1", [spec("alpha"), spec("beta")])
+    await registry.remove("s1", "alpha")
+
+    await registry.fork("s1", "s2")
+
+    assert list(registry.backends("s2")) == ["beta"]
+
+
+async def test_removing_something_that_is_not_open_says_so_rather_than_raising() -> None:
+    registry, _ = fake_registry()
+    await registry.open("s1", [spec("alpha")])
+
+    assert await registry.remove("s1", "beta") is False
+    assert await registry.remove("nosuch", "alpha") is False
+
+
+async def test_a_removed_backend_is_unaddressable_even_if_stopping_it_failed() -> None:
+    """Dropped from the map before it is stopped, for the same reason `close` empties the
+    entry first: a stop that raises must not leave the session addressing a dead
+    backend."""
+    registry, _ = fake_registry()
+    await registry.open("s1", [spec("alpha")])
+
+    async def refuse() -> None:
+        raise RuntimeError("will not stop")
+
+    registry.get("s1", "alpha").stop = refuse  # type: ignore[method-assign]
+
+    assert await registry.remove("s1", "alpha") is True
+    with pytest.raises(UnknownBackendError):
+        registry.get("s1", "alpha")
+
+
+# ---------------------------------------------------------------------------
 # Forking (pyacp-3rw.3)
 # ---------------------------------------------------------------------------
 

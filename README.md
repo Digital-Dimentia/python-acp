@@ -231,6 +231,44 @@ session closes:
 >
 > **Send all four fields, `args` and `env` as `[]` when there is nothing to put in them.**
 
+### Or the agent brings them, and you select
+
+`session/new`'s `mcpServers` assumes ACP's canonical topology: a client that **spawned**
+this agent, and so already holds the MCP configuration. When python-acp is a long-lived
+WebSocket server instead, that is backwards — the operator configured the deployment, not
+the client — and it means accepting a request to execute an arbitrary binary from anyone
+past the access key.
+
+So the operator can start the agent with a catalogue and let clients pick from it:
+
+```bash
+python-acp --mcp-config servers.toml
+```
+
+```toml
+[servers.tools]
+command = "python"
+args = ["my_mcp_server.py"]
+env = { LOG = "debug" }
+description = "Local demo tools"   # shown beside the toggle
+enabled = true                     # whether a new session starts with it on
+```
+
+JSON works too, including the `{"mcpServers": {...}}` shape editors already write, so an
+existing config can be pasted rather than translated.
+
+Each entry becomes one boolean `configOption` — `mcp/tools` above — on every session. No
+extension method and nothing new to learn: they arrive in `NewSessionResponse.configOptions`
+like any other option, `session/set_config_option` changes them, and `config_option_update`
+announces a change. ACP's `select` variant is single-choice, so a set of booleans is what
+a multi-select looks like here.
+
+**The two sources are additive.** A client that knows its own servers keeps naming them in
+`session/new`; a thin client selects from the catalogue; one session can have both. A name
+used by both is `-32602`. Everything else is unchanged: each session still spawns its own
+subprocesses, and they still die with it. See
+[mcp_catalogue.py](src/python_acp/mcp_catalogue.md).
+
 Only **stdio** servers are accepted. `initialize` advertises
 `mcpCapabilities: {http: false, sse: false, acp: false}`, so an `http` or `sse` entry is
 refused with `-32602` rather than accepted and quietly ignored. If any server fails to
@@ -461,9 +499,16 @@ client is the one that asked — so a second client on the same session stays in
 |---|---|---|---|
 | `announce-tools` | boolean | `true` | List the session's MCP tools each turn. Off saves the notification, not every `tools/list` — a turn still lists the servers it calls, because a tool call's `kind` comes from their annotations |
 | `on-tool-failure` | select | `continue` | `continue` runs the remaining calls; `stop` ends the turn at the failed one |
+| `mcp/<name>` | boolean | the catalogue's | Whether this session talks to the catalogue server `<name>` — see below. One per configured server, and only when the agent was started with `--mcp-config` |
 
 A change is announced with `config_option_update`, carrying **every** option rather than
 the changed one — which is what a client re-rendering a settings panel wants.
+
+An `mcp/<name>` option is an **action**, not a stored flag: setting it spawns or tears
+down that server for the session, and the palette is re-announced afterwards so what you
+can call follows what you selected. It is refused while a turn is running — closing a
+backend under a live tool call would turn it into a broken pipe — so cancel or wait. A
+spawn that fails leaves the option `false` and the session otherwise untouched.
 
 **Every tool call asks the client for permission first**, via
 `session/request_permission`. A server's tool annotations set the call's `kind`, so the

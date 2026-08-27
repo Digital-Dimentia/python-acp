@@ -62,7 +62,7 @@ from python_acp.capabilities import (
 from python_acp.elicitation import ConnectedClient, Forwarder
 from python_acp.elicitation import forwarder as elicitation_forwarder
 from python_acp.errors import as_request_error
-from python_acp.mcp_catalogue import McpCatalogue
+from python_acp.mcp_catalogue import CatalogueEntry, McpCatalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
 from python_acp.sessions import (
@@ -642,11 +642,71 @@ class PythonAcpAgent:
         The response carries **every** option, not just the changed one, because that is
         what the schema asks for and because a client re-rendering a settings panel wants
         the current state rather than a diff to apply.
+
+        **An `mcp/*` option is not a stored flag but an action.** Setting one spawns or
+        tears down that server for this session, and the palette is re-announced after,
+        so what the client can call follows what it selected. See `_select_mcp_server`.
         """
         session = self._sessions.get(session_id)
+        entry = self._catalogue.entry_for_config_id(config_id)
+        if entry is None:
+            session.set_config_option(config_id, value)
+            await self.announce_config_options(session)
+            return SetSessionConfigOptionResponse(configOptions=list(session.config_options))
+
+        previous = session.config_option(config_id).current_value
+        # Set first, act second, revert on failure. The alternative — check the type here
+        # and act before setting — would mean writing `Session.set_config_option`'s
+        # boolean-versus-select validation a second time, in the one place it must not
+        # drift from.
         session.set_config_option(config_id, value)
+        try:
+            await self._select_mcp_server(session, entry, bool(value))
+        except Exception:
+            session.set_config_option(config_id, previous)
+            raise
         await self.announce_config_options(session)
+        # The session's tools just changed, so the palette that names them is stale. This
+        # is the case `announce_commands` was built for: the client already knows this
+        # session's id — it named it in the request — so the notification can go inline.
+        await self.announce_commands(session_id)
         return SetSessionConfigOptionResponse(configOptions=list(session.config_options))
+
+    async def _select_mcp_server(
+        self, session: Session, entry: CatalogueEntry, wanted: bool
+    ) -> None:
+        """Spawn or tear down one catalogue server for a session that is already open.
+
+        **Refused while a turn is running.** Closing a backend out from under a
+        `tools/call` turns a live call into a broken pipe, and the client would see a
+        backend error for something it did on purpose. `session/cancel` or waiting are
+        both available and neither silently loses work, so refusing is the honest answer
+        rather than a race with a nicer name. It applies to *both* directions: a turn
+        already holds its backend map, so a server added mid-turn would be invisible to
+        it anyway, and half-applying a change is worse than declining it.
+
+        A spawn that fails leaves the option off — the caller reverts it — and the session
+        otherwise untouched. This is `open`'s all-or-nothing rule at one server's
+        granularity, and it is an error to the client rather than a closed session: the
+        session was working a moment ago and still is.
+        """
+        if session.turn_is_running:
+            raise RequestError.invalid_params(
+                {
+                    "error": (
+                        f"Session {session.session_id} has a turn running; its MCP servers "
+                        f"cannot change until that turn ends. Cancel it with "
+                        f"session/cancel, or wait for the prompt response."
+                    ),
+                    "configId": entry.config_id,
+                }
+            )
+        if wanted:
+            await self._backends.add(
+                session.session_id, entry.spec(), self._elicit_for(session.session_id)
+            )
+        else:
+            await self._backends.remove(session.session_id, entry.name)
 
     async def announce_config_options(self, session: Session) -> None:
         """Emit `config_option_update` for a session's options.

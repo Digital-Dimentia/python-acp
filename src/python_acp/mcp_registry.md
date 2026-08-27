@@ -84,6 +84,37 @@ Duplicate names within one `mcpServers` list are refused: `pyacp-hnk.2` routes a
 call by server name, and two servers answering to one name would make which of them ran a
 matter of dict ordering.
 
+## `add` and `remove` are the same rules at one server's granularity
+
+`open` is all-or-nothing for a **whole session** and refuses a session that already has
+backends. That is right at `session/new` and useless afterwards, and a client selecting a
+catalogue entry mid-session needs the single-server form:
+
+| | `open` | `add` / `remove` |
+|---|---|---|
+| Scope | every server a session will have | one |
+| When | `session/new`, `session/fork` | any time the session is alive |
+| Roots | taken from the caller | **reused** from the session |
+| Already open | refuses the session | `add` returns the running client |
+
+Roots are reused rather than taken again because they are `cwd` +
+`additionalDirectories` and cannot change for the life of a session — a caller asked for
+them a second time could only get them wrong.
+
+Both keep `_specs` in step, which is the part that is easy to forget: the specs exist so a
+`fork` can respawn them, so a fork after a toggle must inherit the session's **actual**
+selection rather than what it was created with. `remove` drops the entry from the map
+*before* stopping it, the same ordering `close` uses and for the same reason — a stop that
+raises must not leave the session addressing a dead backend.
+
+Adding a name that is already open is a **no-op**. A client re-sending a value it already
+set is ordinary, and respawning would strand the first subprocess while looking like it
+worked.
+
+Who calls these, when a turn may not be running, and what happens to the config option
+when a spawn fails are all [agent.py](agent.md)'s — this module has no opinion about
+sessions beyond their ids.
+
 ## The handshake happens at `open`
 
 `connect_stdio` starts the subprocess **and** completes `initialize` before returning. A
@@ -123,7 +154,7 @@ problem.
 
 | Symbol | Purpose |
 |---|---|
-| `McpBackendRegistry` | `open` / `fork` / `backends` / `get` / `close` / `close_all`, keyed by session id then name |
+| `McpBackendRegistry` | `open` / `add` / `remove` / `fork` / `backends` / `get` / `close` / `close_all`, keyed by session id then name |
 | `connect_stdio(server, roots)` | Spawn one server and complete its handshake — the default `Connector` |
 | `roots_responder(roots)` | Answers `roots/list`, and raises `UnsupportedServerRequest` for anything else |
 | `backend_responder(roots, elicit)` | The single `on_server_request` handler a backend gets, composing `roots_responder` with the elicitation forwarder. `None` when there is nothing to answer |

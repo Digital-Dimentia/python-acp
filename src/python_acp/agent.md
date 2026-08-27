@@ -188,6 +188,26 @@ misleading thing to tell someone whose collision came from a config file they ma
 written. `session/fork` inherits the parent's actual *selection*, including entries
 toggled after it was created, because that is what `mcp_registry` kept the specs for.
 
+**An `mcp/*` option is an action, not a stored flag.** Setting one spawns or tears down
+that catalogue server for the session, then re-announces the config options *and* the
+palette — the session's tools just changed, so the list naming them is stale. This is the
+case [announcer.py](announcer.md) exists to serve, taken inline rather than from an
+observer, because the client named the session itself and already knows the id.
+
+Three rules make that safe, and each of them is a failure someone would otherwise hit:
+
+- **Refused while a turn is running.** Closing a backend out from under a `tools/call`
+  turns a live call into a broken pipe, and the client would see a backend error for
+  something it did on purpose. `session/cancel` and waiting are both available and neither
+  silently loses work. It applies in *both* directions — a turn already holds its backend
+  map, so a server added mid-turn would be invisible to it anyway.
+- **Set first, act second, revert on failure.** The other order would mean writing
+  `Session.set_config_option`'s boolean-versus-select validation a second time, in the one
+  place it must not drift from.
+- **A failed spawn is an error, not a closed session.** `open`'s all-or-nothing rule at
+  one server's granularity: the option goes back to `false`, the session's other servers
+  are untouched, and the session — which was working a moment ago — still is.
+
 **`set_config_option` is one implementation for two request shapes.** The SDK
 discriminates `SetSessionConfigOptionBooleanRequest` from its select twin on `type` and
 splats either into the same parameters, so the only difference that arrives is what

@@ -44,10 +44,12 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 
+from python_acp.commands import CommandError, parse_command
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
+from test_markdown import assert_markdown_safe
 from python_acp.turn_mcp_router import (
     _BUILTIN_COMMANDS,
     CONVENTION,
@@ -504,6 +506,11 @@ async def test_a_prompt_that_is_not_an_invocation_is_refused_with_an_explanation
     assert result.stop_reason == "refusal"
     assert harness.of("tool_call") == []
     assert '"tool"' in harness.refusal()
+    # The refusal is advice about a shape, and it reaches the user through a Markdown
+    # renderer. Bare `<name>` is an HTML tag, so the advice arrived as `{"tool": ""}` --
+    # the exact shape it was telling the reader not to send (`pyacp-nlv`).
+    assert_markdown_safe(harness.refusal())
+    assert "<name>" in harness.refusal()
 
 
 async def test_an_empty_prompt_is_refused() -> None:
@@ -640,8 +647,12 @@ async def test_the_sessions_tools_are_announced_every_turn() -> None:
     # is read from the top, and what the session can *do* outranks how to ask about it.
     assert [c.name for c in commands] == ["tools/echo", *BUILTINS]
     assert commands[0].description
-    # The built-ins carry ACP's only argument shape: one free-text hint.
-    assert all(c.input.root.hint for c in commands[1:])
+    # ACP's only argument shape is one free-text hint, and **every** entry carries one.
+    # This used to say `commands[1:]`, excusing the tool entries for having none --
+    # which is how a composer came to offer `tools/echo` with nothing saying its
+    # parameter was named (`pyacp-acn`).
+    assert all(c.input.root.hint for c in commands)
+    assert commands[0].input.root.hint == "--text <string>"
 
 
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
@@ -2393,7 +2404,7 @@ async def test_prompt_show_expands_the_prompt_and_emits_the_messages() -> None:
 
     assert result.stop_reason == "end_turn"
     text = said(harness)
-    assert "demo/greeting — Greeting prompt" in text
+    assert "`demo/greeting` — Greeting prompt" in text
     assert "1 message" in text
     assert "user:" in text
     assert "Hello, Ada Lovelace!" in text
@@ -2562,3 +2573,60 @@ async def test_the_new_commands_are_announced_so_a_palette_can_offer_them() -> N
     assert names == ["demo/echo", *BUILTINS]
     assert "listPrompts" in names and "promptShow" in names and "resourceShow" in names
     assert "demo/greeting" not in names
+
+
+async def test_every_announced_command_is_one_the_parser_accepts() -> None:
+    """The promise `available_commands` makes, checked against the parser that keeps it.
+
+    `available_commands` is the field a client fills its composer from, so every name in it
+    is a name the client will send back. Before `pyacp-acn` the per-tool entries were
+    announced and then refused as malformed JSON, because `parse_command` knew only the
+    seven built-ins — and nothing here noticed, since no test typed an advertised tool
+    command. This walks the announcement itself, so a future palette entry with no parser
+    behind it fails rather than shipping.
+    """
+    async with Harness("alpha", "beta") as harness:
+        await harness.run(block(tool="echo", server="alpha"))
+
+    commands = harness.of("available_commands_update")[0].available_commands
+    assert [c.name for c in commands] == ["alpha/echo", "beta/echo", *BUILTINS]
+    for command in commands:
+        # `None` is the one failure. A `CommandError` means the name *was* recognised and
+        # then found incomplete -- `/invokeTool` alone names no tool -- which is a real
+        # answer to a real command, not the silent fall-through to the JSON convention
+        # that this test exists to catch.
+        try:
+            recognised = parse_command(f"/{command.name}") is not None
+        except CommandError:
+            recognised = True
+        assert recognised, (
+            f"{command.name!r} is announced but parse_command does not recognise it, so a "
+            f"client sending it back gets refused as malformed JSON"
+        )
+
+
+async def test_a_tool_is_called_by_its_own_palette_name() -> None:
+    """`/alpha/echo --text hi` is sugar for `/invokeTool alpha/echo --text hi`.
+
+    The same `InvokeTool`, so it inherits the mode, the permission prompt, the tool-call
+    `kind` and the failure policy without knowing they exist.
+    """
+    async with Harness("alpha") as harness:
+        result = await harness.run(typed("/alpha/echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    calls = harness.of("tool_call")
+    assert [c.title for c in calls] == ["alpha/echo"]
+    assert calls[0].raw_input == {"text": "hi"}
+
+
+async def test_the_palette_name_and_invoke_tool_produce_the_same_call() -> None:
+    """Sugar, not a second execution path — the whole reason it is safe to add."""
+    async with Harness("alpha") as sugar:
+        await sugar.run(typed("/alpha/echo --text hi"))
+    async with Harness("alpha") as verbose:
+        await verbose.run(typed("/invokeTool alpha/echo --text hi"))
+
+    one = sugar.of("tool_call")[0]
+    two = verbose.of("tool_call")[0]
+    assert (one.title, one.kind, one.raw_input) == (two.title, two.kind, two.raw_input)

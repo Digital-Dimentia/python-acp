@@ -32,6 +32,7 @@ from python_acp.commands import (
     render_resource_listing,
     render_tool_listing,
 )
+from test_markdown import assert_markdown_safe
 
 
 def schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -508,7 +509,7 @@ def test_the_prompt_heading_counts_messages_and_an_empty_expansion_says_so() -> 
     filled = render_prompt_heading(
         "demo", "greeting", {"description": "Greeting prompt", "messages": [{}, {}]}
     )
-    assert "demo/greeting — Greeting prompt" in filled
+    assert "`demo/greeting` — Greeting prompt" in filled
     assert "2 messages" in filled
     assert "expanded to no messages" in render_prompt_heading("demo", "greeting", {})
 
@@ -528,3 +529,124 @@ def test_prompt_messages_come_back_as_role_and_block_pairs() -> None:
     )
     assert [role for role, _ in pairs] == ["user", "assistant", "assistant", "unknown"]
     assert [block for _, block in pairs][0] == {"type": "text", "text": "one"}
+
+
+# --- markdown safety -------------------------------------------------------
+#
+# Every string in this section reaches a client as an `agent_message_chunk`, and every
+# real ACP client renders that field as Markdown. These assert the *property* rather than
+# the text — see `tests/test_markdown.py` for why the exact-string assertions elsewhere in
+# this file could not have caught `pyacp-nlv`.
+
+
+def test_the_tool_listing_survives_a_markdown_renderer() -> None:
+    """Types and the example placeholder are the whole content of those columns."""
+    text = render_tool_listing(
+        {
+            "demo": [
+                {"name": "echo", "inputSchema": schema({"text": {"type": "string"}}, ["text"])},
+                {"name": "bare"},
+            ],
+            "other": [],
+        }
+    )
+    assert_markdown_safe(text)
+    assert "<string>" in text, "the type must still be there to be worth protecting"
+    assert "`/invokeTool demo/echo --text <value>`" in text
+
+
+def test_the_prompt_and_resource_listings_survive_a_markdown_renderer() -> None:
+    prompts = render_prompt_listing(
+        {"demo": [{"name": "greeting", "arguments": [{"name": "who", "required": True}]}]},
+        undeclared=["quiet"],
+    )
+    resources = render_resource_listing(
+        {"demo": [{"uri": "file:///tmp/a", "name": "a", "mimeType": "text/plain"}]},
+        undeclared=["quiet"],
+    )
+    for text in (prompts, resources):
+        assert_markdown_safe(text)
+    assert "quiet declares no prompts capability" in prompts, (
+        "the undeclared note belongs outside the fence, as prose about the listing"
+    )
+
+
+def test_the_empty_listings_survive_a_markdown_renderer() -> None:
+    """The `session/new` example is JSON, and reflows into nonsense as a paragraph."""
+    for text in (
+        render_tool_listing({}),
+        render_prompt_listing({}),
+        render_resource_listing({}, undeclared=["quiet"]),
+    ):
+        assert_markdown_safe(text)
+
+
+def test_a_resource_whose_text_is_markdown_cannot_escape_its_fence() -> None:
+    """The most dangerous body there is: someone else's Markdown, containing a fence."""
+    text = render_resource_contents(
+        "file:///tmp/a",
+        {"contents": [{"uri": "file:///tmp/a", "text": "# Title\n\n```\ncode\n```\n"}]},
+    )
+    assert_markdown_safe(text)
+    assert "```\ncode\n```" in text, "the resource's own fence must survive verbatim"
+
+
+def test_the_prompt_heading_and_empty_contents_survive_a_markdown_renderer() -> None:
+    for text in (
+        render_prompt_heading("demo", "greeting", {"description": "Hi", "messages": [{}]}),
+        render_prompt_heading("demo", "greeting", {}),
+        render_resource_contents("file:///tmp/a", {}),
+    ):
+        assert_markdown_safe(text)
+
+
+def test_an_unnamed_argument_is_refused_with_a_rendered_shape() -> None:
+    """`--flag <value>` is the advice, and bare it renders as `--flag`."""
+    with pytest.raises(CommandError) as refusal:
+        parse_command("/invokeTool demo/echo positional")
+    assert_markdown_safe(str(refusal.value))
+    assert "<value>" in str(refusal.value)
+
+
+# --- curly quotes ----------------------------------------------------------
+
+
+def test_a_curly_quoted_value_is_refused_with_the_quote_named_as_the_cause() -> None:
+    """`shlex` splits at every space, so the refusal lands four tokens past the mistake.
+
+    `"` and `“` are near-indistinguishable at a chat font size, so naming the word `from`
+    alone sends the reader looking at something they did nothing wrong with.
+    """
+    with pytest.raises(CommandError) as refusal:
+        parse_command("/invokeTool demo/echo --text “Hello from the GUI”")
+
+    message = str(refusal.value)
+    assert "unexpected argument 'from'" in message, "the literal finding is still reported"
+    assert "curly quotes" in message
+    assert '`/invokeTool demo/echo --text "Hello from the GUI"`' in message, (
+        "the straightened command is the actionable half"
+    )
+    assert_markdown_safe(message)
+
+
+def test_curly_quotes_are_not_delimiters() -> None:
+    """Tokenisation is unchanged on purpose: `’` is an apostrophe far more often than a
+    quote, so straightening it would corrupt ordinary text."""
+    command = parse_command('/invokeTool demo/echo --text "it’s fine"')
+    assert isinstance(command, InvokeTool)
+    assert command.raw_arguments == {"text": ["it’s fine"]}
+
+
+def test_a_command_that_parses_gets_no_curly_quote_note() -> None:
+    """The note is only ever reached by a command that already failed."""
+    command = parse_command('/invokeTool demo/echo --text "say “hi” twice"')
+    assert isinstance(command, InvokeTool)
+    assert command.raw_arguments == {"text": ["say “hi” twice"]}
+
+
+def test_an_unbalanced_quote_still_reports_itself() -> None:
+    """A different failure, and the curly note must not displace it."""
+    with pytest.raises(CommandError) as refusal:
+        parse_command('/invokeTool demo/echo --text "unclosed')
+    assert "unbalanced quote" in str(refusal.value)
+    assert_markdown_safe(str(refusal.value))

@@ -37,6 +37,7 @@
   - [mcp_registry.py](src/python_acp/mcp_registry.md)
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [mcp_tools.py](src/python_acp/mcp_tools.md)
+  - [markdown.py](src/python_acp/markdown.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.

@@ -271,7 +271,7 @@
         "sessionId": "<session-1>",
         "update": {
           "content": {
-            "text": "The prompt is empty, so it names no tool to run. Each text block must be a JSON object naming an MCP tool: {\"tool\": \"<name>\", \"arguments\": {...}, \"server\": \"<name>\"}. \"arguments\" defaults to {}; \"server\" may be omitted only when the session opened exactly one MCP server.",
+            "text": "The prompt is empty, so it names no tool to run. Each text block must be a JSON object naming an MCP tool: `{\"tool\": \"<name>\", \"arguments\": {...}, \"server\": \"<name>\"}`. \"arguments\" defaults to {}; \"server\" may be omitted only when the session opened exactly one MCP server.",
             "type": "text"
           },
           "sessionUpdate": "agent_message_chunk"

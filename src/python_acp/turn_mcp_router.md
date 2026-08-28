@@ -244,6 +244,12 @@ all** — `test_nothing_runs_when_a_later_block_fails_to_parse` is the guard.
 `stopReason: "refusal"` exists for exactly this, and it comes with an
 `agent_message_chunk` carrying the reason *and* the convention.
 
+`CONVENTION` puts its JSON example in a **code span**, and that is load-bearing rather
+than cosmetic. A client renders an `agent_message_chunk` as Markdown, where a bare
+`<name>` is an HTML tag the browser deletes — so the refusal reached a user as
+`{"tool": "", "arguments": {...}, "server": ""}`, advising the very shape it was refusing.
+See [markdown.md](markdown.md) and `pyacp-nlv`.
+
 A JSON-RPC error would be wrong twice over: the request was well-formed ACP, and by the
 time a later block fails to parse the turn may already have emitted notifications a client
 cannot un-see. A silent refusal would be worse than either.

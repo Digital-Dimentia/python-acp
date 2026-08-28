@@ -65,9 +65,12 @@ The listings never needed that argument. `/tools` already reports what
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any
+
+from python_acp.markdown import code_span, fenced_lines
 
 #: What a client renders as a slash command. Accepted with or without the slash: a client
 #: that fills its composer from `available_commands` sends the name it was given, and a
@@ -239,11 +242,61 @@ def parse_command(text: str) -> Command | None:
             return None
         raise CommandError(
             f"/{head}: the command has an unbalanced quote. Wrap a value containing "
-            'spaces in one pair of quotes: --message "hello world".'
+            f"spaces in one pair of quotes: {code_span('--message \"hello world\"')}."
         ) from None
     if not tokens:
         return None
 
+    try:
+        return _dispatch(tokens)
+    except CommandError as refusal:
+        # The one place raw text becomes tokens, and so the only place that still has the
+        # text to diagnose. See `_curly_quote_note`.
+        note = _curly_quote_note(stripped)
+        if not note:
+            raise
+        raise CommandError(f"{refusal}{note}") from None
+
+
+#: The quotes a composer substitutes for `"` and `'`. `shlex` treats none of them as a
+#: delimiter, so a value wrapped in them is split at every space instead.
+_CURLY_QUOTES = "“”‘’"
+
+#: Each curly quote to the straight one it replaced, for showing a command that would work.
+_STRAIGHTEN = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+
+
+def _curly_quote_note(text: str) -> str:
+    """Name the curly quote as the cause, when a refusal is probably about one.
+
+    Autocorrect turns `"` into `“` in a chat composer, and `shlex` does not know that
+    character: `--text “Hello from the GUI”` tokenises to `--text`, `“Hello`, `from`,
+    `the`, `GUI”`, so the refusal lands on the word `from` — four tokens past the actual
+    mistake, naming something the reader did nothing wrong with. The two characters are
+    nearly indistinguishable at a chat font size, so without this the message sends the
+    reader looking in the wrong place (`pyacp-avg`).
+
+    **Appended, never substituted.** The original refusal is still the accurate account of
+    what the parser found; this says what probably put it there. And it is a note rather
+    than a rule: a curly quote *inside* a correctly quoted value is ordinary text, so this
+    is only ever reached on a command that already failed.
+
+    Tokenisation is deliberately not changed to accept these. `’` is an apostrophe far
+    more often than a quote — straightening it would corrupt ordinary prose — and treating
+    only the double forms as delimiters would make the rule arbitrary.
+    """
+    found = [quote for quote in _CURLY_QUOTES if quote in text]
+    if not found:
+        return ""
+    return (
+        f" This command contains curly quotes ({' '.join(found)}), which are not quote "
+        f"characters — the text was split at every space instead. Retype it with straight "
+        f"quotes: {code_span(text.translate(_STRAIGHTEN))}"
+    )
+
+
+def _dispatch(tokens: list[str]) -> Command | None:
+    """Route an already-tokenised command to its parser, or `None` if it is not one."""
     name = tokens[0].lstrip("/")
     rest = tokens[1:]
     if name == LIST_TOOLS:
@@ -260,7 +313,46 @@ def parse_command(text: str) -> Command | None:
         return _parse_prompt(InvokePrompt, PROMPT_INVOKE, PROMPT_INVOKE_HINT, rest)
     if name == RESOURCE_SHOW:
         return _parse_resource(rest)
+    if _TOOL_COMMAND.fullmatch(name):
+        return _parse_tool_command(name, rest)
     return None
+
+
+#: A palette entry for an MCP tool: `<server>/<tool>`, the name `_commands_for` announces.
+#:
+#: The server segment is deliberately narrow and the tool segment deliberately not. The
+#: narrow half is what keeps this from swallowing text that merely contains a slash: a
+#: JSON prompt tokenises to something like `{tool:fetch,arguments:{url:http://x/y}}`,
+#: whose first segment carries `{` and `:` and so cannot match. The wide half is because
+#: an MCP tool name is the server's to choose, and a tool this pattern rejected would be
+#: advertised and then refused — the exact bug this whole change is about (`pyacp-acn`).
+_TOOL_COMMAND = re.compile(r"[A-Za-z0-9_.-]+/\S+")
+
+
+def _parse_tool_command(name: str, tokens: list[str]) -> InvokeTool:
+    """`/<server>/<tool> --flag value` — a palette name typed directly.
+
+    Sugar for `/{INVOKE_TOOL} <server>/<tool> ...`, producing the identical `InvokeTool`,
+    so it inherits the session mode, the permission prompt, the tool-call `kind` and the
+    on-tool-failure policy without knowing they exist — the same reasoning that makes
+    `/invokeTool` share the JSON path's `Invocation`.
+
+    **This is what makes the palette honest.** `_commands_for` announces every MCP tool
+    under this name, and before `pyacp-acn` nothing accepted it: a client that filled its
+    composer from `available_commands` — which is what the field is for — had its own
+    advertised command refused as malformed JSON.
+
+    Split on the **first** slash, not the last. `_commands_for` builds the name as
+    `f"{server}/{tool}"` and a server name may not contain a slash, so the first one is
+    the join; `rpartition` would read `Demo/a/b` as server `Demo/a`. `/invokeTool` still
+    uses `rpartition` for its own free-typed target, which is a different question: there
+    the whole string is the user's, not one this agent generated.
+    """
+    server, _, tool = name.partition("/")
+    raw, bare = _parse_flags(name, tokens, "parameter")
+    return InvokeTool(
+        server=server or None, tool=tool, raw_arguments=raw, bare_flags=frozenset(bare)
+    )
 
 
 def _parse_bare(name: str, tokens: list[str], command: Command) -> Command:
@@ -363,9 +455,11 @@ def _parse_flags(
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--"):
+            # Built in a local rather than inline: a nested f-string reusing the outer
+            # quote character is PEP 701, which is 3.12+, and this project floors at 3.11.
+            shape = code_span("--{} <value>".format(token.lstrip("-") or "name"))
             raise CommandError(
-                f"/{verb}: unexpected argument {token!r}. Every {noun} is named: "
-                f"--{token.lstrip('-') or 'name'} <value>."
+                f"/{verb}: unexpected argument {token!r}. Every {noun} is named: {shape}."
             )
         key, separator, inline = token[2:].partition("=")
         if not key:
@@ -583,47 +677,48 @@ def prompt_arguments(
 # Rendering, which is the whole point of `/tools`
 # ---------------------------------------------------------------------------
 
-#: Two spaces of indent per level. A client renders `agent_message_chunk` as prose in a
-#: chat transcript, where a wide table wraps into gibberish and a deep indent runs out of
-#: room; this is the most structure that survives being reflowed.
+#: Two spaces of indent per level. A deep indent runs out of room in a chat transcript,
+#: and this is the most structure a narrow one can carry.
+#:
+#: The indent is only meaningful because every block that uses it is emitted inside a
+#: fenced code block — see `markdown.py`. Outside a fence a Markdown renderer treats these
+#: lines as a lazy paragraph continuation and reflows them into one run-on line, which is
+#: what `pyacp-nlv` was filed for. Do not indent a line that is not going inside a fence.
 _INDENT = "  "
 
 
 def render_tool_listing(listings: dict[str, list[dict[str, Any]]]) -> str:
     """The `/tools` answer: every tool on every configured server, with its parameters.
 
-    A plain multi-line string, because the client this serves puts it in a transcript.
-    Markdown is avoided deliberately — `agent_message_chunk` has no content type, so a
-    client that does not render Markdown would show the asterisks.
+    Three parts, and the middle one is fenced: a prose summary, the aligned body inside a
+    code fence, and a prose invitation whose example is a code span. The split is what
+    `pyacp-nlv` established — a client renders this string as Markdown, so the columns
+    survive only inside a fence and `<string>` survives only inside a fence or a span.
     """
     if not listings:
-        return (
-            "This session has no MCP servers, so there are no tools.\n"
-            "Servers are named when the session is created, in `session/new`:\n"
-            f'{_INDENT}"mcpServers": [{{"name": "demo", "command": "python", '
-            '"args": ["server.py"]}]'
-        )
+        return _no_servers("tools")
 
-    lines: list[str] = []
     total = sum(len(tools) for tools in listings.values())
-    lines.append(
-        f"{total} tool{'' if total == 1 else 's'} on "
-        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
-    )
+    body: list[str] = []
     for server in sorted(listings):
         tools = listings[server]
-        lines.append("")
-        lines.append(f"{server} ({len(tools)} tool{'' if len(tools) == 1 else 's'})")
+        if body:
+            body.append("")
+        body.append(f"{server} ({len(tools)} tool{'' if len(tools) == 1 else 's'})")
         if not tools:
-            lines.append(f"{_INDENT}(this server publishes no tools)")
+            body.append(f"{_INDENT}(this server publishes no tools)")
             continue
         for tool in tools:
-            lines.extend(_render_tool(server, tool))
+            body.extend(_render_tool(server, tool))
 
-    lines.append("")
-    lines.append("Call one with:")
-    example = _example(listings)
-    lines.append(f"{_INDENT}/{INVOKE_TOOL} {example}")
+    lines = [
+        f"{total} tool{'' if total == 1 else 's'} on "
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}.",
+        "",
+        *fenced_lines(body),
+        "",
+        f"Call one with: {code_span(f'/{INVOKE_TOOL} {_example(listings)}')}",
+    ]
     return "\n".join(lines)
 
 
@@ -665,6 +760,37 @@ def _render_tool(server: str, tool: dict[str, Any]) -> list[str]:
     return lines
 
 
+def tool_command_hint(tool: dict[str, Any]) -> str:
+    """The `input.hint` for one MCP tool's own palette entry.
+
+    Every built-in command carries a hint and, until `pyacp-acn`, the per-tool entries did
+    not — so a client's composer offered `Demo/echo` with nothing at all about how to pass
+    it anything. The observed consequence was a user typing `/Demo/echo foo bar`
+    positionally, because nothing on screen said the parameter was named `--text`.
+
+    Required parameters are shown bare and optional ones in brackets, which is the
+    convention `INVOKE_TOOL_HINT` already uses and the one a reader of any command line
+    expects. Types come from the schema when it declares them; `<value>` is the honest
+    answer when it does not, and the whole hint says so when there is no schema at all.
+    """
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or not properties:
+        return "(no parameters)"
+    required: set[str] = set()
+    if isinstance(schema, dict) and isinstance(schema.get("required"), list):
+        required = {key for key in schema["required"] if isinstance(key, str)}
+    parts: list[str] = []
+    for key in sorted(properties):
+        spec = properties[key] if isinstance(properties[key], dict) else {}
+        declared = spec.get("type") if isinstance(spec, dict) else None
+        kind = f"<{declared}>" if isinstance(declared, str) else "<value>"
+        flag = f"--{key} {kind}"
+        parts.append(flag if key in required else f"[{flag}]")
+    # Required first, so the shortest call that works reads off the front of the hint.
+    return " ".join(sorted(parts, key=lambda part: part.startswith("[")))
+
+
 def _example(listings: dict[str, list[dict[str, Any]]]) -> str:
     """A call the reader could actually paste, taken from what this session really has.
 
@@ -696,11 +822,14 @@ def _no_servers(noun: str) -> str:
     same reason, and three near-identical paragraphs would drift. "No servers" and "no
     prompts" are different problems, and only one of them is the reader's to fix.
     """
-    return (
-        f"This session has no MCP servers, so there are no {noun}.\n"
-        "Servers are named when the session is created, in `session/new`:\n"
-        f'{_INDENT}"mcpServers": [{{"name": "demo", "command": "python", '
-        '"args": ["server.py"]}]'
+    example = '"mcpServers": [{"name": "demo", "command": "python", "args": ["server.py"]}]'
+    return "\n".join(
+        [
+            f"This session has no MCP servers, so there are no {noun}.",
+            "Servers are named when the session is created, in `session/new`:",
+            "",
+            *fenced_lines([example]),
+        ]
     )
 
 
@@ -743,9 +872,9 @@ def render_prompt_listing(
 ) -> str:
     """The `/listPrompts` answer: every prompt, with the arguments it declares.
 
-    Same plain multi-line text as `render_tool_listing`, and for the same reason — a
-    client puts an `agent_message_chunk` in a transcript, where Markdown may show as
-    asterisks and a wide table reflows into gibberish.
+    Same three-part shape as `render_tool_listing`, and fenced for the same reason. The
+    undeclared-servers note stays **outside** the fence: it is prose about the listing
+    rather than part of it, and inside the fence it would render as monospaced output.
     """
     undeclared = list(undeclared or [])
     if not listings and not undeclared:
@@ -753,26 +882,28 @@ def render_prompt_listing(
     if not listings:
         return _nothing_declared(undeclared, "prompts", "prompts")
 
-    lines: list[str] = []
     total = sum(len(prompts) for prompts in listings.values())
-    lines.append(
-        f"{total} prompt{'' if total == 1 else 's'} on "
-        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
-    )
+    body: list[str] = []
     for server in sorted(listings):
         prompts = listings[server]
-        lines.append("")
-        lines.append(f"{server} ({len(prompts)} prompt{'' if len(prompts) == 1 else 's'})")
+        if body:
+            body.append("")
+        body.append(f"{server} ({len(prompts)} prompt{'' if len(prompts) == 1 else 's'})")
         if not prompts:
-            lines.append(f"{_INDENT}(this server publishes no prompts)")
+            body.append(f"{_INDENT}(this server publishes no prompts)")
             continue
         for prompt in prompts:
-            lines.extend(_render_prompt(server, prompt))
+            body.extend(_render_prompt(server, prompt))
 
-    lines.extend(_undeclared_note(undeclared, "prompts"))
-    lines.append("")
-    lines.append("Expand one with:")
-    lines.append(f"{_INDENT}/{PROMPT_SHOW} {_prompt_example(listings)}")
+    lines = [
+        f"{total} prompt{'' if total == 1 else 's'} on "
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}.",
+        "",
+        *fenced_lines(body),
+        *_undeclared_note(undeclared, "prompts"),
+        "",
+        f"Expand one with: {code_span(f'/{PROMPT_SHOW} {_prompt_example(listings)}')}",
+    ]
     return "\n".join(lines)
 
 
@@ -838,12 +969,12 @@ def render_prompt_heading(server: str, name: str, result: dict[str, Any]) -> str
     messages = result.get("messages")
     count = len(messages) if isinstance(messages, list) else 0
     description = result.get("description")
-    heading = f"{server}/{name}"
+    heading = code_span(f"{server}/{name}")
     if isinstance(description, str) and description:
         heading = f"{heading} — {description}"
     if count == 0:
-        return f"{heading}\n{_INDENT}(this prompt expanded to no messages)"
-    return f"{heading}\n{count} message{'' if count == 1 else 's'}, addressed to a model:"
+        return f"{heading}\n\n(this prompt expanded to no messages)"
+    return f"{heading}\n\n{count} message{'' if count == 1 else 's'}, addressed to a model:"
 
 
 def prompt_message_blocks(result: dict[str, Any]) -> list[tuple[str, Any]]:
@@ -873,35 +1004,40 @@ def prompt_message_blocks(result: dict[str, Any]) -> list[tuple[str, Any]]:
 def render_resource_listing(
     listings: dict[str, list[dict[str, Any]]], undeclared: list[str] | None = None
 ) -> str:
-    """The `/listResources` answer: uri, name, mime type. Never content."""
+    """The `/listResources` answer: uri, name, mime type. Never content.
+
+    Fenced body, prose summary and invitation — see `render_tool_listing`.
+    """
     undeclared = list(undeclared or [])
     if not listings and not undeclared:
         return _no_servers("resources")
     if not listings:
         return _nothing_declared(undeclared, "resources", "resources")
 
-    lines: list[str] = []
     total = sum(len(resources) for resources in listings.values())
-    lines.append(
-        f"{total} resource{'' if total == 1 else 's'} on "
-        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
-    )
+    body: list[str] = []
     for server in sorted(listings):
         resources = listings[server]
-        lines.append("")
-        lines.append(
+        if body:
+            body.append("")
+        body.append(
             f"{server} ({len(resources)} resource{'' if len(resources) == 1 else 's'})"
         )
         if not resources:
-            lines.append(f"{_INDENT}(this server publishes no resources)")
+            body.append(f"{_INDENT}(this server publishes no resources)")
             continue
         for resource in resources:
-            lines.extend(_render_resource(resource))
+            body.extend(_render_resource(resource))
 
-    lines.extend(_undeclared_note(undeclared, "resources"))
-    lines.append("")
-    lines.append("Read one with:")
-    lines.append(f"{_INDENT}/{RESOURCE_SHOW} {_resource_example(listings)}")
+    lines = [
+        f"{total} resource{'' if total == 1 else 's'} on "
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}.",
+        "",
+        *fenced_lines(body),
+        *_undeclared_note(undeclared, "resources"),
+        "",
+        f"Read one with: {code_span(f'/{RESOURCE_SHOW} {_resource_example(listings)}')}",
+    ]
     return "\n".join(lines)
 
 
@@ -943,33 +1079,44 @@ def render_resource_contents(uri: str, result: dict[str, Any]) -> str:
     printed**. Base64 in a chat transcript is not readable by the human it would be shown
     to and is bounded only by the file's size; the placeholder names the type and the
     approximate decoded size instead, which is what a reader can act on.
+
+    The contents go inside a fence, and that matters more here than in the listings: a
+    resource's text is arbitrary and frequently *is* Markdown. Rendered as prose it would
+    style itself — headings, lists, and its own fences — so a reader could not tell the
+    resource's text from this agent's. `fenced_lines` sizes the fence past anything the
+    body contains, so a resource holding a fenced block cannot close ours early.
     """
     contents = result.get("contents")
     contents = contents if isinstance(contents, list) else []
     if not contents:
-        return f"{uri}\n{_INDENT}(this resource has no contents)"
+        return f"{code_span(uri)}\n\n(this resource has no contents)"
 
-    lines = [f"{uri} — {len(contents)} content{'' if len(contents) == 1 else 's'}."]
+    body: list[str] = []
     for entry in contents:
-        lines.append("")
+        if body:
+            body.append("")
         if not isinstance(entry, dict):
-            lines.append(f"{_INDENT}[not a resource contents object: {type(entry).__name__}]")
+            body.append(f"[not a resource contents object: {type(entry).__name__}]")
             continue
         header = str(entry.get("uri") or uri)
         mime = entry.get("mimeType")
         if isinstance(mime, str) and mime:
             header = f"{header}  {mime}"
-        lines.append(header)
+        body.append(header)
         text = entry.get("text")
         if isinstance(text, str):
-            lines.append(text)
+            body.append(text)
             continue
         blob = entry.get("blob")
         if isinstance(blob, str):
-            lines.append(f"{_INDENT}[binary, about {_decoded_size(blob)} bytes, not shown]")
+            body.append(f"{_INDENT}[binary, about {_decoded_size(blob)} bytes, not shown]")
             continue
-        lines.append(f"{_INDENT}[this content carries neither text nor blob]")
-    return "\n".join(lines)
+        body.append(f"{_INDENT}[this content carries neither text nor blob]")
+
+    heading = (
+        f"{code_span(uri)} — {len(contents)} content{'' if len(contents) == 1 else 's'}."
+    )
+    return "\n".join([heading, "", *fenced_lines(body)])
 
 
 def _decoded_size(blob: str) -> int:

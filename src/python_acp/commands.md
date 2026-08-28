@@ -167,12 +167,78 @@ The same asymmetry reaches the *suggestion* an ambiguous session prints, which i
 `alpha/greeting` and `/resourceShow` suggests `alpha greeting://ada`. Printing the wrong
 one would be advice that does not run.
 
-## Rendering is plain text, deliberately
+## A tool is called by its own palette name
 
-The listings return a multi-line string with two-space indents and no Markdown.
-`agent_message_chunk` carries no content type, so a client that does not render Markdown
-would show the asterisks; a wide table wraps into gibberish in a chat transcript. Two
-levels of indent is the most structure that survives being reflowed.
+`_commands_for` announces every MCP tool as `<server>/<tool>`, and `parse_command`
+**accepts that name directly**:
+
+```
+/Demo/echo --text "hello world"
+```
+
+which is sugar for `/invokeTool Demo/echo --text "hello world"` and produces the identical
+`InvokeTool`. It is therefore not a second execution path: it inherits the session mode,
+the permission prompt, the tool-call `kind` and the on-tool-failure policy without knowing
+they exist, for exactly the reason `/invokeTool` does.
+
+This closes `pyacp-acn`, where the palette advertised names the parser did not accept. A
+client fills its composer from `available_commands` and sends back the name it was given;
+before the fix that name fell through to the JSON convention and was refused as *malformed
+JSON*, an error about a convention the user was not using. Per-tool entries also carried no
+`input` hint while every built-in did, so nothing on screen said the parameter was named —
+`tool_command_hint` now builds one from the tool's own schema.
+
+`test_every_announced_command_is_one_the_parser_accepts` walks the announcement and feeds
+each name back through the parser, so a future palette entry with nothing behind it fails
+here rather than in someone's chat window.
+
+**Which slash is the join.** The sugar splits on the **first** slash, because
+`_commands_for` builds the name as `f"{server}/{tool}"` and a server name may not contain
+one. `/invokeTool` keeps `rpartition` for its own target: there the whole string is the
+user's, not one this agent generated.
+
+The server segment of the pattern is narrow (`[A-Za-z0-9_.-]+`) and the tool segment is
+not. The narrow half is what stops this swallowing text that merely contains a slash — a
+JSON prompt tokenises to something carrying `{` and `:`, which cannot match. The wide half
+is because a tool name belongs to the server, and a name this pattern rejected would be
+advertised and then refused, which is the bug all over again.
+
+## Curly quotes are named, never accepted
+
+Autocorrect turns `"` into `“` in a chat composer, and `shlex` does not know that
+character. `--text “Hello from the GUI”` tokenises to `--text`, `“Hello`, `from`, `the`,
+`GUI”`, so the refusal lands on the word `from` — four tokens past the mistake, naming
+something the reader did nothing wrong with. At a chat font size the two characters are
+nearly indistinguishable, so the message alone sends them looking in the wrong place.
+
+`parse_command` therefore **appends** a note when a refusal comes from text containing a
+curly quote, naming it and showing the same command straightened. Appended rather than
+substituted: the original finding is still the accurate account of what the parser saw.
+
+Tokenisation is deliberately unchanged. `’` is an apostrophe far more often than a quote,
+so straightening it would corrupt ordinary text, and accepting only the double forms would
+make the rule arbitrary. `pyacp-avg`.
+
+## Rendering is Markdown-safe, in three parts
+
+Each listing is a prose summary, then the aligned body **inside a fenced code block**,
+then a prose invitation whose example is a **code span**. Two levels of two-space indent
+is the most structure a chat transcript can carry, and the fence is what makes that indent
+mean anything.
+
+This reverses an earlier decision, and the reversal is the point. The listings used to be
+bare plain text on the grounds that `agent_message_chunk` carries no content type, so a
+client which does not render Markdown would show the punctuation. That premise was
+untested and wrong about the audience: **every real ACP client renders the field as
+Markdown**, and plain text put through a parser is not styled differently, it is
+destroyed — `<string>` is an HTML tag the browser deletes, and a four-space line after a
+two-space one is a lazy paragraph continuation that reflows the whole listing into one
+line. [markdown.md](markdown.md) has the measurements and the tradeoff table; `pyacp-nlv`
+is the bug.
+
+The rule is per **field**, not per string. `AvailableCommand.input.hint` and
+`.description` keep their bare `<server>/<tool>`, because a client interpolates those as
+text rather than parsing them, and a backtick there would show up literally.
 
 Each listing ends with an example built from what the session actually has — a real
 server, a real tool or prompt, its own first required argument — rather than
@@ -195,7 +261,7 @@ Three things a listing refuses to be silent about, because silence has a wrong r
   messages emits no chunks at all, so without the count it looks exactly like a call that
   failed.
 
-`/promptShow` is the one command whose answer is not entirely plain text.
+`/promptShow` is the one command whose answer is not entirely this module's own text.
 `prompt_message_blocks` hands back `(role, raw MCP content block)` pairs and the caller maps
 each block through `mcp_content.to_content_block`, so an image in an expanded prompt stays
 an image. `supported_prompt_blocks` governs what this agent *reads*; this is the outbound
@@ -263,3 +329,5 @@ would silently hand its own bad quoting to the JSON parser.
 - [mcp_stdio.py](mcp_stdio.md) — `list_prompts`, `get_prompt`, `list_resources`,
   `read_resource`, and the `supports()` the capability check reads
 - [turns.py](turns.md) — `TurnContext.emit`, and the stop reason a command ends with
+- [markdown.py](markdown.md) — `code_span` and `fenced_lines`, and why every renderer
+  here goes through them

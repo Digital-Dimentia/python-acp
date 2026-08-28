@@ -142,7 +142,10 @@
           "availableCommands": [
             {
               "name": "tools/echo",
-              "description": "Echoes text"
+              "description": "Echoes text",
+              "input": {
+                "hint": "--text <string>"
+              }
             },
             {
               "name": "tools",
@@ -244,7 +247,10 @@
           "availableCommands": [
             {
               "name": "tools/echo",
-              "description": "Echoes text"
+              "description": "Echoes text",
+              "input": {
+                "hint": "--text <string>"
+              }
             },
             {
               "name": "tools",

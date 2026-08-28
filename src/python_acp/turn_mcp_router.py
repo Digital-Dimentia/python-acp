@@ -231,18 +231,26 @@ from python_acp.commands import (
     render_resource_contents,
     render_resource_listing,
     render_tool_listing,
+    tool_command_hint,
 )
+from python_acp.markdown import code_span
 from python_acp.paths import PathConstraintError, require_contained
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turns import Gate, TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
 
+#: The shape a prompt block must have, said once so every refusal says it the same way.
+#:
+#: The JSON example is a **code span**, not bare text. A client renders this message as
+#: Markdown, and bare `<name>` is an HTML tag it discards silently — the refusal reached a
+#: user as `{"tool": "", "arguments": {...}, "server": ""}`, advising a shape that is not
+#: the shape. See `markdown.py` and `pyacp-nlv`.
 CONVENTION = (
-    'Each text block must be a JSON object naming an MCP tool: '
-    '{"tool": "<name>", "arguments": {...}, "server": "<name>"}. '
-    '"arguments" defaults to {}; "server" may be omitted only when the session opened '
-    "exactly one MCP server."
+    "Each text block must be a JSON object naming an MCP tool: "
+    + code_span('{"tool": "<name>", "arguments": {...}, "server": "<name>"}')
+    + '. "arguments" defaults to {}; "server" may be omitted only when the session '
+    "opened exactly one MCP server."
 )
 
 
@@ -1586,6 +1594,13 @@ async def _commands_for(backends: Any, catalogue: ToolCatalogue) -> list[Availab
                 AvailableCommand(
                     name=f"{server}/{name}",
                     description=tool.get("description") or f"MCP tool {name!r}",
+                    # A hint, like every built-in has. Without one a composer offers the
+                    # name and nothing about its parameters, and the user guesses
+                    # positionally (`pyacp-acn`). `commands.parse_command` accepts this
+                    # name directly, so the hint describes a command that really runs.
+                    input=AvailableCommandInput(
+                        root=UnstructuredCommandInput(hint=tool_command_hint(tool))
+                    ),
                 )
             )
     # The built-ins go last, after the server's own tools: a palette is read from the top,

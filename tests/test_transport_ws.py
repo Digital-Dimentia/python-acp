@@ -40,8 +40,10 @@ from python_acp import __version__
 from python_acp import transport_ws
 from python_acp.cli import run as cli_run
 from python_acp.capabilities import build_agent_capabilities
+from python_acp.commands import CommandError, parse_command
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.sessions import SessionRegistry
+from test_markdown import assert_markdown_safe
 from python_acp.terminals import TerminalRegistry
 from python_acp.transport_ws import (
     _PING_INTERVAL_SECONDS,
@@ -1121,3 +1123,90 @@ def test_the_cli_serves_when_the_environment_supplies_a_key(
     monkeypatch.setattr(WebSocketAgentServer, "start", stop_here)
     cli_run()  # KeyboardInterrupt is swallowed by `run()`, so returning is the assertion.
     assert built["key"] == "s3cr3t"
+
+
+# --- parity with the stdio transport ---------------------------------------
+#
+# `pyacp-nlv`, `pyacp-acn` and `pyacp-avg` were all found by driving a real client over
+# **stdio**, and all three were fixed in shared code — `commands.py`, `markdown.py`,
+# `turn_mcp_router.py` — which both transports reach through the same `run_agent` and the
+# same `PythonAcpAgent`. That is an argument, not evidence. These assert it on this
+# socket, so a future change that reaches only one transport fails here.
+
+
+async def _say(websocket: FakeWebSocket, session_id: str, text: str, request_id: int) -> str:
+    """Run one prompt and return everything the agent said, joined."""
+    said: list[str] = []
+    before = len(websocket.sent)
+    await websocket.ask(
+        {"jsonrpc": "2.0", "id": request_id, "method": "session/prompt",
+         "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}}
+    )
+    for message in websocket.sent[before:]:
+        update = (message.get("params") or {}).get("update") or {}
+        if update.get("sessionUpdate") == "agent_message_chunk":
+            said.append(update["content"]["text"])
+    return "\n".join(said)
+
+
+async def test_the_websocket_palette_carries_the_same_tool_entries() -> None:
+    """`pyacp-acn` on this socket: every tool advertised, with a hint, and callable."""
+    async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
+        announced = next(
+            message
+            for message in websocket.sent
+            if (message.get("params") or {}).get("update", {}).get("sessionUpdate")
+            == "available_commands_update"
+        )
+        commands = announced["params"]["update"]["availableCommands"]
+        entry = next(c for c in commands if c["name"] == "tools/echo")
+        assert entry["input"]["hint"] == "--text <string>"
+        for command in commands:
+            try:
+                recognised = parse_command(f"/{command['name']}") is not None
+            except CommandError:
+                recognised = True
+            assert recognised, f"{command['name']!r} is announced but not recognised"
+
+        before = len(websocket.sent)
+        prompted = await websocket.ask(
+            {"jsonrpc": "2.0", "id": 950, "method": "session/prompt",
+             "params": {"sessionId": session_id,
+                        "prompt": [{"type": "text", "text": "/tools/echo --text hi"}]}}
+        )
+        calls = [
+            (message.get("params") or {}).get("update")
+            for message in websocket.sent[before:]
+            if (message.get("params") or {}).get("update", {}).get("sessionUpdate")
+            == "tool_call"
+        ]
+
+    # The palette's own name really ran the tool, rather than being refused as JSON.
+    assert prompted["result"]["stopReason"] == "end_turn"
+    assert [call["title"] for call in calls] == ["tools/echo"]
+    assert calls[0]["rawInput"] == {"text": "hi"}
+
+
+async def test_the_websocket_refusal_is_markdown_safe() -> None:
+    """`pyacp-nlv` on this socket: placeholders survive, and nothing is bare-indented."""
+    async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
+        refusal = await _say(websocket, session_id, "prose, not an invocation", 960)
+        listing = await _say(websocket, session_id, "/tools", 970)
+
+    assert_markdown_safe(refusal)
+    assert '`{"tool": "<name>"' in refusal, "the shape must reach the client intact"
+    assert_markdown_safe(listing)
+    assert "```" in listing and "<string>" in listing
+
+
+async def test_the_websocket_names_a_curly_quote() -> None:
+    """`pyacp-avg` on this socket."""
+    async with bound_socket() as websocket:
+        session_id = await open_session(websocket)
+        said = await _say(websocket, session_id, "/tools/echo --text “hello there”", 980)
+
+    assert "curly quotes" in said
+    assert '--text "hello there"' in said
+    assert_markdown_safe(said)

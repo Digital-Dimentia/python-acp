@@ -519,6 +519,61 @@ not consult `announce-tools`: that option suppresses a notification whose cost i
 repeated every turn, and a client that suppressed the repetition still needs a first list
 to show.
 
+### Each tool's schema rides along in `_meta`
+
+`input` is `UnstructuredCommandInput` — ACP's only argument shape, one free-text hint.
+`tool_command_hint` reads the tool's `inputSchema` to *build* that hint and then throws the
+structure away, so the client is handed a summary it cannot validate against and the user
+learns the flag names and the legal enum values by trial and error.
+
+`AvailableCommand` carries `_meta`, ACP's own extensibility point, so `_tool_meta` puts the
+schema back:
+
+```json
+"_meta": {"python-acp/tool": {"server": "tools", "tool": "echo", "inputSchema": {…}}}
+```
+
+A client that reads it can render a real form — typed inputs, required markers, ranges,
+enum values as a dropdown instead of a value the user has to spell correctly. A client that
+ignores it sees the session it saw before, because **the hint is unchanged**. That is the
+property that made this shippable ahead of any client (`pyacp-ma2`).
+
+Three rules, and each is load-bearing:
+
+- **Namespaced.** ACP says implementations MUST NOT make assumptions about `_meta` values,
+  so a bare `inputSchema` would be a land grab on a dict every extension shares. A client
+  wanting the idea without our namespace can fall back to `_meta.inputSchema`, which any
+  agent may adopt.
+- **Verbatim.** What `tools/list` returned, unnormalised and unreordered. The client renders
+  the *server's* vocabulary, not ours, and a helpfully-rewritten schema is one more place
+  for the form and `coerce_arguments` to disagree.
+- **Omitted, never null.** A tool that published no `inputSchema` said *nothing*, which is
+  not the same as one that published `properties: {}` and thereby said *it takes no
+  parameters*. [commands.py](commands.md) already draws that line in its error messages; a
+  client cannot draw it if both arrive as `"inputSchema": null`.
+
+`server` and `tool` are carried beside the schema so no client has to reimplement the rule
+that the name splits on the **first** slash.
+
+**Validation does not move.** `coerce_arguments` in [commands.py](commands.md) stays the
+authority. A client-side form is a convenience and must not become a trust boundary: any
+client can send any line, and a form that let this agent skip its own checks would be a
+regression in exactly the direction that matters.
+
+**The cost, measured** (`pyacp-ma2`, serialised `available_commands_update`, compact JSON):
+
+| Tools announced | Without `_meta` | With | Per tool |
+| --- | ---: | ---: | ---: |
+| The repo fixture's three | 1,428 B | 1,797 B | ~+120 B |
+| Three realistic tools — descriptions, enums, defaults, bounds | 1,702 B | 3,595 B | ~+630 B |
+
+A schema-carrying entry is roughly **4.5× its bare self**, and this notification is
+re-announced *every turn*. It is shipped ungated anyway: ~630 B per tool puts a 20-tool
+session near 13 KB per turn, which no transport here notices. The two escapes exist if that
+ever stops being true — send `_meta` only in the once-per-session announcement, or gate it
+on a client capability in `clientCapabilities._meta` — but the first makes the per-turn list
+disagree with the session's, and neither is worth buying before someone is actually paying.
+
 **The palette carries the verbs, and no individual prompt or resource** (`pyacp-tc5`). MCP
 keeps tools, prompts and resources in three separate namespaces, so one server may legally
 publish a tool and a prompt both called `greeting`; per-item entries would need a naming
@@ -546,6 +601,8 @@ need no table at all.
 | `_resolve_server(verb, server, target, backends, separator)` | Which server a command goes to, and the runnable suggestion when a session has several |
 | `_require_capability(verb, server, backend, capability)` | Refuses a prompt or resource command the server's own handshake says it cannot answer |
 | `McpToolRouterExecutor._catalogue` | Every server's `prompts/list` or `resources/list`, plus the servers that declared no such capability. Two values, because "publishes none" and "does not implement it" want different reactions |
+| `TOOL_META_KEY` | `"python-acp/tool"` — the `_meta` namespace a per-tool `AvailableCommand` publishes its schema under |
+| `_tool_meta(server, name, tool)` | That block: `server`, `tool`, and `inputSchema` verbatim when the tool published one |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |
 | `SESSION_MODES` | The three modes, and `EXECUTE` / `DRY_RUN` / `AUTO_APPROVE` for their ids |
 | `SESSION_CONFIG_OPTIONS` | The two config options, and `ANNOUNCE_TOOLS` / `ON_TOOL_FAILURE` |

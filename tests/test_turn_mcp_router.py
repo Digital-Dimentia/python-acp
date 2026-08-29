@@ -57,7 +57,9 @@ from python_acp.turn_mcp_router import (
     SESSION_CONFIG_OPTIONS,
     SESSION_MODES,
     PERMISSION_OPTIONS,
+    TOOL_META_KEY,
     McpToolRouterExecutor,
+    _tool_meta,
 )
 from python_acp.turns import TurnContext
 
@@ -653,6 +655,70 @@ async def test_the_sessions_tools_are_announced_every_turn() -> None:
     # parameter was named (`pyacp-acn`).
     assert all(c.input.root.hint for c in commands)
     assert commands[0].input.root.hint == "--text <string>"
+
+
+async def test_each_tools_schema_rides_along_in_meta() -> None:
+    """The structure the hint had to flatten, kept for a client that can render it.
+
+    `input` is `UnstructuredCommandInput` -- one free-text string -- so the hint is a
+    summary a client cannot validate against, and the user learns the flag names and the
+    legal enum values by trial and error. `_meta` is ACP's own extensibility point, and
+    `AvailableCommand` already carries it (`pyacp-ma2`).
+    """
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="echo"))
+
+    echo = harness.of("available_commands_update")[0].available_commands[0]
+    assert echo.name == "tools/echo"
+    meta = echo.field_meta[TOOL_META_KEY]
+    # Verbatim, unnormalised: the client renders the *server's* vocabulary, not ours, so
+    # this is what `tools/list` returned and not a cleaned-up restatement of it.
+    assert meta["inputSchema"] == {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    }
+    # The name splits on the *first* slash, a rule that exists because a server name may
+    # not contain one. Carrying the halves means no client has to reimplement it.
+    assert (meta["server"], meta["tool"]) == ("tools", "echo")
+    # The whole point of putting it in `_meta`: a client that ignores the key sees the
+    # session it saw before. Additive, or it is not shippable ahead of any client.
+    assert echo.input.root.hint == "--text <string>"
+
+
+async def test_the_builtins_carry_no_tool_meta() -> None:
+    """`_meta` here means "an MCP tool's schema". A built-in has no MCP tool behind it,
+    and answering the key with something invented would make the namespace mean two
+    things."""
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="echo"))
+
+    commands = harness.of("available_commands_update")[0].available_commands
+    assert all(not (c.field_meta or {}).get(TOOL_META_KEY) for c in commands[1:])
+
+
+def test_a_tool_that_published_no_schema_omits_the_key() -> None:
+    """Omitted, not null -- and not confused with a tool that published an empty one.
+
+    `commands.py` already draws this distinction in its error messages: `properties: {}`
+    is a statement that the tool takes no parameters, while an absent `inputSchema` says
+    *nothing*, and reporting the second as the first asserts a fact nobody published. A
+    client reading `_meta` has to be able to draw the same line, which it cannot do if we
+    send `"inputSchema": null` for both.
+
+    Direct rather than over the wire because the fixture's tools all publish a schema, and
+    teaching it to omit one would change what every unrelated test sees.
+    """
+    silent = _tool_meta("srv", "quiet", {"name": "quiet"})[TOOL_META_KEY]
+    assert "inputSchema" not in silent
+    assert (silent["server"], silent["tool"]) == ("srv", "quiet")
+
+    # An empty schema is a statement, so it survives.
+    empty = _tool_meta("srv", "loud", {"inputSchema": {"type": "object", "properties": {}}})
+    assert empty[TOOL_META_KEY]["inputSchema"] == {"type": "object", "properties": {}}
+
+    # A schema that is not an object at all said nothing usable either.
+    assert "inputSchema" not in _tool_meta("srv", "odd", {"inputSchema": "nonsense"})[TOOL_META_KEY]
 
 
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:

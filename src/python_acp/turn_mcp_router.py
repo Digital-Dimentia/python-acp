@@ -1586,6 +1586,48 @@ class McpToolRouterExecutor:
 _KIND_BY_OPTION: dict[str, str] = {option.option_id: option.kind for option in PERMISSION_OPTIONS}
 
 
+#: The `_meta` namespace this agent publishes on a per-tool `AvailableCommand`.
+#:
+#: Namespaced because ACP says implementations MUST NOT make assumptions about `_meta`
+#: values: an unnamespaced `inputSchema` would be a land grab on a dict every extension
+#: shares. A client that wants the idea without our namespace can fall back to a bare
+#: `_meta.inputSchema`, which is a convention any agent may adopt.
+TOOL_META_KEY = "python-acp/tool"
+
+
+def _tool_meta(server: str, name: str, tool: dict[str, Any]) -> dict[str, Any]:
+    """The `_meta` block for one tool's palette entry: what the hint had to throw away.
+
+    `input` is `UnstructuredCommandInput`, ACP's only argument shape — one free-text
+    string. `tool_command_hint` reads the tool's `inputSchema` to *build* that string and
+    then discards the structure, so a client is handed a summary it cannot validate
+    against, and the user learns the flag names and the legal enum values by trial and
+    error. `AvailableCommand` carries `_meta`, ACP's own extensibility point, and putting
+    the schema there lets a client render a real form — typed inputs, required markers,
+    enum dropdowns — while the hint stays exactly as it was for one that does not look.
+
+    Additive by construction: a client that ignores `_meta` sees no change at all, which
+    is the property that makes this safe to ship ahead of any client (`pyacp-ma2`).
+
+    **Passed through verbatim**, unnormalised and unreordered. The client is rendering the
+    *server's* vocabulary, not ours, and a helpfully-rewritten schema is one more place
+    for the form and `coerce_arguments` to disagree.
+
+    `server` and `tool` are carried alongside so a client need not know that
+    `parse_command` splits the name on the **first** slash — a rule that exists because a
+    server name may not contain one, and one no client should have to reimplement.
+    """
+    meta: dict[str, Any] = {"server": server, "tool": name}
+    schema = tool.get("inputSchema")
+    # Omitted rather than null when the tool published nothing. The distinction is
+    # load-bearing and `commands.py` already draws it: `properties: {}` is a statement
+    # that the tool takes no parameters, while an absent `inputSchema` says *nothing*, and
+    # `"inputSchema": null` is noise every reader has to defend against.
+    if isinstance(schema, dict):
+        meta["inputSchema"] = schema
+    return {TOOL_META_KEY: meta}
+
+
 async def _commands_for(backends: Any, catalogue: ToolCatalogue) -> list[AvailableCommand]:
     """Every MCP tool on the session, then the two built-ins.
 
@@ -1610,6 +1652,7 @@ async def _commands_for(backends: Any, catalogue: ToolCatalogue) -> list[Availab
                     input=AvailableCommandInput(
                         root=UnstructuredCommandInput(hint=tool_command_hint(tool))
                     ),
+                    field_meta=_tool_meta(server, name, tool),
                 )
             )
     # The built-ins go last, after the server's own tools: a palette is read from the top,

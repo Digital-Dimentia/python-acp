@@ -145,6 +145,23 @@
               "description": "Echoes text",
               "input": {
                 "hint": "--text <string>"
+              },
+              "_meta": {
+                "python-acp/tool": {
+                  "server": "tools",
+                  "tool": "echo",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ]
+                  }
+                }
               }
             },
             {
@@ -250,6 +267,23 @@
               "description": "Echoes text",
               "input": {
                 "hint": "--text <string>"
+              },
+              "_meta": {
+                "python-acp/tool": {
+                  "server": "tools",
+                  "tool": "echo",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ]
+                  }
+                }
               }
             },
             {

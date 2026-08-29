@@ -35,6 +35,11 @@ _list_empty_middle = os.environ.get("MOCK_MCP_LIST_EMPTY_MIDDLE") == "1"
 # annotation -> ACP kind mapping has a destructive tool, an additive one, and one that
 # says nothing. Opt-in: every other test expects this server to offer exactly one tool.
 _annotated_tools = os.environ.get("MOCK_MCP_ANNOTATED_TOOLS") == "1"
+# Adds the schema zoo (see SCHEMA_ZOO below) to the first tools/list page: one tool per
+# JSON Schema construct, so a client rendering a form from `AvailableCommand._meta` has
+# something worth rendering. Opt-in for the same reason as the line above -- every
+# unrelated test expects this server to offer exactly one tool.
+_schema_zoo = os.environ.get("MOCK_MCP_SCHEMA_ZOO") == "1"
 
 
 # Protocol-version negotiation knobs. Default echoes back whatever the client
@@ -115,6 +120,340 @@ def list_result(req, key, item_for_page):
     return result
 
 
+# ---------------------------------------------------------------------------
+# The schema zoo (MOCK_MCP_SCHEMA_ZOO=1)
+# ---------------------------------------------------------------------------
+# `every-content` serves every MCP content type in one result so the content mapping is
+# exercised against a real server. This is its counterpart for the other direction: every
+# JSON Schema construct a tool can publish, so the schema this bridge forwards on
+# `AvailableCommand._meta` (`pyacp-ma2`) can be rendered, mis-rendered and fixed against
+# something real. `pyacp-6kz`.
+#
+# One tool per concern rather than one tool carrying everything. A kitchen-sink schema
+# renders as a single enormous form, and when it renders wrong nothing says which
+# construct broke.
+#
+# Every zoo tool answers `tools/call` by echoing its arguments back as JSON. That is the
+# round trip worth having: it shows the JSON *types* the client's form and this bridge's
+# `coerce_arguments` actually produced, so `--count 3` arriving as `3` rather than `"3"`
+# is visible rather than assumed.
+SCHEMA_ZOO = [
+    # --- Every JSON type, bare. The floor: no constraints, nothing to infer from. ---
+    {
+        "name": "zoo-types",
+        "description": "One property of every JSON type, with no constraints",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "a_string": {"type": "string", "title": "A string"},
+                "a_number": {"type": "number", "title": "A number"},
+                "an_integer": {"type": "integer", "title": "An integer"},
+                "a_boolean": {"type": "boolean", "title": "A boolean"},
+                "an_array": {"type": "array", "items": {"type": "string"}, "title": "An array"},
+                "an_object": {"type": "object", "title": "An object"},
+                "a_null": {"type": "null", "title": "A null"},
+                # No `type` at all. A client has nothing to pick a widget from and must
+                # fall back to free text rather than guessing string.
+                "untyped": {"title": "Untyped", "description": "Declares no type"},
+                # Two types at once, which JSON Schema allows and most form builders do
+                # not expect.
+                "either": {"type": ["string", "number"], "title": "String or number"},
+            },
+        },
+    },
+    # --- String constraints and formats. ---
+    {
+        "name": "zoo-strings",
+        "description": "String constraints and the formats a client may specialise",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "short": {
+                    "type": "string",
+                    "title": "Short",
+                    "description": "Between 2 and 8 characters",
+                    "minLength": 2,
+                    "maxLength": 8,
+                },
+                "slug": {
+                    "type": "string",
+                    "title": "Slug",
+                    "description": "Lowercase letters, digits and hyphens",
+                    "pattern": "^[a-z0-9-]+$",
+                },
+                "email": {"type": "string", "format": "email", "title": "Email"},
+                "date": {"type": "string", "format": "date", "title": "Date"},
+                "when": {"type": "string", "format": "date-time", "title": "Timestamp"},
+                "where": {"type": "string", "format": "uri", "title": "URI"},
+                "id": {"type": "string", "format": "uuid", "title": "UUID"},
+                # A format nobody has heard of. It must degrade to a plain text box, not
+                # be dropped and not be refused.
+                "odd": {"type": "string", "format": "x-not-a-real-format", "title": "Odd"},
+            },
+            "required": ["slug"],
+        },
+    },
+    # --- Numeric constraints. ---
+    {
+        "name": "zoo-numbers",
+        "description": "Numeric bounds, steps, and integer against number",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "percent": {
+                    "type": "integer",
+                    "title": "Percent",
+                    "description": "Inclusive bounds, so 0 and 100 are both legal",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "default": 50,
+                },
+                "ratio": {
+                    "type": "number",
+                    "title": "Ratio",
+                    "description": "Exclusive bounds, so 0 and 1 are both illegal",
+                    "exclusiveMinimum": 0,
+                    "exclusiveMaximum": 1,
+                },
+                "step": {
+                    "type": "number",
+                    "title": "Step",
+                    "description": "Multiples of 0.25 only",
+                    "multipleOf": 0.25,
+                },
+                # Unbounded below and above: a slider is the wrong widget here, and a
+                # client that renders one anyway is caught by this.
+                "offset": {"type": "integer", "title": "Offset"},
+            },
+        },
+    },
+    # --- The three ways to spell a choice. A client gets them wrong independently. ---
+    {
+        "name": "zoo-choices",
+        "description": "Enums three ways: bare, labelled, and as oneOf/const",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "colour": {
+                    "type": "string",
+                    "title": "Colour",
+                    "description": "A bare enum: the value is the label",
+                    "enum": ["red", "green", "blue"],
+                },
+                "priority": {
+                    "type": "string",
+                    "title": "Priority",
+                    "description": "enum + enumNames: show the name, send the value",
+                    "enum": ["P0", "P1", "P2", "P3"],
+                    "enumNames": ["Critical", "High", "Normal", "Low"],
+                    "default": "P2",
+                },
+                "mode": {
+                    "title": "Mode",
+                    "description": "oneOf with const and title -- the same idea, spelt "
+                    "the way a JSON Schema generator emits it",
+                    "oneOf": [
+                        {"const": "fast", "title": "Fast"},
+                        {"const": "thorough", "title": "Thorough"},
+                    ],
+                },
+                # A single legal value. Not a dropdown -- there is nothing to choose.
+                "version": {"type": "string", "const": "v1", "title": "Version"},
+                # Enum over a non-string type, which a client that assumed strings will
+                # send back as "1" and break.
+                "retries": {"type": "integer", "enum": [0, 1, 3, 5], "title": "Retries"},
+            },
+            "required": ["colour"],
+        },
+    },
+    # --- Arrays. ---
+    {
+        "name": "zoo-arrays",
+        "description": "Arrays of scalars, of enums, and of objects",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "title": "Tags",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 5,
+                },
+                "kinds": {
+                    "type": "array",
+                    "title": "Kinds",
+                    "description": "A multi-select: an array whose items are an enum",
+                    "items": {"type": "string", "enum": ["code", "docs", "config", "tests"]},
+                },
+                "counts": {"type": "array", "title": "Counts", "items": {"type": "integer"}},
+                "people": {
+                    "type": "array",
+                    "title": "People",
+                    "description": "An array of objects -- a repeating sub-form",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "title": "Name"},
+                            "age": {"type": "integer", "title": "Age", "minimum": 0},
+                        },
+                        "required": ["name"],
+                    },
+                },
+                # No `items`. The array's contents are unconstrained, and a client has
+                # nothing to build a row editor from.
+                "anything": {"type": "array", "title": "Anything"},
+            },
+        },
+    },
+    # --- Required, optional, defaulted, and conditionally required. ---
+    {
+        "name": "zoo-required",
+        "description": "Required against optional against defaulted, plus dependentRequired",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "must": {"type": "string", "title": "Must", "description": "Required"},
+                "may": {"type": "string", "title": "May", "description": "Optional"},
+                "filled": {
+                    "type": "string",
+                    "title": "Filled",
+                    "description": "Optional, but pre-filled from `default`",
+                    "default": "already here",
+                },
+                "card": {"type": "string", "title": "Card number"},
+                "expiry": {"type": "string", "title": "Expiry"},
+            },
+            "required": ["must"],
+            # Naming `card` makes `expiry` required too. This is the one conditional
+            # construct acp-ui does render, so it is here rather than with the declined
+            # four below.
+            "dependentRequired": {"card": ["expiry"]},
+        },
+    },
+    # --- Nesting. ---
+    {
+        "name": "zoo-nested",
+        "description": "Objects inside objects, two deep",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "title": "Label"},
+                "server": {
+                    "type": "object",
+                    "title": "Server",
+                    "properties": {
+                        "host": {"type": "string", "title": "Host", "default": "localhost"},
+                        "port": {
+                            "type": "integer",
+                            "title": "Port",
+                            "minimum": 1,
+                            "maximum": 65535,
+                        },
+                        "tls": {
+                            "type": "object",
+                            "title": "TLS",
+                            "properties": {
+                                "enabled": {"type": "boolean", "title": "Enabled"},
+                                "ca": {"type": "string", "title": "CA path"},
+                            },
+                        },
+                    },
+                    "required": ["port"],
+                },
+            },
+            "required": ["server"],
+        },
+    },
+    # --- The four constructs a client is expected to DECLINE. -------------------
+    # Each is its own tool so each fallback can be looked at separately. A client that
+    # renders a subset of a conditional schema shows the user a form that is confidently
+    # wrong, which is worse than the plain text box it should fall back to.
+    {
+        "name": "zoo-if-then-else",
+        "description": "Conditional: `kind: advanced` makes `tuning` required",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["simple", "advanced"]},
+                "tuning": {"type": "string", "title": "Tuning"},
+            },
+            "if": {"properties": {"kind": {"const": "advanced"}}},
+            "then": {"required": ["tuning"]},
+            "else": {"properties": {"tuning": False}},
+            "required": ["kind"],
+        },
+    },
+    {
+        "name": "zoo-dependent-schemas",
+        "description": "Conditional: naming `billing` pulls in a whole sub-schema",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "billing": {"type": "string"}},
+            "dependentSchemas": {
+                "billing": {
+                    "properties": {"address": {"type": "string"}},
+                    "required": ["address"],
+                }
+            },
+            "required": ["name"],
+        },
+    },
+    # NOTE these next two publish no top-level `properties` at all -- theirs live inside
+    # the composition keyword. `tool_command_hint` therefore says "(no parameters)" for
+    # both, which is the whole argument for `_meta` in one line: the hint can only
+    # describe what it can walk, and a client with the schema can see two parameters the
+    # hint could not mention. Not a bug in either place; keep it that way.
+    {
+        "name": "zoo-all-of",
+        "description": "Composed: two schemas intersected with allOf",
+        "inputSchema": {
+            "type": "object",
+            "allOf": [
+                {"properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"properties": {"b": {"type": "integer"}}},
+            ],
+        },
+    },
+    {
+        "name": "zoo-one-of",
+        "description": "Discriminated union: exactly one branch applies",
+        "inputSchema": {
+            "type": "object",
+            "oneOf": [
+                {
+                    "title": "By id",
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"],
+                },
+                {
+                    "title": "By name",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            ],
+        },
+    },
+    # --- The two edges, which are the ones this repo's own code claims to handle. ---
+    {
+        "name": "zoo-empty",
+        "description": "Publishes an empty property block",
+        # `properties: {}` is a *statement*: this tool takes no parameters. Not the same
+        # as the tool below, and `commands.py` says so in its error messages.
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "zoo-silent",
+        "description": "Publishes no inputSchema at all",
+        # DELIBERATELY OFF-SPEC: MCP's `Tool` declares `inputSchema` required. Servers in
+        # the wild omit it anyway, and this repo already distinguishes "said nothing" from
+        # "said it takes none" -- `_tool_meta` omits the `_meta` key rather than sending
+        # `"inputSchema": null`, and `commands.py` writes a different error for each. That
+        # branch was reachable only from a unit test until this tool existed.
+    },
+]
+
+
 def tool_for_page(index):
     if index == 0:
         echo = {
@@ -134,8 +473,9 @@ def tool_for_page(index):
                 "openWorldHint": False,
             },
         }
+        extra = list(SCHEMA_ZOO) if _schema_zoo else []
         if not _annotated_tools:
-            return echo
+            return [echo, *extra] if extra else echo
         # Opt-in so every unrelated test keeps seeing exactly one tool. These exist to
         # exercise the annotation -> ACP kind mapping end to end.
         return [
@@ -157,6 +497,7 @@ def tool_for_page(index):
                 "description": "Says nothing about itself",
                 "inputSchema": {"type": "object", "properties": {}},
             },
+            *extra,
         ]
     return {
         "name": "echo-%d" % index,
@@ -349,6 +690,36 @@ while True:
                 "id": req_id,
                 "result": {
                     "content": [{"type": "text", "text": reply.strip()}],
+                    "isError": False,
+                },
+            }
+        )
+    # Every schema-zoo tool answers the same way: the arguments it received, echoed back
+    # as pretty JSON. What the tool *does* is not the point -- the point is seeing which
+    # JSON types came out the far end, so `--count 3` arriving as `3` rather than `"3"` is
+    # visible rather than assumed. `pyacp-6kz`.
+    elif method == "tools/call" and str(req.get("params", {}).get("name", "")).startswith(
+        "zoo-"
+    ):
+        params = req.get("params", {})
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "tool": params.get("name"),
+                                    "arguments": params.get("arguments", {}) or {},
+                                },
+                                indent=2,
+                                sort_keys=True,
+                            ),
+                        }
+                    ],
                     "isError": False,
                 },
             }

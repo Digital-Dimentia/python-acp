@@ -721,6 +721,122 @@ def test_a_tool_that_published_no_schema_omits_the_key() -> None:
     assert "inputSchema" not in _tool_meta("srv", "odd", {"inputSchema": "nonsense"})[TOOL_META_KEY]
 
 
+ZOO = {"tools": {"MOCK_MCP_SCHEMA_ZOO": "1"}}
+
+
+async def test_the_schema_zoo_is_absent_unless_asked_for() -> None:
+    """Opt-in, like the annotated tools and for the same reason: every unrelated test in
+    this file expects this server to offer exactly one tool."""
+    async with Harness("tools") as harness:
+        await harness.run(block(tool="echo"))
+
+    names = [c.name for c in harness.of("available_commands_update")[0].available_commands]
+    assert names == ["tools/echo", *BUILTINS]
+
+
+async def test_the_schema_zoo_reaches_meta_intact() -> None:
+    """The `pyacp-ma2` verbatim claim, checked against a real server rather than a dict.
+
+    `every-content` serves every MCP content type so the content mapping is exercised
+    against a server; this is its counterpart in the other direction (`pyacp-6kz`). A
+    client author renders these, and what they render has to be what the server said —
+    normalising on the way through is one more place for the form and `coerce_arguments`
+    to disagree.
+    """
+    async with Harness("tools", server_env=ZOO) as harness:
+        await harness.run(block(tool="echo"))
+
+    commands = harness.of("available_commands_update")[0].available_commands
+    zoo = {c.name: c for c in commands if c.name.startswith("tools/zoo-")}
+    # Every construct on both sides of the line a client draws: the ones it renders, the
+    # four conditional ones it is expected to decline, and the two edges.
+    assert set(zoo) == {
+        "tools/zoo-types",
+        "tools/zoo-strings",
+        "tools/zoo-numbers",
+        "tools/zoo-choices",
+        "tools/zoo-arrays",
+        "tools/zoo-required",
+        "tools/zoo-nested",
+        "tools/zoo-if-then-else",
+        "tools/zoo-dependent-schemas",
+        "tools/zoo-all-of",
+        "tools/zoo-one-of",
+        "tools/zoo-empty",
+        "tools/zoo-silent",
+    }
+
+    choices = zoo["tools/zoo-choices"].field_meta[TOOL_META_KEY]["inputSchema"]
+    # Unmodified: `enumNames` is not a JSON Schema keyword and a normalising pass is
+    # exactly what would drop it, taking the labels a dropdown needs with it.
+    assert choices["properties"]["priority"]["enumNames"] == ["Critical", "High", "Normal", "Low"]
+    # `oneOf`/`const` survives too, spelt the way a schema generator emits a choice.
+    assert choices["properties"]["mode"]["oneOf"] == [
+        {"const": "fast", "title": "Fast"},
+        {"const": "thorough", "title": "Thorough"},
+    ]
+    # A conditional schema is forwarded whole. A client declines to *render* these; that
+    # is its decision to make, and it cannot make it if we filter them out first.
+    assert "if" in zoo["tools/zoo-if-then-else"].field_meta[TOOL_META_KEY]["inputSchema"]
+    assert "allOf" in zoo["tools/zoo-all-of"].field_meta[TOOL_META_KEY]["inputSchema"]
+
+
+async def test_the_two_schema_edges_are_distinguishable_over_the_wire() -> None:
+    """"Said it takes none" and "said nothing" must not arrive looking the same.
+
+    Until `zoo-silent` existed the omission branch of `_tool_meta` was reachable only from
+    a unit test, because every fixture tool published a schema. `commands.py` writes a
+    different error message for each of these two, and a client reading `_meta` can only
+    draw the same line if the wire keeps them apart.
+    """
+    async with Harness("tools", server_env=ZOO) as harness:
+        await harness.run(block(tool="echo"))
+
+    zoo = {
+        c.name: c.field_meta[TOOL_META_KEY]
+        for c in harness.of("available_commands_update")[0].available_commands
+        if c.name.startswith("tools/zoo-")
+    }
+    # An empty property block is a statement, and it survives as one.
+    assert zoo["tools/zoo-empty"]["inputSchema"] == {"type": "object", "properties": {}}
+    # A tool that published nothing gets no key at all -- not `"inputSchema": null`.
+    assert "inputSchema" not in zoo["tools/zoo-silent"]
+    # Both still carry a hint, because every announced command does.
+    hints = {
+        c.name: c.input.root.hint
+        for c in harness.of("available_commands_update")[0].available_commands
+    }
+    assert hints["tools/zoo-empty"] == "(no parameters)"
+    assert hints["tools/zoo-silent"] == "(no parameters)"
+
+
+async def test_a_zoo_tool_echoes_the_json_types_it_was_given() -> None:
+    """The round trip the zoo exists for: what types came out the far end.
+
+    A form that renders correctly and then sends `"3"` where the schema says `integer` is
+    broken in a way no amount of looking at the form reveals. `coerce_arguments` is what
+    stands between the two, and this is the assertion that it did its job against a real
+    server.
+    """
+    async with Harness("tools", server_env=ZOO) as harness:
+        result = await harness.run(
+            block(
+                tool="zoo-numbers",
+                arguments={"percent": 75, "ratio": 0.5, "step": 0.25},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    echoed = json.loads(
+        [u for u in harness.of("tool_call_update") if u.raw_output][-1]
+        .raw_output["content"][0]["text"]
+    )
+    assert echoed == {
+        "tool": "zoo-numbers",
+        "arguments": {"percent": 75, "ratio": 0.5, "step": 0.25},
+    }
+
+
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
     """That is the point: a refusal that also says what *could* have been called is
     actionable, and one that only says "that was not an invocation" is not."""

@@ -560,6 +560,20 @@ authority. A client-side form is a convenience and must not become a trust bound
 client can send any line, and a form that let this agent skip its own checks would be a
 regression in exactly the direction that matters.
 
+**Something to render it against.** The fixture's `echo` declares one required string,
+which is not a form. `MOCK_MCP_SCHEMA_ZOO=1` adds a tool per JSON Schema construct to
+[mock_mcp_server.py](../../tests/fixtures/mock_mcp_server.py) (`pyacp-6kz`) — every type
+bare, string and numeric constraints, the three ways to spell a choice, arrays,
+`dependentRequired`, nesting; the four conditional constructs a client is expected to
+*decline* (`if`/`then`/`else`, `dependentSchemas`, `allOf`, discriminated `oneOf`), each
+its own tool so each fallback can be looked at separately; and both edges — `properties:
+{}` against no `inputSchema` at all. `zoo-all-of` and `zoo-one-of` are the argument for
+this whole section in one line: their properties live inside the composition keyword, so
+the hint can only say `(no parameters)` while the schema shows two. Every zoo tool echoes
+its arguments back as JSON, so
+what `coerce_arguments` produced is visible rather than assumed. `make run` prints the
+demo server command; add the variable to its `env` in `session/new`.
+
 **The cost, measured** (`pyacp-ma2`, serialised `available_commands_update`, compact JSON):
 
 | Tools announced | Without `_meta` | With | Per tool |

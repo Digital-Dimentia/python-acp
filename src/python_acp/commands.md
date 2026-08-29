@@ -203,6 +203,65 @@ JSON prompt tokenises to something carrying `{` and `:`, which cannot match. The
 is because a tool name belongs to the server, and a name this pattern rejected would be
 advertised and then refused, which is the bug all over again.
 
+## A loose token is carried, not refused where it is found
+
+`/Demo/echo foo bar` names no parameter for `foo`, and refusing it is correct — MCP tool
+arguments are a named object, so there is no position to map a bare value onto, and
+guessing one is the same guess `_resolve_server` refuses to make about servers.
+
+The *message* was the bug (`pyacp-ysq`). `_parse_flags` is pure parsing: it sees a token
+with no `--name` in front of it and knows nothing else, so the only flag it could name was
+one built from the failing token itself —
+
+```
+/Demo/echo: unexpected argument 'foo'. Every parameter is named: `--foo <value>`.
+```
+
+— which reads as advice to run `/Demo/echo --foo bar`, a parameter that does not exist and
+fails differently when followed. The reader's *value* was echoed back as a parameter name.
+
+So the two tool commands pass `collect_positional=True` and carry the tokens on
+`InvokeTool.positional` instead. By the time `_from_command` has resolved the server and
+fetched `inputSchema`, the tool's real parameters are known, and
+`positional_argument_error` writes the message that could not be written earlier:
+
+```
+/Demo/echo: `foo`, `bar` are values with no parameter in front of them.
+Every parameter is named: `--text <string>`. Try `/Demo/echo --text "foo bar"`.
+```
+
+Three shapes, because three things can be true and only one of them is "you meant a flag":
+
+| What the tool published | What the message says |
+| --- | --- |
+| `properties` with entries | names them all, from `tool_command_hint` |
+| `properties: {}` | "takes no parameters" — an empty block is a statement |
+| no `inputSchema` at all | says the tool names none, and invents nothing |
+
+The last two are deliberately not merged. A server that omits `inputSchema` has said
+*nothing* about its parameters, and reporting that as "takes no parameters" would assert a
+fact nobody published.
+
+The `Try` line is offered only when one parameter is unambiguous — the tool has exactly
+one, or exactly one required. With several to choose from, picking one would be a guess of
+the same kind the refusal exists to avoid. The value in it is the loose tokens joined and
+quoted when `shlex` would split them again, which is the observed case: `foo bar` was one
+value that wanted quoting.
+
+**Both spellings are answered in their own words.** `/Demo/echo` and `/invokeTool
+Demo/echo` are the same call, so `InvokeTool.typed_as` records which one was typed and
+`invocation_prefix` reads it back. A refusal that answered one in the other's spelling
+would make the reader translate before they could retry. The same prefix is now used by
+the "no such tool" and "no such parameter" refusals, which had the same defect more
+quietly.
+
+The prompt commands still refuse on the spot. `prompts/list` describes an argument with a
+name and a description and no type, so deferring would buy them nothing.
+
+**The tokens are rendered as code spans, not `repr`.** They are the reader's own text, and
+a token like `<b>` quoted into prose is deleted outright by a Markdown client — see
+[markdown.md](markdown.md).
+
 ## Curly quotes are named, never accepted
 
 Autocorrect turns `"` into `“` in a chat composer, and `shlex` does not know that
@@ -214,6 +273,13 @@ nearly indistinguishable, so the message alone sends them looking in the wrong p
 `parse_command` therefore **appends** a note when a refusal comes from text containing a
 curly quote, naming it and showing the same command straightened. Appended rather than
 substituted: the original finding is still the accurate account of what the parser saw.
+
+A curly quote is the single most common reason a loose token appears at all, so the note
+has to survive the deferral above. It cannot be written later — only `parse_command` still
+has the raw text — so it is computed there and carried on `InvokeTool.positional_note`,
+which `positional_argument_error` appends in the same position it would have occupied.
+Without that, `--text “hello there”` would be answered with a lecture about parameters
+when the reader's actual mistake was a quote character.
 
 Tokenisation is deliberately unchanged. `’` is an apostrophe far more often than a quote,
 so straightening it would corrupt ordinary text, and accepting only the double forms would

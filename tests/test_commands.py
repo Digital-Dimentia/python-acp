@@ -24,6 +24,7 @@ from python_acp.commands import (
     ShowResource,
     coerce_arguments,
     parse_command,
+    positional_argument_error,
     prompt_arguments,
     prompt_message_blocks,
     render_prompt_heading,
@@ -108,9 +109,18 @@ def test_the_argument_forms(text: str, expected: dict[str, list[str]]) -> None:
     assert command.raw_arguments == expected
 
 
-def test_a_positional_argument_is_refused_with_the_named_form() -> None:
-    with pytest.raises(CommandError, match="Every parameter is named"):
-        parse_command("/invokeTool demo/echo hi")
+def test_a_positional_argument_is_carried_rather_than_refused_here() -> None:
+    """Parsing keeps a loose token; `positional_argument_error` is what refuses it.
+
+    The split is the whole of `pyacp-ysq`: refused here, the message could name no
+    parameter but the failing token, so it advised a flag named after the reader's own
+    value. The tool's real parameters are an await away, so the complaint goes there.
+    """
+    command = parse_command("/invokeTool demo/echo hi")
+    assert isinstance(command, InvokeTool)
+    assert command.positional == ("hi",)
+    assert command.raw_arguments == {}
+    assert command.typed_as == "/invokeTool demo/echo"
 
 
 def test_the_tool_is_required() -> None:
@@ -601,11 +611,135 @@ def test_the_prompt_heading_and_empty_contents_survive_a_markdown_renderer() -> 
 
 
 def test_an_unnamed_argument_is_refused_with_a_rendered_shape() -> None:
-    """`--flag <value>` is the advice, and bare it renders as `--flag`."""
-    with pytest.raises(CommandError) as refusal:
-        parse_command("/invokeTool demo/echo positional")
-    assert_markdown_safe(str(refusal.value))
-    assert "<value>" in str(refusal.value)
+    """`--flag <value>` is the advice, and the shape it renders is the *tool's*."""
+    command = parse_command("/invokeTool demo/echo positional")
+    assert isinstance(command, InvokeTool)
+    message = str(positional_argument_error(command, schema({"text": {"type": "string"}})))
+    assert_markdown_safe(message)
+    assert "<string>" in message
+
+
+def test_a_prompt_command_still_refuses_a_positional_argument_at_parse_time() -> None:
+    """The deferral is the two tool commands' alone.
+
+    `prompts/list` describes an argument with a name and a description and no type, so
+    there is nothing a later message could add that this one cannot say now.
+    """
+    with pytest.raises(CommandError, match="Every argument is named"):
+        parse_command("/promptShow demo/greeting Ada")
+
+
+# --- a loose token, and the message that names the tool's real parameters ---
+#
+# `pyacp-ysq`. The parser sees a token with no `--name` in front of it and nothing else,
+# so the message it used to write echoed that token back as `--foo <value>` — advice to
+# name a parameter after the reader's own *value*. These assert the two halves of the fix:
+# the failing token is never rendered as a flag, and what is named instead comes from the
+# tool's own schema.
+
+
+ECHO_SCHEMA = schema({"text": {"type": "string"}}, ["text"])
+
+
+def loose(text: str) -> InvokeTool:
+    command = parse_command(text)
+    assert isinstance(command, InvokeTool)
+    assert command.positional, "this fixture is for commands that carry a loose token"
+    return command
+
+
+def test_the_failing_token_is_never_offered_back_as_a_flag() -> None:
+    """The defect itself, stated as a test: `foo` was a value, not a parameter name."""
+    message = str(positional_argument_error(loose("/Demo/echo foo bar"), ECHO_SCHEMA))
+    assert "--foo" not in message
+    assert "--bar" not in message
+    assert "--text <string>" in message
+
+
+def test_the_example_quotes_a_value_the_shell_split() -> None:
+    """`/Demo/echo foo bar` is one value that wanted quoting, which is the whole case.
+
+    The example has to survive `parse_command`'s own `shlex.split`, so it is asserted by
+    round-tripping it rather than by matching the string.
+    """
+    message = str(positional_argument_error(loose("/Demo/echo foo bar"), ECHO_SCHEMA))
+    assert '`/Demo/echo --text "foo bar"`' in message
+
+    replayed = parse_command('/Demo/echo --text "foo bar"')
+    assert isinstance(replayed, InvokeTool)
+    assert replayed.raw_arguments == {"text": ["foo bar"]}
+    assert not replayed.positional
+
+
+def test_the_example_is_offered_for_the_one_required_parameter() -> None:
+    """Several parameters and one required: the required one is the unambiguous pick."""
+    message = str(
+        positional_argument_error(
+            loose("/Demo/echo hi"),
+            schema({"text": {"type": "string"}, "count": {"type": "integer"}}, ["text"]),
+        )
+    )
+    assert "Try `/Demo/echo --text hi`." in message
+    assert "--count <integer>" in message, "the others are still named"
+
+
+def test_no_example_is_invented_when_no_parameter_is_the_obvious_one() -> None:
+    """Two parameters and neither required. Picking one would be the guess
+    `_resolve_server` already refuses to make about servers."""
+    message = str(
+        positional_argument_error(
+            loose("/Demo/echo hi"),
+            schema({"text": {"type": "string"}, "count": {"type": "integer"}}),
+        )
+    )
+    assert "Try" not in message
+    assert "--text <string>" in message and "--count <integer>" in message
+
+
+def test_a_tool_with_no_schema_names_no_parameter_it_cannot_know() -> None:
+    """A server that omits `inputSchema` has said nothing about its parameters.
+
+    Reporting that as "takes no parameters" would invent a fact, and inventing a flag is
+    the defect this bead is about, so the message says only what is true.
+    """
+    message = str(positional_argument_error(loose("/Demo/echo foo"), None))
+    assert "no input schema" in message
+    assert "--foo" not in message
+    assert "`--<name> <value>`" in message
+
+
+def test_a_tool_that_declares_no_parameters_says_so() -> None:
+    """Distinct from the case above: an empty `properties` block is a statement."""
+    message = str(positional_argument_error(loose("/Demo/wipe foo"), schema({})))
+    assert "takes no parameters" in message
+    assert "`foo`" in message
+    assert "--foo" not in message
+
+
+def test_the_message_answers_in_the_spelling_the_reader_used() -> None:
+    """`/Demo/echo` and `/invokeTool Demo/echo` are one call, and a refusal that answers
+    one in the other's spelling makes the reader translate before they can retry."""
+    palette = str(positional_argument_error(loose("/Demo/echo hi"), ECHO_SCHEMA))
+    assert palette.startswith("/Demo/echo:")
+    assert "Try `/Demo/echo --text hi`." in palette
+
+    verbose = str(positional_argument_error(loose("/invokeTool Demo/echo hi"), ECHO_SCHEMA))
+    assert verbose.startswith("/invokeTool Demo/echo:")
+    assert "Try `/invokeTool Demo/echo --text hi`." in verbose
+
+
+def test_several_loose_tokens_are_all_reported() -> None:
+    message = str(positional_argument_error(loose("/Demo/echo a b c"), ECHO_SCHEMA))
+    assert "`a`, `b`, `c` are values" in message
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["/Demo/echo foo", "/Demo/echo <b>x</b>", "/Demo/echo `tick`", "/invokeTool Demo/echo a b"],
+)
+@pytest.mark.parametrize("shape", [ECHO_SCHEMA, None, {"type": "object", "properties": {}}])
+def test_every_shape_of_the_message_is_markdown_safe(text: str, shape: Any) -> None:
+    assert_markdown_safe(str(positional_argument_error(loose(text), shape)))
 
 
 # --- curly quotes ----------------------------------------------------------
@@ -617,16 +751,32 @@ def test_a_curly_quoted_value_is_refused_with_the_quote_named_as_the_cause() -> 
     `"` and `“` are near-indistinguishable at a chat font size, so naming the word `from`
     alone sends the reader looking at something they did nothing wrong with.
     """
-    with pytest.raises(CommandError) as refusal:
-        parse_command("/invokeTool demo/echo --text “Hello from the GUI”")
+    command = parse_command("/invokeTool demo/echo --text “Hello from the GUI”")
+    assert isinstance(command, InvokeTool)
+    message = str(positional_argument_error(command, schema({"text": {"type": "string"}})))
 
-    message = str(refusal.value)
-    assert "unexpected argument 'from'" in message, "the literal finding is still reported"
+    assert "`from`, `the`, `GUI”`" in message, "the literal finding is still reported"
     assert "curly quotes" in message
     assert '`/invokeTool demo/echo --text "Hello from the GUI"`' in message, (
         "the straightened command is the actionable half"
     )
     assert_markdown_safe(message)
+
+
+def test_a_curly_quote_suppresses_the_example_it_would_contradict() -> None:
+    """Two instructions, one of them wrong, is worse than one.
+
+    The loose token here is `there”` — the fragment the unrecognised quote left behind —
+    so an example built from it would say `--text there”`, next to a note whose whole
+    point is that the reader should retype the line with straight quotes.
+    """
+    command = parse_command("/Demo/echo --text “hello there”")
+    assert isinstance(command, InvokeTool)
+    message = str(positional_argument_error(command, schema({"text": {"type": "string"}})))
+
+    assert "Try" not in message
+    assert "--text <string>" in message, "the parameter is still named"
+    assert '`/Demo/echo --text "hello there"`' in message, "the note carries the fix"
 
 
 def test_curly_quotes_are_not_delimiters() -> None:

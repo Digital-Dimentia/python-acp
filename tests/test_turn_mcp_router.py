@@ -2620,6 +2620,68 @@ async def test_a_tool_is_called_by_its_own_palette_name() -> None:
     assert calls[0].raw_input == {"text": "hi"}
 
 
+async def test_a_positional_argument_is_refused_with_the_tool_s_own_parameters() -> None:
+    """`pyacp-ysq`, end to end. Observed live: a user typed `/Demo/echo foo bar`.
+
+    The parser cannot write this message — it sees a loose token and nothing else — so it
+    carries the token here, where `tools/list` has been answered and the schema is in hand.
+    What it must never do is what it did before: offer `--foo <value>`, naming a parameter
+    after the reader's own value.
+    """
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/tools/echo foo bar"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "--foo" not in answer and "--bar" not in answer
+    assert "--text <string>" in answer, "the tool's real parameter is named"
+    assert '`/tools/echo --text "foo bar"`' in answer, "and the example is runnable"
+    assert harness.tool_calls() == [], "nothing reached the server"
+
+
+async def test_the_offered_example_is_a_command_that_then_runs() -> None:
+    """The example is only worth printing if pasting it back works, so paste it back."""
+    async with Harness("tools") as harness:
+        await harness.run(typed("/tools/echo foo bar"))
+        example = said(harness).split("Try `")[1].split("`")[0]
+
+        result = await harness.run(typed(example))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call")[-1].raw_input == {"text": "foo bar"}
+
+
+async def test_a_tool_that_declares_no_parameters_says_so_rather_than_naming_one(
+    monkeypatch: Any,
+) -> None:
+    """`wipe` publishes an empty `properties` block, which is a statement about itself.
+
+    Distinct from a server that publishes no `inputSchema` at all, which has said nothing
+    about its parameters — reporting *that* as "takes no parameters" would invent a fact.
+    """
+    monkeypatch.setenv("MOCK_MCP_ANNOTATED_TOOLS", "1")
+    async with Harness("tools") as harness:
+        result = await harness.run(typed("/tools/wipe now"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "takes no parameters" in answer
+    assert "--now" not in answer
+    assert harness.tool_calls() == []
+
+
+async def test_a_loose_token_is_refused_before_the_server_is_settled() -> None:
+    """Two servers and a bare tool name: the ambiguity is the more basic problem, and
+    answering the parameter question first would name a schema from the wrong server."""
+    async with Harness("alpha", "beta") as harness:
+        result = await harness.run(typed("/invokeTool echo foo"))
+
+    assert result.stop_reason == "refusal"
+    answer = said(harness)
+    assert "alpha" in answer and "beta" in answer
+    assert harness.tool_calls() == []
+
+
 async def test_the_palette_name_and_invoke_tool_produce_the_same_call() -> None:
     """Sugar, not a second execution path — the whole reason it is safe to add."""
     async with Harness("alpha") as sugar:

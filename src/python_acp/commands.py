@@ -67,7 +67,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from python_acp.markdown import code_span, fenced_lines
@@ -212,6 +212,20 @@ class InvokeTool:
     raw_arguments: dict[str, list[str]] = field(default_factory=dict)
     #: Flags given with no value, which read as `true` unless the schema says otherwise.
     bare_flags: frozenset[str] = frozenset()
+    #: Tokens typed with no `--name` in front of them, carried rather than refused here.
+    #: Naming the parameters the caller *should* have used needs the tool's `inputSchema`,
+    #: which needs a server round trip, so the complaint waits for
+    #: `positional_argument_error` — see `pyacp-ysq`.
+    positional: tuple[str, ...] = ()
+    #: The command and its target exactly as typed: `/Demo/echo`, or `/invokeTool
+    #: Demo/echo`. Messages quote it so the example they offer is a line the reader can
+    #: paste back unchanged, rather than the other spelling of the same call.
+    typed_as: str = ""
+    #: `_curly_quote_note` for the text these `positional` tokens came from, carried
+    #: because only `parse_command` still has that text. Deferring the refusal without
+    #: this would have silently dropped the `pyacp-avg` diagnosis, which is the single
+    #: most common reason a loose token appears at all.
+    positional_note: str = ""
 
 
 #: Everything `parse_command` can hand back. A union rather than a base class: these have
@@ -248,7 +262,7 @@ def parse_command(text: str) -> Command | None:
         return None
 
     try:
-        return _dispatch(tokens)
+        command = _dispatch(tokens)
     except CommandError as refusal:
         # The one place raw text becomes tokens, and so the only place that still has the
         # text to diagnose. See `_curly_quote_note`.
@@ -256,6 +270,16 @@ def parse_command(text: str) -> Command | None:
         if not note:
             raise
         raise CommandError(f"{refusal}{note}") from None
+
+    if isinstance(command, InvokeTool) and command.positional:
+        # A loose token no longer raises here — the refusal waits for the tool's schema
+        # (`positional_argument_error`) — but the note explaining *why* one appeared can
+        # still only be written where the raw text exists. `--text “hello there”` is the
+        # case: the curly quotes defeat `shlex`, `there”` becomes the loose token, and
+        # without carrying the note forward the reader is told about a parameter when
+        # their actual mistake was a quote character.
+        return replace(command, positional_note=_curly_quote_note(stripped))
+    return command
 
 
 #: The quotes a composer substitutes for `"` and `'`. `shlex` treats none of them as a
@@ -349,9 +373,14 @@ def _parse_tool_command(name: str, tokens: list[str]) -> InvokeTool:
     the whole string is the user's, not one this agent generated.
     """
     server, _, tool = name.partition("/")
-    raw, bare = _parse_flags(name, tokens, "parameter")
+    raw, bare, positional = _parse_flags(name, tokens, "parameter", collect_positional=True)
     return InvokeTool(
-        server=server or None, tool=tool, raw_arguments=raw, bare_flags=frozenset(bare)
+        server=server or None,
+        tool=tool,
+        raw_arguments=raw,
+        bare_flags=frozenset(bare),
+        positional=tuple(positional),
+        typed_as=f"/{name}",
     )
 
 
@@ -377,9 +406,16 @@ def _parse_invocation(tokens: list[str]) -> InvokeTool:
     if not tool:
         raise CommandError(f"/{INVOKE_TOOL}: {target!r} names no tool.")
 
-    raw, bare = _parse_flags(INVOKE_TOOL, tokens[1:], "parameter")
+    raw, bare, positional = _parse_flags(
+        INVOKE_TOOL, tokens[1:], "parameter", collect_positional=True
+    )
     return InvokeTool(
-        server=server or None, tool=tool, raw_arguments=raw, bare_flags=frozenset(bare)
+        server=server or None,
+        tool=tool,
+        raw_arguments=raw,
+        bare_flags=frozenset(bare),
+        positional=tuple(positional),
+        typed_as=f"/{INVOKE_TOOL} {target}",
     )
 
 
@@ -403,7 +439,7 @@ def _parse_prompt(
     if not name:
         raise CommandError(f"/{verb}: {target!r} names no prompt.")
 
-    raw, bare = _parse_flags(verb, tokens[1:], "argument")
+    raw, bare, _ = _parse_flags(verb, tokens[1:], "argument")
     return kind(
         server=server or None, name=name, raw_arguments=raw, bare_flags=frozenset(bare)
     )
@@ -440,21 +476,35 @@ def _parse_resource(tokens: list[str]) -> ShowResource:
 
 
 def _parse_flags(
-    verb: str, tokens: list[str], noun: str
-) -> tuple[dict[str, list[str]], set[str]]:
+    verb: str, tokens: list[str], noun: str, *, collect_positional: bool = False
+) -> tuple[dict[str, list[str]], set[str], list[str]]:
     """`--key value`, `--key=value` and `--key` into raw strings, for every command.
 
     Shared by `/invokeTool` and the two prompt commands so that the one syntax a person has
     to learn really is one syntax. What the values *mean* diverges afterwards — a tool's
     are typed from its `inputSchema`, a prompt's are strings — and that divergence lives in
     `coerce_arguments` and `prompt_arguments`, not here.
+
+    `collect_positional` is what the two tool commands pass, and it changes only *where*
+    an unnamed token is refused, never whether. Refused here, the message could name no
+    parameter but the failing token, so it advised `--foo <value>` for a token that was the
+    user's *value* — reading as though `--foo` were a real parameter of the tool
+    (`pyacp-ysq`). The tool's own parameters are known one await later, in
+    `positional_argument_error`, so the tokens are carried there instead. The prompt
+    commands still refuse on the spot: `prompts/list` describes a prompt's arguments far
+    more thinly than `inputSchema` describes a tool's, so deferring would buy them nothing.
     """
     raw: dict[str, list[str]] = {}
     bare: set[str] = set()
+    positional: list[str] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if not token.startswith("--"):
+            if collect_positional:
+                positional.append(token)
+                index += 1
+                continue
             # Built in a local rather than inline: a nested f-string reusing the outer
             # quote character is PEP 701, which is 3.12+, and this project floors at 3.11.
             shape = code_span("--{} <value>".format(token.lstrip("-") or "name"))
@@ -478,12 +528,111 @@ def _parse_flags(
             continue
         raw.setdefault(key, []).append(following)
         index += 2
-    return raw, bare
+    return raw, bare, positional
 
 
 # ---------------------------------------------------------------------------
 # Typing the arguments, which needs the tool's schema
 # ---------------------------------------------------------------------------
+
+
+def invocation_prefix(command: InvokeTool) -> str:
+    """The command and target as the reader wrote them, for a message they can paste back.
+
+    `/Demo/echo` and `/invokeTool Demo/echo` are the same call, and a refusal that answers
+    one in the other's spelling makes the reader translate before they can retry. The
+    fallback is only for an `InvokeTool` built by hand, which is to say by a test.
+    """
+    return command.typed_as or f"/{INVOKE_TOOL} {_target(command)}"
+
+
+def _quoted(value: str) -> str:
+    """`value` as it would have to be typed back, quoted only when `shlex` would split it.
+
+    The example a refusal offers has to survive `parse_command`'s own `shlex.split`, and
+    the whole reason this function exists is the observed case: `/Demo/echo foo bar`, whose
+    two loose tokens are one value that wanted quoting.
+    """
+    try:
+        if shlex.split(value) == [value]:
+            return value
+    except ValueError:
+        pass
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def positional_argument_error(command: InvokeTool, schema: dict[str, Any] | None) -> CommandError:
+    """Why `/Demo/echo foo bar` is refused, said with the tool's real parameters in hand.
+
+    The parser cannot write this message. It sees a token with no `--name` in front of it
+    and nothing else, so the best it could do was echo the token back as `--foo <value>` —
+    advice to name a parameter after the reader's own *value*, which does not exist and
+    fails differently when followed (`pyacp-ysq`). By here the tool has been resolved and
+    its `inputSchema` fetched, so the message can name what the tool actually takes.
+
+    Three shapes, because three things can be true and only one of them is "you meant a
+    flag": the tool may declare parameters, declare none, or publish no schema at all. The
+    last is not the same as the second — a server that omits `inputSchema` has said nothing
+    about its parameters, and reporting that as "takes no parameters" would invent a fact.
+
+    The `Try` line is offered only when one parameter is unambiguous — the tool has exactly
+    one, or exactly one required. With several to choose from, picking one would be the
+    same guess `_resolve_server` refuses to make about servers.
+    """
+    prefix = invocation_prefix(command)
+    tokens = command.positional
+    # Code spans rather than `repr`: these are the reader's own text, and a token like
+    # `<b>` quoted into prose is deleted outright by a Markdown client — see
+    # `tests/test_markdown.py`. The span also keeps a trailing curly quote visible, which
+    # is the one character the note underneath is about.
+    listed = ", ".join(code_span(token) for token in tokens)
+    subject = (
+        f"{listed} is a value with no parameter in front of it"
+        if len(tokens) == 1
+        else f"{listed} are values with no parameter in front of them"
+    )
+
+    if not isinstance(schema, dict):
+        return CommandError(
+            f"{prefix}: {subject}, and this tool publishes no input schema to name "
+            f"them from. Every parameter is still named: "
+            f"{code_span('--<name> <value>')}.{command.positional_note}"
+        )
+
+    raw_properties = schema.get("properties")
+    properties = raw_properties if isinstance(raw_properties, dict) else {}
+    if not properties:
+        return CommandError(
+            f"{prefix}: this tool takes no parameters, but got "
+            f"{listed}.{command.positional_note}"
+        )
+
+    raw_required = schema.get("required")
+    required = [
+        name
+        for name in (raw_required if isinstance(raw_required, list) else [])
+        if isinstance(name, str) and name in properties
+    ]
+    chosen: str | None = None
+    if len(properties) == 1:
+        chosen = next(iter(sorted(properties)))
+    elif len(required) == 1:
+        chosen = required[0]
+
+    message = (
+        f"{prefix}: {subject}. Every parameter is named: "
+        f"{code_span(tool_command_hint({'inputSchema': schema}))}."
+    )
+    # No example when a curly quote is the likelier cause: the note below already ends
+    # in the straightened command, and an example built from `there”` — the fragment the
+    # quote left behind — would be a second, contradictory instruction.
+    if chosen is not None and not command.positional_note:
+        example = f"{prefix} --{chosen} {_quoted(' '.join(tokens))}"
+        message = f"{message} Try {code_span(example)}."
+    # Last, so the note reads as the aside it is — the finding above it is still the
+    # accurate account of what the parser found. Same order `parse_command` uses.
+    return CommandError(f"{message}{command.positional_note}")
 
 
 def coerce_arguments(command: InvokeTool, schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -511,7 +660,7 @@ def coerce_arguments(command: InvokeTool, schema: dict[str, Any] | None) -> dict
         if unknown:
             offered = ", ".join(f"--{name}" for name in sorted(properties)) or "none"
             raise CommandError(
-                f"/{INVOKE_TOOL} {_target(command)}: no parameter "
+                f"{invocation_prefix(command)}: no parameter "
                 f"{', '.join('--' + name for name in unknown)}. It takes: {offered}."
             )
 

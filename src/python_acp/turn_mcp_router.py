@@ -223,7 +223,9 @@ from python_acp.commands import (
     PromptCommand,
     ShowResource,
     coerce_arguments,
+    invocation_prefix,
     parse_command,
+    positional_argument_error,
     prompt_arguments,
     prompt_message_blocks,
     render_prompt_heading,
@@ -892,10 +894,17 @@ class McpToolRouterExecutor:
                 )
             )
             raise CommandRefused(
-                f"/{INVOKE_TOOL}: {server!r} has no tool {command.tool!r}. "
+                f"{invocation_prefix(command)}: {server!r} has no tool {command.tool!r}. "
                 + (f"It offers: {offered}." if offered else "It publishes no tools.")
                 + f" Run /{LIST_TOOLS} to see them with their parameters."
             )
+        # Before `coerce_arguments`, because a loose token is the more basic mistake: a
+        # command that has both would otherwise be answered about its flags while the
+        # reader's real error was never mentioned. The parser carried these here rather
+        # than refusing them itself precisely so this message could name `schema`'s
+        # parameters instead of the failing token — see `pyacp-ysq`.
+        if command.positional:
+            raise CommandRefused(str(positional_argument_error(command, schema))) from None
         try:
             arguments = coerce_arguments(command, schema)
         except CommandError as exc:

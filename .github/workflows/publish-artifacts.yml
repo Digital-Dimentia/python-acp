@@ -11,16 +11,16 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # QEMU registers binfmt handlers so the runner (amd64) can execute arm64
       # build steps. Without it the linux/arm64 leg fails the moment the base
       # image runs anything. buildx supplies the driver that can emit a
       # multi-platform manifest at all -- plain `docker build` cannot.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/setup-python@v7
         with:
           # Deliberately the floor from `requires-python`, not the newest version in
           # ci.yml's matrix: releases build on the oldest supported interpreter so the
@@ -41,7 +41,7 @@ jobs:
           mkdir -p artifacts
           tar -czf artifacts/python-acp-artifacts.tar.gz -C dist .
       - name: Publish release artifacts
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.whl

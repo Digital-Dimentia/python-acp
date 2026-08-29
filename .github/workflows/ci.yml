@@ -20,8 +20,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     name: validate (py${{ matrix.python-version }})
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies and run validation
@@ -33,9 +33,10 @@ jobs:
           make build
       - name: Upload build artifacts
         # Publish from the floor version only: it produces the widest-compatible
-        # wheel, and upload-artifact@v4 rejects duplicate names across matrix legs.
+        # wheel, and artifacts are immutable, so a second matrix leg uploading
+        # the same name is an error rather than a merge.
         if: matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-acp-dist
           path: |

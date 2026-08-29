@@ -24,11 +24,14 @@ Options:
   --log[=PATH]   Also append diagnostics to PATH. The value is optional: bare
                  `--log` writes to logs/python-acp-ws.log. Output still appears
                  on the terminal; only stderr is captured, so stdout stays a
-                 clean protocol wire.
+                 clean protocol wire. The file is opened before the venv is
+                 checked, so a launch that never happens is recorded too.
   -h, --help     This message.
 
 Every other argument is passed through to the CLI untouched, so the usual flags
-work: --host, --port, --debug, --transport.
+work: --host, --port, --debug, --transport. The one exception is the empty
+string, which is dropped: it is never meaningful to the CLI, and forwarding it
+turns a blank row in a caller's config into an unexplained exit 2.
 
 Environment:
   VENV_DIR       Virtual environment to activate (default: .venv), matching the
@@ -76,22 +79,64 @@ while (($# > 0)); do
             ;;
         --)
             shift
-            cli_args+=("$@")
+            # Still filtered: `--` ends option parsing, not the empty-argument rule.
+            while (($# > 0)); do
+                [[ -n $1 ]] && cli_args+=("$1")
+                shift
+            done
             break
             ;;
         *)
-            cli_args+=("$1")
+            # Drop the empty string rather than forwarding it. argparse rejects it as an
+            # `unrecognized arguments:` with nothing after the colon, so the one line on
+            # screen names no cause and the exit is a bare 2. A client that builds its
+            # command line by joining a list — acp-ui does, in agent.rs, then hands the
+            # string to `$SHELL -l -c` — turns a blank row in a config form into exactly
+            # that. An empty argument is never meaningful to the CLI, so dropping it
+            # costs nothing and keeps the pass-through honest for everything else.
+            [[ -n $1 ]] && cli_args+=("$1")
             shift
             ;;
     esac
 done
 
+# Open the log *before* anything that can fail, so every path from here down is recorded.
+# The venv check and `source activate` below both used to run ahead of the banner, so a
+# missing interpreter or a broken activate spoke on stderr alone: a client that swallows
+# stderr — as acp-ui does — showed the operator an empty log file and a bare "agent
+# process exited", which reads as a mid-session crash rather than a launch that never
+# happened. The log is the operator's one durable record; anything that can kill this
+# script has to reach it.
+if [[ -n $log_path ]]; then
+    log_dir="$(dirname -- "$log_path")"
+    if ! mkdir -p -- "$log_dir"; then
+        printf '%s: cannot create log directory %s\n' "${BASH_SOURCE[0]}" "$log_dir" >&2
+        exit 1
+    fi
+    # A banner per run, because the file is appended to: without it two runs read as
+    # one session with an inexplicable rebind in the middle.
+    if ! printf -- '--- python-acp start %s ---\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$log_path"; then
+        printf '%s: cannot write log file %s\n' "${BASH_SOURCE[0]}" "$log_path" >&2
+        exit 1
+    fi
+    printf 'Logging to %s\n' "$log_path" >&2
+fi
+
+# Every pre-launch diagnostic goes through here: stderr for whoever is watching, and the
+# log for whoever is not. Never fd 1 — under `--transport stdio` that is the wire.
+diagnose() {
+    printf '%s: %s\n' "${BASH_SOURCE[0]}" "$*" >&2
+    if [[ -n $log_path ]]; then
+        printf '%s: %s\n' "${BASH_SOURCE[0]}" "$*" >>"$log_path"
+    fi
+}
+
 readonly venv_dir="${VENV_DIR:-${REPO_ROOT}/.venv}"
 readonly python_bin="${venv_dir}/bin/python"
 
 if [[ ! -x $python_bin ]]; then
-    printf '%s: no interpreter at %s -- run `make venv` first.\n' \
-        "${BASH_SOURCE[0]}" "$python_bin" >&2
+    diagnose "no interpreter at ${python_bin} -- run \`make venv\` first."
     exit 1
 fi
 
@@ -100,8 +145,15 @@ fi
 # puts $venv_dir/bin at the front of PATH, so an MCP server that a client names in
 # `session/new` as a bare `python` resolves to this venv instead of whatever interpreter
 # happened to be on the caller's PATH.
+#
+# Guarded rather than left to `set -e`, which would abort with whatever status the
+# activate script last produced and no explanation anywhere.
 # shellcheck disable=SC1091  # resolved at runtime, not a checked-in file
-source "${venv_dir}/bin/activate"
+source "${venv_dir}/bin/activate" && activate_status=0 || activate_status=$?
+if ((activate_status != 0)); then
+    diagnose "failed to activate ${venv_dir} (exit ${activate_status})"
+    exit "$activate_status"
+fi
 
 # Keep log lines timely when stderr is a pipe rather than a terminal.
 export PYTHONUNBUFFERED=1
@@ -113,13 +165,8 @@ cd -- "$REPO_ROOT"
 # under `set -u`, so a no-argument run would abort before starting anything.
 
 if [[ -n $log_path ]]; then
-    log_dir="$(dirname -- "$log_path")"
-    mkdir -p -- "$log_dir"
-    # A banner per run, because the file is appended to: without it two runs read as
-    # one session with an inexplicable rebind in the middle.
-    printf -- '--- python-acp start %s ---\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$log_path"
-    printf 'Logging to %s\n' "$log_path" >&2
-
+    # The banner and the log directory are already in place — see above.
+    #
     # Park the real stdout on fd3, send stderr down the pipe to `tee`, and hand the
     # child fd3 back as its stdout. The obvious `2> >(tee ...)` is avoided because
     # process substitution needs /dev/fd, which a sandboxed or restricted shell may

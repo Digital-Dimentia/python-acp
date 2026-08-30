@@ -4,7 +4,7 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **1558e60 2026-08-29**. These are a snapshot and go out of date with the
+Counted at commit **fe2554f 2026-08-29**. These are a snapshot and go out of date with the
 next commit, which is why the commit is stamped rather than the date alone. The
 stamp is ignored when checking whether the numbers are current — it names the
 commit *before* the one that committed this file, and always will.
@@ -24,15 +24,15 @@ does. Docstring totals below are therefore lower than a naive span count.
 | Group | Files | Lines | Code | Docstring | Comment | Blank | Classes | Functions | async | Test fns |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `src/python_acp` | 21 | 9,759 | 4,692 | 2,750 | 824 | 1,493 | 54 | 335 | 117 | 0 |
-| `tests` | 35 | 18,264 | 10,995 | 2,183 | 943 | 4,143 | 54 | 1,191 | 647 | 903 |
+| `tests` | 36 | 18,628 | 11,202 | 2,262 | 957 | 4,207 | 54 | 1,208 | 650 | 912 |
 | `scripts` | 3 | 956 | 627 | 145 | 37 | 147 | 4 | 31 | 0 | 0 |
-| **Total** | **59** | **28,979** | **16,314** | **5,078** | **1,804** | **5,783** | **112** | **1,557** | **764** | **903** |
+| **Total** | **60** | **29,343** | **16,521** | **5,157** | **1,818** | **5,847** | **112** | **1,574** | **767** | **912** |
 
 ## Ratios worth knowing
 
 | Measure | Value | What it means |
 | --- | ---: | --- |
-| Test code to production code | 2.3 : 1 | 10,995 lines of test code against 4,692 of production code |
+| Test code to production code | 2.4 : 1 | 11,202 lines of test code against 4,692 of production code |
 | Prose share of production source | 37% | 2,750 docstring + 824 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
 | Co-located module docs | 4,722 lines | 20 files beside the 20 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
 | Markdown across the repo | 9,179 lines | 36 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
@@ -144,6 +144,7 @@ here rather than a by-product, so it is counted per file and not only in total.
 | [`test_makefile_targets.py`](tests/test_makefile_targets.py) | 265 | 12 |
 | [`test_interop.py`](tests/test_interop.py) | 170 | 11 |
 | [`test_transcripts.py`](tests/test_transcripts.py) | 691 | 10 |
+| [`test_client_contract.py`](tests/test_client_contract.py) | 364 | 9 |
 | [`test_announcer.py`](tests/test_announcer.py) | 163 | 8 |
 | [`test_executor_neutrality.py`](tests/test_executor_neutrality.py) | 305 | 8 |
 | [`test_mcp_tools.py`](tests/test_mcp_tools.py) | 166 | 8 |

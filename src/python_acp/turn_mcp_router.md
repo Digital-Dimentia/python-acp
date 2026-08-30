@@ -555,6 +555,11 @@ Three rules, and each is load-bearing:
 `server` and `tool` are carried beside the schema so no client has to reimplement the rule
 that the name splits on the **first** slash.
 
+The published contract — what a client may rely on, and what an MCP server author gets for
+writing a schema worth rendering — is
+[docs/tool-schema-contract.md](../../docs/tool-schema-contract.md). Keep it in step with
+this section; it is the half of the channel neither population can read out of our source.
+
 **Validation does not move.** `coerce_arguments` in [commands.py](commands.md) stays the
 authority. A client-side form is a convenience and must not become a trust boundary: any
 client can send any line, and a form that let this agent skip its own checks would be a

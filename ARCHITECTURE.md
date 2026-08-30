@@ -453,6 +453,10 @@ update-emission path.
   `acp.interfaces.Agent` and `Client` member, and the `initialize` capability block it dictates.
 - [Interop](docs/interop.md) — the check that ACP v1 means something outside this repository, and the permission finding it produced.
 - [Module boundaries](docs/module-boundaries.md) — the target module layout and the fate of `ws_bridge.py`, which `pyacp-tzd.3` carried out.
+- [Tool-schema `_meta` contract](docs/tool-schema-contract.md) — the one wire contract that
+  spans `commands.py`, `turn_mcp_router.py` and `mcp_tools.py`: each MCP tool's
+  `inputSchema` on its `AvailableCommand._meta`, what a client may rely on, and what an MCP
+  server author gets for writing a schema worth rendering.
 
 ## Notes
 

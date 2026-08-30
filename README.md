@@ -50,6 +50,9 @@
   - [ACP v1 compliance matrix](docs/acp-compliance-matrix.md)
   - [Interop runbook](docs/interop.md)
   - [Module boundaries](docs/module-boundaries.md)
+- [Tool-schema `_meta` contract](docs/tool-schema-contract.md) — what a per-tool command
+  carries on `_meta`, for the ACP client that renders a form from it and the MCP server
+  author whose schema is now what the user sees.
 
 ## Local setup
 

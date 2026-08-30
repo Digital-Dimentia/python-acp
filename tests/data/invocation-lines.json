@@ -1,0 +1,300 @@
+{
+  "$source": {
+    "repo": "acp-ui",
+    "path": "fixtures/invocation-lines.json",
+    "commit": "9a24596e905e0797ffdc7b97c81b0769b0397f23",
+    "copied": "2026-08-30",
+    "note": [
+      "A COPY. acp-ui owns this file; python-acp keeps it here because the two",
+      "repos are checked out independently and a test that reached across the",
+      "filesystem would pass, fail or skip depending on where this repo sits.",
+      "",
+      "Refresh with:",
+      "  cp <acp-ui>/fixtures/invocation-lines.json tests/data/invocation-lines.json",
+      "then put this $source block back and update `commit` and `copied`.",
+      "tests/test_invocation_lines.py fails if it is missing.",
+      "",
+      "A case belongs in acp-ui's copy first. Adding one only here asserts this",
+      "repo against itself, which is the failure the whole file exists to prevent."
+    ]
+  },
+  "$comment": [
+    "Round-trip cases for the tool-invocation serializer, shared by two repos.",
+    "",
+    "acp-ui's `toInvocationLine` (src/lib/schema-form.ts) writes a command line",
+    "that python-acp's `parse_command` + `coerce_arguments` (commands.py) reads.",
+    "That contract crosses a language boundary, so neither side can check it",
+    "alone: a serializer verified only against its own assumptions is exactly",
+    "the failure this file exists to prevent.",
+    "",
+    "Each case is asserted twice, against the same written-down expectation.",
+    "  acp-ui   : toInvocationLine(command, parseSchema(schema), values) === line",
+    "  python-acp: coerce_arguments(parse_command(line), schema) == arguments",
+    "",
+    "`values` is in acp-ui's form representation, where text and numbers stay",
+    "strings until the far end coerces them (see FormValue). `arguments` is the",
+    "typed JSON the tool actually receives.",
+    "",
+    "Adding a case means adding it here, not in either test."
+  ],
+  "cases": [
+    {
+      "name": "plain scalars",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "times": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "ratio": {
+            "type": "number"
+          }
+        }
+      },
+      "values": {
+        "text": "hello",
+        "times": "7",
+        "ratio": "0.5"
+      },
+      "line": "/demo/echo --text hello --times 7 --ratio 0.5",
+      "arguments": {
+        "text": "hello",
+        "times": 7,
+        "ratio": 0.5
+      }
+    },
+    {
+      "name": "a string that has to be quoted",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "values": {
+        "text": "it's a 'quote' \\ test"
+      },
+      "line": "/demo/echo --text 'it'\"'\"'s a '\"'\"'quote'\"'\"' \\ test'",
+      "arguments": {
+        "text": "it's a 'quote' \\ test"
+      }
+    },
+    {
+      "name": "an empty string is sent, not omitted, when it was typed",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string"
+          }
+        }
+      },
+      "values": {
+        "prefix": " "
+      },
+      "line": "/demo/echo --prefix ' '",
+      "arguments": {
+        "prefix": " "
+      }
+    },
+    {
+      "name": "untouched optionals are omitted entirely",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "shout": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "values": {
+        "text": "x",
+        "prefix": "",
+        "shout": null,
+        "kind": []
+      },
+      "line": "/demo/echo --text x",
+      "arguments": {
+        "text": "x"
+      }
+    },
+    {
+      "name": "booleans are written out, never left as a bare flag",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "shout": {
+            "type": "boolean"
+          },
+          "quiet": {
+            "type": "boolean"
+          }
+        }
+      },
+      "values": {
+        "shout": true,
+        "quiet": false
+      },
+      "line": "/demo/echo --shout true --quiet false",
+      "arguments": {
+        "shout": true,
+        "quiet": false
+      }
+    },
+    {
+      "name": "an array is a repeated flag",
+      "command": "demo/search",
+      "schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "values": {
+        "query": "foo",
+        "kind": [
+          "file",
+          "symbol",
+          "two words"
+        ]
+      },
+      "line": "/demo/search --query foo --kind file --kind symbol --kind 'two words'",
+      "arguments": {
+        "query": "foo",
+        "kind": [
+          "file",
+          "symbol",
+          "two words"
+        ]
+      }
+    },
+    {
+      "name": "an object goes as quoted JSON",
+      "command": "demo/search",
+      "schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "filter": {
+            "type": "object"
+          }
+        }
+      },
+      "values": {
+        "query": "a b",
+        "filter": "{\n  \"lang\": \"ts\",\n  \"n\": 3\n}"
+      },
+      "line": "/demo/search --query 'a b' --filter '{\"lang\":\"ts\",\"n\":3}'",
+      "arguments": {
+        "query": "a b",
+        "filter": {
+          "lang": "ts",
+          "n": 3
+        }
+      }
+    },
+    {
+      "name": "an enum choice is sent as its literal",
+      "command": "demo/echo",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "case": {
+            "type": "string",
+            "enum": [
+              "upper",
+              "lower",
+              "title"
+            ]
+          },
+          "level": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      },
+      "values": {
+        "case": "upper",
+        "level": "2"
+      },
+      "line": "/demo/echo --case upper --level 2",
+      "arguments": {
+        "case": "upper",
+        "level": 2
+      }
+    },
+    {
+      "name": "an undeclared property is read as JSON by the far end",
+      "command": "demo/search",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "cursor": {},
+          "tag": {}
+        }
+      },
+      "values": {
+        "cursor": "3",
+        "tag": "\"3\""
+      },
+      "line": "/demo/search --cursor 3 --tag '\"3\"'",
+      "arguments": {
+        "cursor": 3,
+        "tag": "3"
+      }
+    }
+  ]
+}

@@ -837,6 +837,91 @@ async def test_a_zoo_tool_echoes_the_json_types_it_was_given() -> None:
     }
 
 
+#: Every schema-zoo tool, as the *command line* a person would type, with the arguments
+#: the server should receive. The JSON-block path above types its arguments before they
+#: are sent; only this path runs them through `coerce_arguments`, which is why
+#: `pyacp-708` — a `TypeError` on `zoo-types.either`'s union `type` that killed the whole
+#: turn with `-32603` — survived a zoo built to contain exactly that shape.
+ZOO_COMMAND_LINES: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    (
+        "zoo-types",
+        "--a_string 123 --a_number 123 --an_integer 123 --a_boolean true "
+        "--an_array '[1,2,3]' --an_object '{\"a\":\"123\"}' --either abc123",
+        {
+            "a_string": "123",
+            "a_number": 123.0,
+            "an_integer": 123,
+            "a_boolean": True,
+            "an_array": [1, 2, 3],
+            "an_object": {"a": "123"},
+            "either": "abc123",
+        },
+    ),
+    ("zoo-strings", "--slug my-slug --short abcd", {"slug": "my-slug", "short": "abcd"}),
+    (
+        "zoo-numbers",
+        "--percent 50 --ratio 0.5 --step 0.75 --offset -3",
+        {"percent": 50, "ratio": 0.5, "step": 0.75, "offset": -3},
+    ),
+    (
+        "zoo-choices",
+        "--colour red --priority P1 --retries 3",
+        {"colour": "red", "priority": "P1", "retries": 3},
+    ),
+    (
+        "zoo-arrays",
+        "--tags a --tags b --counts 1 --counts 2 --kinds code",
+        {"tags": ["a", "b"], "counts": [1, 2], "kinds": ["code"]},
+    ),
+    ("zoo-required", "--must yes", {"must": "yes"}),
+    (
+        "zoo-nested",
+        "--label l --server '{\"port\": 8080}'",
+        {"label": "l", "server": {"port": 8080}},
+    ),
+    ("zoo-if-then-else", "--kind advanced --tuning fast", {"kind": "advanced", "tuning": "fast"}),
+    ("zoo-dependent-schemas", "--name n --billing b", {"name": "n", "billing": "b"}),
+    # Its properties live inside `allOf`, so the top level declares none and nothing can
+    # be checked against a name. Both arguments reach the server untouched.
+    ("zoo-all-of", "--a x --b 2", {"a": "x", "b": 2}),
+    ("zoo-one-of", "--id 7", {"id": 7}),
+    ("zoo-empty", "", {}),
+    ("zoo-silent", "--anything goes", {"anything": "goes"}),
+)
+
+
+@pytest.mark.parametrize(
+    ("tool", "line", "expected"),
+    [pytest.param(*case, id=case[0]) for case in ZOO_COMMAND_LINES],
+)
+async def test_every_zoo_tool_survives_its_own_command_line(
+    tool: str, line: str, expected: dict[str, Any]
+) -> None:
+    """Call every schema-zoo tool the way a person does, and check what the server got.
+
+    The zoo was built as a *rendering* fixture — thirteen schemas for a client to draw a
+    form from — and until this test every one of them was only ever listed. That is how a
+    tool named `zoo-types`, carrying a union `type` because "most form builders do not
+    expect it", went a whole commit without anyone discovering that this agent did not
+    expect it either (`pyacp-708`).
+
+    Asserted on the echo rather than on `coerce_arguments` alone, because the types are
+    only real once they have crossed the wire: this is the `--counts 1 --counts 2` that
+    must arrive as `[1, 2]` and not `["1", "2"]`.
+    """
+    async with Harness("tools", server_env=ZOO) as harness:
+        text = f"/tools/{tool} {line}".rstrip()
+        result = await harness.run(TextContentBlock(type="text", text=text))
+
+    assert result.stop_reason == "end_turn", harness.of("agent_message_chunk")
+    echoed = json.loads(
+        [u for u in harness.of("tool_call_update") if u.raw_output][-1].raw_output["content"][0][
+            "text"
+        ]
+    )
+    assert echoed == {"tool": tool, "arguments": expected}
+
+
 async def test_tools_are_announced_even_when_the_prompt_is_refused() -> None:
     """That is the point: a refusal that also says what *could* have been called is
     actionable, and one that only says "that was not an invocation" is not."""

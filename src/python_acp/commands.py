@@ -667,7 +667,7 @@ def coerce_arguments(command: InvokeTool, schema: dict[str, Any] | None) -> dict
     arguments: dict[str, Any] = {}
     for key, values in command.raw_arguments.items():
         spec = properties.get(key) if isinstance(properties.get(key), dict) else {}
-        declared = spec.get("type") if isinstance(spec, dict) else None
+        declared = _declared_type(spec)
         if key in command.bare_flags and not values:
             if declared in (None, "boolean"):
                 arguments[key] = True
@@ -687,8 +687,31 @@ def coerce_arguments(command: InvokeTool, schema: dict[str, Any] | None) -> dict
     return arguments
 
 
+def _declared_type(spec: Any) -> str | None:
+    """The single JSON type a property declares, or `None` when it declares no usable one.
+
+    JSON Schema lets `type` be a *list* — `{"type": ["string", "number"]}` says the tool
+    accepts either. There is no single type to coerce to, so the honest reading is the one
+    an undeclared property already gets: read the text as JSON and keep it as a string when
+    that fails, which yields `7` for `--either 7` and `"abc"` for `--either abc`. Both are
+    legal under the union, and the server is the one that decides.
+
+    Normalising here is also what keeps the readers below *safe*, which is why this is a
+    function rather than three inline `isinstance` guards. Two of them ask
+    `declared in {"number", "integer"}`, and `x in <set>` hashes `x` — so a list arriving
+    there raised `TypeError: unhashable type: 'list'` instead of missing the branch. That
+    escaped `coerce_arguments` uncaught, so the SDK answered `session/prompt` with `-32603
+    Internal error` and the whole turn died, where every other bad-argument case in this
+    module is a `CommandError` the user can read and retry (`pyacp-708`).
+    """
+    if not isinstance(spec, dict):
+        return None
+    declared = spec.get("type")
+    return declared if isinstance(declared, str) else None
+
+
 def _coerce(key: str, values: list[str], spec: dict[str, Any], command: InvokeTool) -> Any:
-    declared = spec.get("type") if isinstance(spec, dict) else None
+    declared = _declared_type(spec)
 
     if declared == "array" or len(values) > 1:
         items = spec.get("items") if isinstance(spec.get("items"), dict) else {}
@@ -706,7 +729,7 @@ def _coerce(key: str, values: list[str], spec: dict[str, Any], command: InvokeTo
 
 
 def _scalar(key: str, value: str, spec: dict[str, Any], command: InvokeTool) -> Any:
-    declared = spec.get("type") if isinstance(spec, dict) else None
+    declared = _declared_type(spec)
     if declared == "string":
         return value
     if declared in {"number", "integer"}:

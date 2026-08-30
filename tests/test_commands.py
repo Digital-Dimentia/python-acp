@@ -182,6 +182,44 @@ def test_a_value_the_type_cannot_take_is_refused(declared: str, text: str, match
         coerce_arguments(command, schema({"v": {"type": declared}}))
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("--v 7", 7, id="number-branch"),
+        pytest.param("--v abc123", "abc123", id="string-branch"),
+        pytest.param('--v \'{"a": 1}\'', {"a": 1}, id="json-object"),
+        pytest.param("--v", True, id="bare-flag"),
+    ],
+)
+def test_a_union_type_is_read_as_json_rather_than_coerced(text: str, expected: Any) -> None:
+    """`{"type": ["string", "number"]}` is legal JSON Schema and says *either*.
+
+    There is no single type to coerce to, so a union gets the same honest reading an
+    undeclared property gets. Every value here is legal under the union, and the server
+    decides which one it wanted.
+
+    This crashed the **whole turn** before `pyacp-708`: `_scalar` asked
+    `declared in {"number", "integer"}`, `x in <set>` hashes `x`, and an unhashable list
+    raised `TypeError` where every other bad-argument path raises a readable
+    `CommandError`. It escaped to the SDK as `-32603 Internal error`, and acp-ui reported
+    it as "Failed to run tool invocation" with no way to tell which argument was at fault.
+    The zoo's `zoo-types.either` existed for exactly this shape and was never *called*.
+    """
+    command = parse_command(f"/invokeTool t/x {text}")
+    assert isinstance(command, InvokeTool)
+    assert coerce_arguments(command, schema({"v": {"type": ["string", "number"]}})) == {
+        "v": expected
+    }
+
+
+def test_a_union_type_inside_items_is_read_the_same_way() -> None:
+    """The array path reaches `_scalar` too, once per element, with the `items` spec."""
+    command = parse_command("/invokeTool t/x --v 1 --v two")
+    assert isinstance(command, InvokeTool)
+    schema_with_union = schema({"v": {"type": "array", "items": {"type": ["string", "integer"]}}})
+    assert coerce_arguments(command, schema_with_union) == {"v": [1, "two"]}
+
+
 def test_an_undeclared_parameter_is_refused_with_the_ones_that_exist() -> None:
     command = parse_command("/invokeTool t/x --txet hi")
     assert isinstance(command, InvokeTool)

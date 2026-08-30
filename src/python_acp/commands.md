@@ -106,9 +106,19 @@ which the caller had to `await`.
 | `boolean` | `true`/`1`/`yes` and `false`/`0`/`no`; a bare `--flag` is `true` |
 | `array` | the flag repeated, or one JSON array literal |
 | `object` | a JSON literal |
+| a union — `"type": ["string", "number"]` | read as JSON, exactly like an undeclared one |
 | undeclared | read as JSON, kept as a string when that fails |
 
-**Only the last row guesses.** For an undeclared property `3` becomes a number and
+**A union declares no single type to coerce to**, so it takes the last row's reading:
+`--either 7` arrives as `7` and `--either abc` as `"abc"`, both legal under the union, and
+the server decides which it wanted. `_declared_type` normalises it to `None` in one place
+rather than three, and that is a *safety* rule as much as a semantic one: two readers ask
+`declared in {"number", "integer"}`, `x in <set>` hashes `x`, and an unhashable list raised
+`TypeError` there instead of missing the branch — escaping as `-32603 Internal error` and
+killing the whole turn where every other bad-argument case is a readable `CommandError`
+(`pyacp-708`).
+
+**Only the last two rows guess.** For an undeclared property `3` becomes a number and
 `hello` stays a string, which is what someone typing a command line expects — but it is a
 guess, and a tool wanting the *string* `"3"` for a property it never declared cannot be
 reached this way. Declared properties never guess, which is why a server that publishes
@@ -242,6 +252,11 @@ The last two are deliberately not merged. A server that omits `inputSchema` has 
 *nothing* about its parameters, and reporting that as "takes no parameters" would assert a
 fact nobody published.
 
+The same distinction is a client's to draw as well, because the schema now rides along on
+each palette entry's `_meta` — [docs/tool-schema-contract.md](../../docs/tool-schema-contract.md)
+publishes that contract, including where `coerce_arguments` stops checking and the MCP
+server has to take over.
+
 The `Try` line is offered only when one parameter is unambiguous — the tool has exactly
 one, or exactly one required. With several to choose from, picking one would be a guess of
 the same kind the refusal exists to avoid. The value in it is the loose tokens joined and
@@ -370,6 +385,8 @@ would silently hand its own bad quoting to the JSON parser.
   one it got; `verb` carries the name each error message should print.
 - `ShowResource`: an optional server and a URI, never carved out of one token.
 - `coerce_arguments(command, schema)`: a tool's raw strings to JSON types, per the table.
+  `_declared_type(spec)` is the single reader of a property's `type`, normalising a union
+  or anything else non-string to `None` before three call sites act on it.
 - `prompt_arguments(command, declared)`: a prompt's raw strings, checked and left as
   strings.
 - `render_tool_listing` / `render_prompt_listing` / `render_resource_listing`: the three

@@ -71,6 +71,12 @@ _capabilities = {name.strip() for name in _capabilities.split(",") if name.strip
 #   MOCK_MCP_STALL_INITIALIZE=1 -> stall the handshake too, which is the one
 #                            request a client MUST NOT cancel.
 _stall_initialize = os.environ.get("MOCK_MCP_STALL_INITIALIZE") == "1"
+
+# MOCK_MCP_NO_TEMPLATES=1 -> still declare `resources`, but answer `-32601` for
+# `resources/templates/list` by falling through to the unknown-method branch. Templates
+# are optional within the capability, so this is a conforming server and not a broken
+# one: a client must show its concrete resources rather than failing the listing.
+_no_templates = os.environ.get("MOCK_MCP_NO_TEMPLATES") == "1"
 _stalled_ids = []
 _cancellations = []
 
@@ -523,7 +529,11 @@ def prompt_for_page(index):
 def resource_for_page(index):
     if index == 0:
         return {
-            "uri": "greeting://{name}",
+            # Concrete, deliberately. `greeting://{name}` lived here once, which is the
+            # very mistake `pyacp-as5` is about: a template is published by
+            # `resources/templates/list` and by nothing else, and a fixture that mixed
+            # the two let a client that never called that method look correct.
+            "uri": "greeting://ada",
             "name": "greeting-resource",
             "description": "A greeting resource",
             "mimeType": "text/plain",
@@ -532,6 +542,22 @@ def resource_for_page(index):
         "uri": "greeting://page-%d" % index,
         "name": "greeting-resource-%d" % index,
         "description": "A greeting resource (page %d)" % index,
+        "mimeType": "text/plain",
+    }
+
+
+def template_for_page(index):
+    if index == 0:
+        return {
+            "uriTemplate": "greeting://{name}",
+            "name": "greeting-template",
+            "description": "A greeting template",
+            "mimeType": "text/plain",
+        }
+    return {
+        "uriTemplate": "greeting://page-%d/{name}" % index,
+        "name": "greeting-template-%d" % index,
+        "description": "A greeting template (page %d)" % index,
         "mimeType": "text/plain",
     }
 
@@ -890,6 +916,14 @@ while True:
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": list_result(req, "resources", resource_for_page),
+            }
+        )
+    elif method == "resources/templates/list" and not _no_templates:
+        write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": list_result(req, "resourceTemplates", template_for_page),
             }
         )
     elif method == "resources/read":

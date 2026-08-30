@@ -473,7 +473,7 @@ than declining to recognise it.
 | `/listPrompts` | `_list_prompts` | `end_turn` |
 | `/promptShow` | `_expand_prompt` → `prompts/get`, messages emitted | `end_turn` |
 | `/promptInvoke` | `_expand_prompt`, which validates and then refuses | `refusal` |
-| `/listResources` | `_list_resources` | `end_turn` |
+| `/listResources` | `_list_resources`, two passes — `resources/list` then `resources/templates/list` | `end_turn` |
 | `/resourceShow` | `_show_resource` → `resources/read` | `end_turn` |
 
 `end_turn` rather than `refusal` for a listing: the turn did exactly what it was asked to
@@ -620,6 +620,7 @@ need no table at all.
 | `_resolve_server(verb, server, target, backends, separator)` | Which server a command goes to, and the runnable suggestion when a session has several |
 | `_require_capability(verb, server, backend, capability)` | Refuses a prompt or resource command the server's own handshake says it cannot answer |
 | `McpToolRouterExecutor._catalogue` | Every server's `prompts/list` or `resources/list`, plus the servers that declared no such capability. Two values, because "publishes none" and "does not implement it" want different reactions |
+| `McpToolRouterExecutor._resource_templates` | The second pass `/listResources` makes, over exactly the servers `_catalogue` asked. MCP publishes a URI template through `resources/templates/list` alone, so a listing without it reports a template-only server as empty (`pyacp-as5`). `-32601` becomes an empty section — templates are optional *within* the `resources` capability — and every other code still propagates |
 | `TOOL_META_KEY` | `"python-acp/tool"` — the `_meta` namespace a per-tool `AvailableCommand` publishes its schema under |
 | `_tool_meta(server, name, tool)` | That block: `server`, `tool`, and `inputSchema` verbatim when the tool published one |
 | `PERMISSION_OPTIONS` | The four options offered before every tool call |

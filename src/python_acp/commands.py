@@ -1174,47 +1174,122 @@ def prompt_message_blocks(result: dict[str, Any]) -> list[tuple[str, Any]]:
 
 
 def render_resource_listing(
-    listings: dict[str, list[dict[str, Any]]], undeclared: list[str] | None = None
+    listings: dict[str, list[dict[str, Any]]],
+    undeclared: list[str] | None = None,
+    templates: dict[str, list[dict[str, Any]]] | None = None,
 ) -> str:
     """The `/listResources` answer: uri, name, mime type. Never content.
 
     Fenced body, prose summary and invitation — see `render_tool_listing`.
+
+    `templates` is the server's `resources/templates/list`, keyed the same way and
+    **rendered as its own section under each server** rather than merged into the list
+    above it (`pyacp-as5`). A template is not readable as printed — `greeting://{name}`
+    is a shape, and `resources/read` takes a concrete URI — so a flat list would invite
+    exactly the `/resourceShow` that fails. Servers with no templates are absent from the
+    mapping, which is what keeps the common listing identical to what it was.
     """
     undeclared = list(undeclared or [])
+    templates = dict(templates or {})
     if not listings and not undeclared:
         return _no_servers("resources")
     if not listings:
         return _nothing_declared(undeclared, "resources", "resources")
 
     total = sum(len(resources) for resources in listings.values())
+    templated = sum(len(found) for found in templates.values())
     body: list[str] = []
     for server in sorted(listings):
         resources = listings[server]
+        found = templates.get(server, [])
         if body:
             body.append("")
-        body.append(
-            f"{server} ({len(resources)} resource{'' if len(resources) == 1 else 's'})"
-        )
-        if not resources:
+        body.append(f"{server} ({_resource_counts(len(resources), len(found))})")
+        if not resources and not found:
             body.append(f"{_INDENT}(this server publishes no resources)")
             continue
         for resource in resources:
             body.extend(_render_resource(resource))
+        if found:
+            body.append("")
+            body.append(f"{_INDENT}URI templates")
+            for template in found:
+                body.extend(_render_resource(template, key="uriTemplate"))
 
     lines = [
         f"{total} resource{'' if total == 1 else 's'} on "
-        f"{len(listings)} server{'' if len(listings) == 1 else 's'}.",
+        f"{len(listings)} server{'' if len(listings) == 1 else 's'}."
+        + _templated_summary(templated),
         "",
         *fenced_lines(body),
         *_undeclared_note(undeclared, "resources"),
         "",
         f"Read one with: {code_span(f'/{RESOURCE_SHOW} {_resource_example(listings)}')}",
+        *_template_note(templates),
     ]
     return "\n".join(lines)
 
 
-def _render_resource(resource: dict[str, Any]) -> list[str]:
-    uri = resource.get("uri")
+def _resource_counts(resources: int, templates: int) -> str:
+    """The per-server header. Templates are counted separately or not mentioned at all.
+
+    Folding them into one number would be the same conflation this whole change undoes:
+    "2 resources" for one resource and one template tells a reader they can read both.
+    """
+    counted = f"{resources} resource{'' if resources == 1 else 's'}"
+    if not templates:
+        return counted
+    return f"{counted}, {templates} template{'' if templates == 1 else 's'}"
+
+
+def _templated_summary(templated: int) -> str:
+    """A second sentence, not a bigger number in the first one.
+
+    The first sentence is what a reader quotes back — and it answers "how much can I
+    read", which a template does not add to.
+    """
+    if not templated:
+        return ""
+    return (
+        f" And {templated} URI template{'' if templated == 1 else 's'}, "
+        "which name a shape rather than a resource."
+    )
+
+
+def _template_note(templates: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """How to turn a template into something `/resourceShow` accepts.
+
+    Worth its own line because the failure it prevents is silent-looking: pasting
+    `greeting://{name}` earns "Unknown resource" from the server, which reads as the
+    template being broken rather than unexpanded. So the example is the session's own
+    template with each placeholder turned into a fill-in-the-blank.
+    """
+    for server in sorted(templates):
+        for template in templates[server]:
+            uri = template.get("uriTemplate")
+            if isinstance(uri, str):
+                filled = _PLACEHOLDER.sub(lambda match: f"<{match.group(1)}>", uri)
+                return [
+                    f"A template names a shape: replace each {code_span('<...>')} first, "
+                    f"as in {code_span(f'/{RESOURCE_SHOW} {server} {filled}')}."
+                ]
+    return []
+
+
+#: One RFC 6570 expression, loosely: enough to turn `{name}` into a blank to fill in.
+#: Deliberately not an expander — expansion is `pyacp-z15` and belongs nowhere near a
+#: renderer.
+_PLACEHOLDER = re.compile(r"\{[+#./;?&]?([^}]*)\}")
+
+
+def _render_resource(resource: dict[str, Any], key: str = "uri") -> list[str]:
+    """One resource, or one template — same fields under a different name.
+
+    `key` is the whole difference: a template's URI arrives as `uriTemplate`, not `uri`
+    (`pyacp-as5`). Everything else about the entry is identical, so it is one renderer
+    rather than two that would drift.
+    """
+    uri = resource.get(key)
     if not isinstance(uri, str):
         return []
     lines = ["", f"{_INDENT}{uri}"]

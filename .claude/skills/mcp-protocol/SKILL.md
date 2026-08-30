@@ -143,10 +143,11 @@ Outbound — what `MCPStdioClient` wraps today, and the shape each returns:
 | `prompts/list` | `list_prompts()` | `[{name, description, arguments}]` — every page |
 | `prompts/get` | `get_prompt(name, arguments)` | `{description, messages: [{role, content}]}` |
 | `resources/list` | `list_resources()` | `[{uri, name, mimeType}]` — every page |
+| `resources/templates/list` | `list_resource_templates()` | `[{uriTemplate, name, mimeType}]` — every page. Note `uriTemplate`, not `uri` |
 | `resources/read` | `read_resource(uri)` | `{contents: [{uri, mimeType, text\|blob}]}` |
 | `notifications/cancelled` | `cancel_request(request_id, reason=None)` | nothing — a notification |
 
-The three `*_list` wrappers all go through `_list_all`, which walks `nextCursor` to
+The four `*_list` wrappers all go through `_list_all`, which walks `nextCursor` to
 exhaustion and hands back one flat list — not the raw page envelope. An absent
 `nextCursor` is the only terminator; an empty page is not one. Because the walk is
 driven entirely by the server it is bounded twice — a repeated cursor and
@@ -154,9 +155,8 @@ driven entirely by the server it is bounded twice — a repeated cursor and
 list method belongs on `_list_all` too, not on a bare `request()`.
 
 Everything else goes through the generic `request()` / `notify()`. Not yet wrapped, in
-rough order of usefulness here: `ping`, `resources/templates/list`,
-`resources/subscribe` / `unsubscribe`, `logging/setLevel`, `completion/complete`,
-`notifications/progress`.
+rough order of usefulness here: `ping`, `resources/subscribe` / `unsubscribe`,
+`logging/setLevel`, `completion/complete`, `notifications/progress`.
 
 Inbound — `_handle_message` routes by shape, and `mcp_stdio.md` has the table. The part
 worth memorizing: **every server request gets a reply.** `ping` is answered with `{}`,
@@ -264,13 +264,15 @@ Real gaps, in rough priority order. Check beads before filing a duplicate.
   read off `Session.running_tool_call`. That is correct **only while a session runs one
   turn at a time and a turn runs its invocations in order** — relax either and the id
   becomes a guess. `sessions.md` and `elicitation.md` both record the dependency.
-- **Templated resources are not reachable.** `resources/templates/list` is what
-  advertises a URI template like `greeting://{name}`, and nothing here wraps it, so no
-  caller ever gets one to expand. Expansion is client-side (RFC 6570) and produces a
-  concrete URI; `read_resource(uri)` then takes that URI and nothing else. Do **not**
-  reintroduce an `arguments` param to carry the substitution — `resources/read` params
-  are `{uri}`, a real server ignores anything more, and `pyacp-ito` removed exactly
-  that. The mock fixture used to honour it, which is why no test ever caught it.
+- **Templated resources are discovered but not expanded.** `list_resource_templates()`
+  wraps `resources/templates/list` and `/listResources` shows what it returns
+  (`pyacp-as5`), so a URI template like `greeting://{name}` now reaches a reader — who
+  can substitute a value by hand and read the result today. What is still missing is
+  *expansion*: turning a template plus arguments into a concrete URI is client-side RFC
+  6570 work (`pyacp-z15`), and nothing here does it. Do **not** reintroduce an
+  `arguments` param to carry the substitution — `resources/read` params are `{uri}`, a
+  real server ignores anything more, and `pyacp-ito` removed exactly that. The mock
+  fixture used to honour it, which is why no test ever caught it.
 
 ## Protocol version
 

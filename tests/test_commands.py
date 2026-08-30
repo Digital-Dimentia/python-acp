@@ -518,6 +518,66 @@ def test_the_resource_listing_shows_uri_name_mime_type_and_a_two_token_example()
     assert "/resourceShow demo greeting://ada" in text
 
 
+def test_a_uri_template_is_shown_in_a_section_of_its_own() -> None:
+    """A template is not readable as printed, so it must not sit in the readable list.
+
+    `greeting://{name}` pasted into `/resourceShow` earns "Unknown resource" from the
+    server, which reads as the template being broken rather than unexpanded. Rendering
+    the two in one flat list is what invites that (`pyacp-as5`).
+    """
+    text = render_resource_listing(
+        {"demo": [{"uri": "greeting://ada", "name": "greeting", "mimeType": "text/plain"}]},
+        templates={
+            "demo": [
+                {
+                    "uriTemplate": "greeting://{name}",
+                    "name": "greeting-template",
+                    "mimeType": "text/plain",
+                }
+            ]
+        },
+    )
+    # Counted apart, in the summary and in the server's own header.
+    assert "1 resource on 1 server." in text
+    assert "1 URI template, which name" in text
+    assert "demo (1 resource, 1 template)" in text
+    # Under its own heading, and after the resources it is not one of.
+    assert "URI templates" in text
+    assert text.index("greeting://ada") < text.index("URI templates") < text.index(
+        "greeting://{name}"
+    )
+    # And the reader is told how to turn one into something that reads.
+    assert "`/resourceShow demo greeting://<name>`" in text
+
+
+def test_a_server_publishing_only_templates_is_not_reported_as_empty() -> None:
+    """The bug in one assertion: a filesystem server publishing `file:///{path}` and
+    nothing concrete was reported as having nothing to read."""
+    text = render_resource_listing(
+        {"files": []}, templates={"files": [{"uriTemplate": "file:///{path}", "name": "file"}]}
+    )
+    assert "publishes no resources" not in text
+    assert "file:///{path}" in text
+    assert "files (0 resources, 1 template)" in text
+
+
+def test_a_listing_with_no_templates_is_unchanged() -> None:
+    """The common case pays nothing for the new section — not a heading, not a sentence."""
+    listings = {"demo": [{"uri": "greeting://ada", "name": "greeting"}]}
+    assert render_resource_listing(listings, templates={}) == render_resource_listing(listings)
+    assert "template" not in render_resource_listing(listings)
+
+
+def test_a_templated_listing_survives_a_markdown_renderer() -> None:
+    """`{name}` is not the risk; the `<name>` in the note is — a renderer eats it as a tag."""
+    text = render_resource_listing(
+        {"demo": []},
+        templates={"demo": [{"uriTemplate": "greeting://{name}", "name": "greeting-template"}]},
+    )
+    assert_markdown_safe(text)
+    assert "<name>" in text, "the blank must still be there to be worth protecting"
+
+
 def test_a_server_that_publishes_no_prompts_or_resources_is_still_named() -> None:
     assert "publishes no prompts" in render_prompt_listing({"empty": []})
     assert "publishes no resources" in render_resource_listing({"empty": []})

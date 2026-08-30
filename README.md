@@ -343,6 +343,13 @@ missing required one, are both refused by name before the server is asked.
 verbatim; a binary resource is reported as `[binary, about N bytes, not shown]` rather
 than pasted into the transcript as base64.
 
+It also shows the server's **URI templates**, which MCP publishes through a separate
+method (`resources/templates/list`) — a server whose resources are all templates, like a
+filesystem server publishing `file:///{path}`, has plenty to read while `resources/list`
+comes back empty. They are listed under their own heading, because a template is a shape
+rather than a resource: substitute a value for each `{placeholder}` yourself, then read
+the result with `/resourceShow`. Expanding one for you is not implemented.
+
 The server may be omitted from any of these when the session opened exactly one. Note the
 shape difference: a prompt is `demo/greeting`, one token split on the slash, while a
 resource is `demo greeting://ada`, two tokens — a URI is full of slashes and cannot be

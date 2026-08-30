@@ -236,11 +236,16 @@ from python_acp.commands import (
     tool_command_hint,
 )
 from python_acp.markdown import code_span
+from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.paths import PathConstraintError, require_contained
 from python_acp.terminals import DEFAULT_OUTPUT_BYTE_LIMIT, TerminalRegistry
 from python_acp.turns import Gate, TurnContext, TurnResult
 
 logger = logging.getLogger(__name__)
+
+#: JSON-RPC's "no such method". Named because it is read as a *value* here — the one
+#: backend failure `/listResources` absorbs rather than forwards.
+_METHOD_NOT_FOUND = -32601
 
 #: The shape a prompt block must have, said once so every refusal says it the same way.
 #:
@@ -744,10 +749,54 @@ class McpToolRouterExecutor:
         return TurnResult.ended()
 
     async def _list_resources(self, context: TurnContext, backends: Any) -> TurnResult:
-        """Answer `/listResources`. Metadata only — reading one is `/resourceShow`."""
+        """Answer `/listResources`. Metadata only — reading one is `/resourceShow`.
+
+        **Two passes, because MCP publishes resources through two methods.** A URI
+        template like `greeting://{name}` reaches a client via
+        `resources/templates/list` and via nothing else, so a listing built from
+        `resources/list` alone reports a server whose resources are all templates as
+        having none — a confident wrong picture, and the bug `pyacp-as5` is about.
+        """
         listings, undeclared = await self._catalogue(backends, "resources", "list_resources")
-        await context.emit(update_agent_message_text(render_resource_listing(listings, undeclared)))
+        templates = await self._resource_templates(backends, listings)
+        await context.emit(
+            update_agent_message_text(render_resource_listing(listings, undeclared, templates))
+        )
         return TurnResult.ended()
+
+    @staticmethod
+    async def _resource_templates(
+        backends: Any, listings: dict[str, list[dict[str, Any]]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Every declared server's URI templates, asked for only where it makes sense.
+
+        Only the servers already in `listings` are asked: they are exactly the ones that
+        declared `resources`, which is the capability gating both methods. The servers
+        `_catalogue` put in `undeclared` were never asked the first question and must not
+        be asked this one either.
+
+        `-32601` is absorbed into an empty section rather than failing the command.
+        Templates are *optional within* the capability, so a server that declares
+        `resources` and implements no templates is conforming — refusing to list its
+        concrete resources over that would be the same wrong picture in the other
+        direction. Every other code still propagates, matching `_catalogue`'s rule that a
+        server which declared a capability and then fails is not absorbed.
+
+        A server with no templates contributes no entry at all, so the common case — a
+        server publishing only concrete resources — renders exactly as it did before.
+        """
+        found: dict[str, list[dict[str, Any]]] = {}
+        for server in sorted(listings):
+            try:
+                templates = list(await backends[server].list_resource_templates())
+            except MCPProtocolError as exc:
+                if exc.code != _METHOD_NOT_FOUND:
+                    raise
+                logger.debug("%s implements no resources/templates/list", server)
+                continue
+            if templates:
+                found[server] = templates
+        return found
 
     @staticmethod
     async def _catalogue(

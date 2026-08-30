@@ -488,6 +488,27 @@ class MCPStdioClient:
     async def list_resources(self) -> list[dict[str, Any]]:
         return await self._list_all("resources/list", "resources")
 
+    async def list_resource_templates(self) -> list[dict[str, Any]]:
+        """The server's URI *templates* — a separate method from `resources/list`.
+
+        MCP publishes a template like `greeting://{name}` through
+        `resources/templates/list` only, with its own result key and its own field
+        name: `{"resourceTemplates": [{uriTemplate, name, description, mimeType}]}`.
+        Note `uriTemplate`, not `uri`.
+
+        That separation is why a server whose resources are *all* templates — a
+        filesystem server publishing `file:///{path}` — answers `resources/list` with an
+        empty page while having plenty to read. A caller that asks only the one method
+        reports it as having nothing, which is a confident wrong picture rather than a
+        missing feature (`pyacp-as5`).
+
+        Both methods sit behind the same `resources` capability, and templates are
+        optional within it: a server that declares `resources` may still answer `-32601`
+        here. That is the caller's to absorb as an empty section — see
+        `turn_mcp_router._resource_templates`.
+        """
+        return await self._list_all("resources/templates/list", "resourceTemplates")
+
     async def _list_all(self, method: str, key: str) -> list[dict[str, Any]]:
         """Walk an MCP cursor-paginated list method to exhaustion.
 

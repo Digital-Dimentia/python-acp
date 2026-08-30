@@ -68,9 +68,17 @@ rather than only while one of our requests is in flight.
   request whose answer this client abandoned. Best-effort and never raises.
 - `MCPStdioClient._abandon()`: forget one pending request and tell the server to
   stop working on it — the shared path for a timeout and for a cancelled caller.
-- `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()`: fully
-  paginated list wrappers, each returning the accumulated items across all pages.
-- `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those three.
+- `MCPStdioClient.list_tools()` / `list_prompts()` / `list_resources()` /
+  `list_resource_templates()`: fully paginated list wrappers, each returning the
+  accumulated items across all pages.
+- `MCPStdioClient.list_resource_templates()`: `resources/templates/list`, the *other*
+  half of the resources primitive. A URI template (`greeting://{name}`) is published
+  here and nowhere else, under `resourceTemplates` and as `uriTemplate` rather than
+  `uri`, so a caller that asks only `list_resources()` reports a server whose resources
+  are all templates as having none (`pyacp-as5`). Same `resources` capability; templates
+  are optional within it, so a `-32601` here is conforming and the caller decides
+  whether to absorb it.
+- `MCPStdioClient._list_all()`: the shared `nextCursor` walk behind those four.
 - `MCPStdioClient.read_resource(uri)`: `resources/read` for one concrete URI. Takes
   no `arguments` -- a templated resource is expanded client-side into a concrete
   URI before this is called, so the substitution never reaches the wire.

@@ -34,7 +34,8 @@ can honestly do is fixed by decision D1, which puts no model in this runtime:
 
 | Command | MCP call | Needs a model |
 | --- | --- | --- |
-| `/tools`, `/listPrompts`, `/listResources` | `*/list` | no — metadata |
+| `/tools`, `/listPrompts` | `*/list` | no — metadata |
+| `/listResources` | `resources/list` **and** `resources/templates/list` | no — metadata |
 | `/invokeTool` | `tools/call` | no — the client named the tool and its arguments |
 | `/promptShow` | `prompts/get` | **no** — the *server* performs the substitution |
 | `/resourceShow` | `resources/read` | no — reading is the whole operation |
@@ -335,6 +336,13 @@ Three things a listing refuses to be silent about, because silence has a wrong r
 
 - a server that publishes **none** of a primitive is still named, with `(this server
   publishes no prompts)`. Omitting it reads as "the server is missing";
+- a **URI template** is shown under its own `URI templates` heading rather than in the
+  list above it. `greeting://{name}` is a shape, not a resource: `resources/read` takes a
+  concrete URI, so a template pasted into `/resourceShow` earns "Unknown resource" — which
+  reads as the template being broken rather than unexpanded. A flat list would invite
+  exactly that, so the listing counts templates apart, heads them apart, and closes with
+  the session's own template rewritten as a fill-in-the-blank (`greeting://<name>`).
+  Expanding one for real is RFC 6570 work and is `pyacp-z15`;
 - a server that **declared no capability** for a primitive is named separately, with why.
   Merged into the previous case, "does not do this" would be indistinguishable from "does
   this, and is empty" — and those want different reactions;

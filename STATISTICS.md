@@ -4,7 +4,7 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **fe2554f 2026-08-29**. These are a snapshot and go out of date with the
+Counted at commit **5ac2be6 2026-08-29**. These are a snapshot and go out of date with the
 next commit, which is why the commit is stamped rather than the date alone. The
 stamp is ignored when checking whether the numbers are current — it names the
 commit *before* the one that committed this file, and always will.
@@ -23,19 +23,19 @@ does. Docstring totals below are therefore lower than a naive span count.
 
 | Group | Files | Lines | Code | Docstring | Comment | Blank | Classes | Functions | async | Test fns |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `src/python_acp` | 21 | 9,759 | 4,692 | 2,750 | 824 | 1,493 | 54 | 335 | 117 | 0 |
-| `tests` | 36 | 18,628 | 11,202 | 2,262 | 957 | 4,207 | 54 | 1,208 | 650 | 912 |
+| `src/python_acp` | 21 | 9,904 | 4,749 | 2,810 | 829 | 1,516 | 54 | 340 | 119 | 0 |
+| `tests` | 36 | 18,835 | 11,326 | 2,298 | 969 | 4,242 | 54 | 1,219 | 656 | 922 |
 | `scripts` | 3 | 956 | 627 | 145 | 37 | 147 | 4 | 31 | 0 | 0 |
-| **Total** | **60** | **29,343** | **16,521** | **5,157** | **1,818** | **5,847** | **112** | **1,574** | **767** | **912** |
+| **Total** | **60** | **29,695** | **16,702** | **5,253** | **1,835** | **5,905** | **112** | **1,590** | **775** | **922** |
 
 ## Ratios worth knowing
 
 | Measure | Value | What it means |
 | --- | ---: | --- |
-| Test code to production code | 2.4 : 1 | 11,202 lines of test code against 4,692 of production code |
-| Prose share of production source | 37% | 2,750 docstring + 824 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
-| Co-located module docs | 4,722 lines | 20 files beside the 20 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
-| Markdown across the repo | 9,179 lines | 36 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
+| Test code to production code | 2.4 : 1 | 11,326 lines of test code against 4,749 of production code |
+| Prose share of production source | 37% | 2,810 docstring + 829 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
+| Co-located module docs | 4,739 lines | 20 files beside the 20 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
+| Markdown across the repo | 9,205 lines | 36 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
 
 **Test functions are not test cases.** The table counts `def test_*`; pytest
 collects more, because `@pytest.mark.parametrize` expands one function into many.
@@ -48,10 +48,10 @@ longer than the module, that is usually deliberate.
 
 | Module | Lines | Code | Classes | Functions | Sibling doc |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| [`turn_mcp_router.py`](src/python_acp/turn_mcp_router.py) | 1,904 | 1,041 | 10 | 49 | 661 |
-| [`commands.py`](src/python_acp/commands.py) | 1,301 | 725 | 9 | 37 | 416 |
+| [`turn_mcp_router.py`](src/python_acp/turn_mcp_router.py) | 1,953 | 1,062 | 10 | 50 | 662 |
+| [`commands.py`](src/python_acp/commands.py) | 1,376 | 759 | 9 | 40 | 424 |
 | [`agent.py`](src/python_acp/agent.py) | 1,023 | 466 | 1 | 37 | 457 |
-| [`mcp_stdio.py`](src/python_acp/mcp_stdio.py) | 890 | 461 | 5 | 42 | 554 |
+| [`mcp_stdio.py`](src/python_acp/mcp_stdio.py) | 911 | 463 | 5 | 43 | 562 |
 | [`turns.py`](src/python_acp/turns.py) | 636 | 284 | 11 | 19 | 303 |
 | [`sessions.py`](src/python_acp/sessions.py) | 571 | 260 | 4 | 32 | 217 |
 | [`transport_ws.py`](src/python_acp/transport_ws.py) | 467 | 210 | 3 | 19 | 308 |
@@ -77,17 +77,17 @@ here rather than a by-product, so it is counted per file and not only in total.
 
 | File | Lines |
 | --- | ---: |
-| [`README.md`](README.md) | 689 |
-| [`src/python_acp/turn_mcp_router.md`](src/python_acp/turn_mcp_router.md) | 661 |
-| [`src/python_acp/mcp_stdio.md`](src/python_acp/mcp_stdio.md) | 554 |
+| [`README.md`](README.md) | 696 |
+| [`src/python_acp/turn_mcp_router.md`](src/python_acp/turn_mcp_router.md) | 662 |
+| [`src/python_acp/mcp_stdio.md`](src/python_acp/mcp_stdio.md) | 562 |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 473 |
 | [`src/python_acp/agent.md`](src/python_acp/agent.md) | 457 |
 | [`AGENTS.md`](AGENTS.md) | 444 |
 | [`docs/module-boundaries.md`](docs/module-boundaries.md) | 439 |
-| [`src/python_acp/commands.md`](src/python_acp/commands.md) | 416 |
+| [`src/python_acp/commands.md`](src/python_acp/commands.md) | 424 |
 | [`CLAUDE.md`](CLAUDE.md) | 374 |
 | [`src/python_acp/transport_ws.md`](src/python_acp/transport_ws.md) | 308 |
-| [`.claude/skills/mcp-protocol/SKILL.md`](.claude/skills/mcp-protocol/SKILL.md) | 305 |
+| [`.claude/skills/mcp-protocol/SKILL.md`](.claude/skills/mcp-protocol/SKILL.md) | 307 |
 | [`src/python_acp/turns.md`](src/python_acp/turns.md) | 303 |
 | [`docs/acp-compliance-matrix.md`](docs/acp-compliance-matrix.md) | 263 |
 | [`.claude/skills/acp-protocol/SKILL.md`](.claude/skills/acp-protocol/SKILL.md) | 247 |
@@ -113,16 +113,16 @@ here rather than a by-product, so it is counted per file and not only in total.
 | [`src/python_acp/mcp_content.md`](src/python_acp/mcp_content.md) | 88 |
 | [`.beads/README.md`](.beads/README.md) | 81 |
 | [`.agents/skills/beads/SKILL.md`](.agents/skills/beads/SKILL.md) | 80 |
-| **36 files** | **9,179** |
+| **36 files** | **9,205** |
 
 ## Test modules
 
 | Module | Lines | Test functions |
 | --- | ---: | ---: |
-| [`test_turn_mcp_router.py`](tests/test_turn_mcp_router.py) | 2,961 | 166 |
+| [`test_turn_mcp_router.py`](tests/test_turn_mcp_router.py) | 3,020 | 169 |
 | [`test_agent.py`](tests/test_agent.py) | 2,276 | 108 |
-| [`test_commands.py`](tests/test_commands.py) | 840 | 69 |
-| [`test_mcp_stdio.py`](tests/test_mcp_stdio.py) | 979 | 57 |
+| [`test_commands.py`](tests/test_commands.py) | 900 | 73 |
+| [`test_mcp_stdio.py`](tests/test_mcp_stdio.py) | 1,033 | 60 |
 | [`test_transport_ws.py`](tests/test_transport_ws.py) | 1,212 | 48 |
 | [`test_mcp_registry.py`](tests/test_mcp_registry.py) | 568 | 39 |
 | [`test_sessions.py`](tests/test_sessions.py) | 582 | 39 |

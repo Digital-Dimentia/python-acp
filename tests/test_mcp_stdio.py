@@ -66,6 +66,60 @@ async def test_list_prompts_get_prompt_and_read_resource_over_stdio() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_resource_templates_reads_the_other_resources_method() -> None:
+    """`resources/templates/list` is a separate method with a separate field name.
+
+    `uriTemplate`, not `uri` — and a client that asks only `resources/list` sees none of
+    this, which is how a server whose resources are all templates gets reported as having
+    nothing to read (`pyacp-as5`).
+    """
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        templates = await client.list_resource_templates()
+        concrete = await client.list_resources()
+
+    assert [t["uriTemplate"] for t in templates] == ["greeting://{name}"]
+    assert "uri" not in templates[0], "a template has no concrete uri, by definition"
+    # And the two methods really do publish different things.
+    assert [r["uri"] for r in concrete] == ["greeting://ada"]
+
+
+@pytest.mark.asyncio
+async def test_a_paged_template_listing_is_walked_like_every_other_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It goes through `_list_all`, so it inherits the cursor walk rather than re-doing it."""
+    monkeypatch.setenv("MOCK_MCP_LIST_PAGES", "3")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        templates = await client.list_resource_templates()
+
+    assert len(templates) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_server_may_declare_resources_and_still_not_implement_templates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Templates are optional *within* the capability, so `-32601` is a conforming answer.
+
+    The wrapper forwards it with the server's own code; absorbing it is the caller's
+    decision, and `turn_mcp_router` makes it — see the `/listResources` test.
+    """
+    monkeypatch.setenv("MOCK_MCP_NO_TEMPLATES", "1")
+    cmd = [sys.executable, str(FIXTURE_SERVER)]
+    async with MCPStdioClient(cmd) as client:
+        await client.initialize()
+        assert client.supports("resources"), "the capability is still declared"
+        with pytest.raises(MCPProtocolError) as raised:
+            await client.list_resource_templates()
+
+    assert raised.value.code == -32601
+
+
+@pytest.mark.asyncio
 async def test_the_servers_capability_block_is_kept_for_supports_to_read() -> None:
     """MCP's rule runs both ways: a client MUST NOT use a capability the server did not
     declare. Discarding the block left asking-and-being-refused as the only way to find

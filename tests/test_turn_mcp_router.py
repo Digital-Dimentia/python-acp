@@ -2658,7 +2658,66 @@ async def test_list_resources_reports_uri_and_mime_type() -> None:
     assert result.stop_reason == "end_turn"
     text = said(harness)
     assert "1 resource on 1 server." in text
-    assert "greeting://{name}" in text and "text/plain" in text
+    assert "greeting://ada" in text and "text/plain" in text
+
+
+async def test_list_resources_shows_the_servers_uri_templates_too() -> None:
+    """The bug `pyacp-as5` is about, end to end.
+
+    A template reaches a client through `resources/templates/list` and through nothing
+    else, so a listing built from `resources/list` alone reports a server whose resources
+    are all templates as having none — a confident wrong picture rather than a missing
+    feature. It is shown in a section of its own because it is not readable as printed.
+    """
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/listResources"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "greeting://{name}" in text
+    assert "demo (1 resource, 1 template)" in text
+    assert text.index("greeting://ada") < text.index("URI templates") < text.index(
+        "greeting://{name}"
+    )
+    assert "`/resourceShow demo greeting://<name>`" in text
+
+
+async def test_a_server_that_implements_no_templates_still_lists_its_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`-32601` for `resources/templates/list` is a conforming answer, not a failure.
+
+    Templates are optional *within* the `resources` capability, so absorbing the code
+    into an empty section is the only reading that does not replace one wrong picture
+    with another: refusing the whole listing would hide the resources the server does
+    publish.
+    """
+    monkeypatch.setenv("MOCK_MCP_NO_TEMPLATES", "1")
+    async with Harness("demo") as harness:
+        result = await harness.run(typed("/listResources"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "1 resource on 1 server." in text
+    assert "greeting://ada" in text
+    assert "URI template" not in text
+
+
+async def test_a_server_that_never_declared_resources_is_not_asked_for_templates() -> None:
+    """The second pass asks exactly the servers the first one did.
+
+    A server in the undeclared bucket was never asked `resources/list`; asking it
+    `resources/templates/list` would be using a capability it did not declare, which is
+    the rule MCP states in both directions.
+    """
+    async with Harness(
+        "demo", "quiet", server_env={"quiet": {"MOCK_MCP_CAPABILITIES": "tools"}}
+    ) as harness:
+        await harness.run(typed("/listResources"))
+
+    text = said(harness)
+    assert "quiet declares no resources capability, so it was not asked." in text
+    assert "quiet (" not in text
 
 
 async def test_prompt_show_expands_the_prompt_and_emits_the_messages() -> None:

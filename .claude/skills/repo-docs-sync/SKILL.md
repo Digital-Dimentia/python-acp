@@ -1,6 +1,6 @@
 ---
 name: repo-docs-sync
-description: Use when adding, renaming, deleting, or materially changing any file under src/python_acp/, or when touching ARCHITECTURE.md or the README's client-facing surface. This repo requires a co-located Markdown doc with the same basename beside every production Python module, plus Mermaid diagrams in ARCHITECTURE.md that track the real request path, and `make docs-check` enforces the mechanical half. Trigger before finishing any change to production source or architecture docs.
+description: Use when adding, renaming, deleting, or materially changing any file under src/python_acp/, or when touching ARCHITECTURE.md or the README's client-facing surface. This repo requires a co-located Markdown doc with the same basename beside every production Python module, plus Mermaid diagrams — architecture, data flow, protocol ordering, code logic — that track real behaviour in ARCHITECTURE.md and in the module docs, and `make docs-check` enforces only the mechanical half. Trigger before finishing any change to production source or architecture docs.
 ---
 
 # Documentation Invariants
@@ -30,12 +30,93 @@ Consequences:
 
 `__init__.py` is exempt. Files under `tests/` are exempt.
 
+## Mermaid diagrams
+
+A module doc that is only prose forces the reader to rebuild the shape of the thing in
+their head. Where a module *has* a shape — a path data takes, a wiring between
+collaborators, a state machine, an ordering across processes — draw it. The diagram is
+part of the doc contract, not decoration.
+
+### Which diagram for which subject
+
+Pick by what is actually being explained; the wrong form is worse than no picture.
+
+| The thing you are explaining | Form | Live example |
+| --- | --- | --- |
+| **Architecture / wiring** — which module holds which, and what is a callback rather than a call | `flowchart LR` | the subsystem map in [ARCHITECTURE.md](../../../ARCHITECTURE.md) |
+| **Data flow** — how one payload is classified or transformed hop by hop | `flowchart TD`, one node per transform, edges labelled with the *shape* in flight | [transport_ws.md](../../../src/python_acp/transport_ws.md): frame → decode → dispatch, with each error code as its own edge |
+| **Protocol / ordering across processes** — who speaks when, and what overlaps | `sequenceDiagram` with `alt` / `opt` / `par` | [mcp_stdio.md](../../../src/python_acp/mcp_stdio.md) request/reply loop; the six in `ARCHITECTURE.md` |
+| **Code logic** — a decision tree, a startup path, an escalation ladder | `flowchart TD` with `{"…?"}` decision nodes and labelled edges | [cli.md](../../../src/python_acp/cli.md) bootstrap; the `mcp_stdio.md` shutdown ladder (stdin → SIGTERM → SIGKILL) |
+| **Lifecycle** — an object with named states and legal transitions | `stateDiagram-v2` | none yet; the shape a session or terminal registry doc wants |
+| **Ownership / cardinality** — one-to-many between long-lived objects | `erDiagram`, sparingly | none yet |
+
+Direction is part of the choice: **`LR` for wiring and pipelines** (wide, few branches),
+**`TD` for decision trees** (a `{"…?"}` node with labelled outcomes reads top-down).
+
+Rules of thumb:
+
+- **One diagram answers one question.** Two diagrams of the same subject is how one goes
+  stale — `pyacp-6ni.5` merged a "today" and a "target" section for exactly that reason.
+- **A diagram that restates the prose earns nothing.** Draw what prose is bad at:
+  branching, concurrency, ordering, fan-out.
+- **Fewer than ~4 nodes is a sentence.** More than ~20 is two diagrams, or a `subgraph`.
+- Diagrams describe **delivered behaviour**, never intent. Label a planned edge, or leave
+  it out.
+
+### House style
+
+Follow what is already in `ARCHITECTURE.md` and `mcp_stdio.md`:
+
+- Node id in PascalCase, label carrying the **filename and the role**:
+  `Turns["turns.py<br/>TurnExecutor"]`. A reader should be able to jump from a box to a
+  file without guessing.
+- `<br/>` for a second line; `&rarr;` for an arrow inside a label (a literal `-->` in a
+  label breaks the parse).
+- **Solid edge = a direct call. Dotted edge = a callback, hook, or deferred path**, and
+  label it: `Sessions -. "on_close" .-> Backends`.
+- `[(…)]` for a process or external system (`MCPProc[("MCP server subprocess")]`).
+- Quote any label containing parentheses, slashes, commas, or `#`.
+- In a `sequenceDiagram`, name participants after the module (`participant Client as
+  MCPStdioClient`), and use `Note over` for the invariant a reader cannot infer from the
+  arrows ("read loop runs for the life of the subprocess").
+
+### What `make docs-check` will and will not catch
+
+`scripts/check_docs.py` validates **flowchart edges only** — every edge must name a node
+its own block defines, and no node may be defined twice. That check exists because GitHub
+renders a dangling edge as an invented bare node, so a drifted flowchart looks *plausible*
+rather than broken.
+
+Two traps follow from how the check is written:
+
+- **Write `flowchart`, never `graph`.** The checker skips any block whose first line is
+  not `flowchart…`, so `graph TD` renders identically on GitHub while silently opting out
+  of validation.
+- **Put spaces around every arrow.** The edge regex requires whitespace on both sides, so
+  `A-->B` is invisible to the checker; write `A --> B`.
+
+Nothing validates `sequenceDiagram`, `stateDiagram-v2`, or `erDiagram` — no node check, no
+render. For those, and for label syntax in any block, paste the block into
+<https://mermaid.live> before committing. `make docs-check` does not render Mermaid (that
+needs node and a headless browser), so a green check means the wiring is intact, not that
+the picture draws.
+
+### When you change code
+
+A diagram is as much a drift risk as a docstring. Redraw when the **shape** changes — a
+new participant, a new branch, a changed hop, a new kind of request. Adding one more
+method to an existing branch does not need a diagram edit.
+
 ## ARCHITECTURE.md
 
-Holds two Mermaid diagrams that describe real behavior, not intent:
+Holds one `flowchart LR` of subsystems and their wiring, plus a family of
+`sequenceDiagram`s — the handshake, the request lifecycle, and one per hard case
+(cancelling a turn, client-side `fs/*`, `terminal/*`, an MCP server asking the human a
+question). They describe real behavior, not intent:
 
-- a `flowchart LR` of subsystems and their wiring
-- a `sequenceDiagram` of the request lifecycle, including the `alt` branch that splits an
+- the flowchart is the only diagram in the repo that names every module; it is the one
+  that goes stale when a module is added or rewired
+- the request-lifecycle `sequenceDiagram` carries the `alt` branch that splits an
   unusable frame from a well-formed one. (That branch used to split *action-based from
   JSON-RPC* requests; `pyacp-sld.3` deleted the action surface, so the only thing decided
   before the SDK sees a frame is whether it is usable at all.)
@@ -45,7 +126,8 @@ participant, a new branch, a changed hop. Adding one more method to an existing 
 does not need a diagram edit; adding a new *kind* of request does.
 
 Mermaid blocks are rendered by GitHub. Check fences are ```` ```mermaid ```` and that
-node labels with parentheses or slashes are quoted.
+node labels with parentheses or slashes are quoted. See **Mermaid diagrams** above for
+form, house style, and what `docs-check` does not validate.
 
 ## README.md
 

@@ -186,18 +186,41 @@ def collect(root: Path = REPO_ROOT) -> list[Group]:
     return groups
 
 
+#: The directories whose Markdown is *this project's documentation*, walked recursively,
+#: alongside the Markdown at the repository root.
+#:
+#: **Deliberately not the whole tree.** This used to `rglob` from the root, which counted
+#: anything ending in `.md` anywhere in the checkout — agent tooling under `.claude/`,
+#: `.agents/` and `.beads/`, fixture documents under `tests/data/`, and any scratch note
+#: someone dropped in a new directory. Every one of those moved the totals, so writing a
+#: planning document made `test_the_document_is_current` fail with a diff about a file
+#: that is not documentation and that nobody expected to be counted. A generated report
+#: has to be a function of the things it claims to describe; an enumeration that grows
+#: with unrelated files is a staleness alarm that cries wolf, and the fix everyone reaches
+#: for is to regenerate without reading, which is exactly what this document must not
+#: train people to do.
+#:
+#: Adding a directory here is how new documentation gets counted — the omission is the
+#: point, not an oversight.
+DOC_ROOTS: tuple[str, ...] = ("docs", "src/python_acp")
+
+
 def markdown_files(root: Path = REPO_ROOT) -> list[Path]:
-    """Every Markdown file **except the one being written**.
+    """This project's Markdown: the repository root and `DOC_ROOTS`, minus this file.
 
     `STATISTICS.md` is excluded because its own length is part of its own content: count
     it, and writing the file changes the number that goes in the file. That is a fixed
     point, not a count, and it would make `--check` report a freshly generated document as
     stale. Excluding it is stable and the report says so rather than quietly being off by
     one file.
+
+    The root is globbed **non-recursively** — its subdirectories are named by `DOC_ROOTS`
+    or are not documentation.
     """
-    return sorted(
-        path for path in root.rglob("*.md") if not is_ignored(path) and path != OUTPUT
-    )
+    found = list(root.glob("*.md"))
+    for directory in DOC_ROOTS:
+        found.extend((root / directory).rglob("*.md"))
+    return sorted(path for path in found if not is_ignored(path) and path != OUTPUT)
 
 
 def _line_count(path: Path) -> int:
@@ -344,10 +367,12 @@ def render(root: Path = REPO_ROOT) -> str:
             "need one — `__init__.py` is exempt. The rule `check_docs.py` enforces",
         ]),
         _row([
-            "Markdown across the repo",
+            "Project documentation",
             f"{doc_lines:,} lines",
-            f"{len(docs)} files, module docs included and this one excluded — its own "
-            "length would otherwise be part of its own content",
+            f"{len(docs)} files — the repository root plus "
+            + ", ".join(f"`{directory}/`" for directory in DOC_ROOTS)
+            + ", module docs included and this one excluded, since its own length would "
+            "otherwise be part of its own content",
         ]),
         "",
         "**Test functions are not test cases.** The table counts `def test_*`; pytest",
@@ -376,8 +401,16 @@ def render(root: Path = REPO_ROOT) -> str:
         "",
         "## Documentation",
         "",
-        "Every Markdown file in the repository, this one excepted. Prose is a deliverable",
-        "here rather than a by-product, so it is counted per file and not only in total.",
+        "The Markdown this project owns: the repository root plus "
+        + ", ".join(f"`{directory}/`" for directory in DOC_ROOTS)
+        + ", this file excepted.",
+        "Prose is a deliverable here rather than a by-product, so it is counted per file",
+        "and not only in total.",
+        "",
+        "**Not every `.md` in the checkout.** Agent tooling, fixture documents and scratch",
+        "notes elsewhere in the tree are not documentation, and counting them made these",
+        "numbers move whenever someone wrote a file that has nothing to do with the",
+        "project — see `DOC_ROOTS` in [scripts/code_stats.py](scripts/code_stats.py).",
         "",
         _row(["File", "Lines"]),
         _row(["---", "---:"]),

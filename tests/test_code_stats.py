@@ -15,6 +15,7 @@ is a tax rather than a guard.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from code_stats import (  # noqa: E402
+    DOC_ROOTS,
     OUTPUT,
     REPO_ROOT,
     STAMP_PREFIX,
@@ -184,6 +186,53 @@ def test_the_document_excludes_itself_from_the_markdown_count() -> None:
     """Its own length is part of its own content, so counting it is a fixed point rather
     than a count — and `--check` would call a freshly written file stale."""
     assert OUTPUT not in markdown_files()
+
+
+def test_only_the_project_own_markdown_is_counted() -> None:
+    """The document counts documentation, not every `.md` in the checkout.
+
+    It used to walk the whole tree, so agent tooling under `.claude/`, fixture documents
+    under `tests/data/`, and any scratch note in a new directory all moved the totals —
+    and `test_the_document_is_current` then failed over a file that is not documentation.
+    A staleness alarm that fires for reasons the reader cannot connect to the report is
+    one people learn to silence by regenerating without looking.
+    """
+    counted = {path.relative_to(REPO_ROOT).as_posix() for path in markdown_files()}
+    assert counted, "the project has documentation; an empty count means the walk broke"
+
+    for name in counted:
+        at_root = "/" not in name
+        under = any(name.startswith(f"{directory}/") for directory in DOC_ROOTS)
+        assert at_root or under, f"{name} is neither at the root nor under DOC_ROOTS"
+
+    # Present in the tree, and deliberately none of its business.
+    assert "tests/data/edits/markdown/guide.md" not in counted
+
+
+def test_a_stray_markdown_file_does_not_change_the_report(tmp_path: Path) -> None:
+    """The regression this scoping exists for, asserted end to end.
+
+    A planning note dropped in a new directory must leave the numbers untouched. Written
+    into a *copy* of the roots that matter rather than the real checkout, so the test
+    cannot dirty the tree it is measuring.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("docs", "src/python_acp"):
+        source = REPO_ROOT / name
+        destination = root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+    for path in REPO_ROOT.glob("*.md"):
+        shutil.copy(path, root / path.name)
+
+    before = markdown_files(root)
+
+    stray = root / "plans" / "some-plan.md"
+    stray.parent.mkdir()
+    stray.write_text("# A plan\n\nNot documentation of this project.\n", encoding="utf-8")
+
+    assert markdown_files(root) == before, "a file outside DOC_ROOTS must not be counted"
 
 
 def test_generating_twice_produces_the_same_bytes() -> None:

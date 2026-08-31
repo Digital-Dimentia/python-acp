@@ -51,6 +51,7 @@ from python_acp.edits import (
     OpKind,
     Segments,
     Span,
+    pointer_segments,
     UnsupportedConstruct,
     ValueSyntaxError,
 )
@@ -136,7 +137,7 @@ class JsonDialect:
 
     def plan(self, source: str, parsed: Any, op: Op) -> Location:
         root = _scan(source)
-        segments = _pointer_segments(op.address)
+        segments = pointer_segments(op.address)
         if op.kind is OpKind.APPEND:
             return _plan_append(source, root, segments, op, self)
         if op.kind is OpKind.INSERT:
@@ -167,24 +168,6 @@ JSON_DIALECT = JsonDialect()
 # ---------------------------------------------------------------------------
 # Addressing
 # ---------------------------------------------------------------------------
-
-
-def _pointer_segments(address: str) -> tuple[str, ...]:
-    """RFC 6901, including the escaping most hand-rolled pointer code forgets.
-
-    `~1` before `~0` is not stylistic: doing it the other way turns `~01` into `/`
-    instead of `~1`, which is the standard's own worked example of the bug.
-    """
-    if address == "":
-        return ()
-    if not address.startswith("/"):
-        raise EditError(
-            f"{address!r} is not a JSON Pointer; it must be empty or begin with '/' "
-            "(RFC 6901)"
-        )
-    return tuple(
-        part.replace("~1", "/").replace("~0", "~") for part in address[1:].split("/")
-    )
 
 
 def _resolve(root: _Node, segments: tuple[str, ...], address: str) -> tuple[_Node, Segments]:

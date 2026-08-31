@@ -612,6 +612,24 @@ def _apply_one(root: Any, kind: OpKind, segments: Segments, value: Any) -> Any:
     return root
 
 
+def pointer_segments(address: str) -> tuple[str, ...]:
+    """RFC 6901, including the escaping most hand-rolled pointer code forgets.
+
+    `~1` before `~0` is not stylistic: doing it the other way turns `~01` into `/`
+    instead of `~1`, which is the standard's own worked example of the bug.
+    """
+    if address == "":
+        return ()
+    if not address.startswith("/"):
+        raise EditError(
+            f"{address!r} is not a JSON Pointer; it must be empty or begin with '/' "
+            "(RFC 6901)"
+        )
+    return tuple(
+        part.replace("~1", "/").replace("~0", "~") for part in address[1:].split("/")
+    )
+
+
 def _describe(segments: Segments) -> str:
     """Name a prefix the way a reader would say it aloud; the root is "the document"."""
     return "/" + "/".join(str(s) for s in segments) if segments else "the document"

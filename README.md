@@ -40,6 +40,7 @@
   - [markdown.py](src/python_acp/markdown.md)
   - [edits.py](src/python_acp/edits.md)
   - [edit_json.py](src/python_acp/edit_json.md)
+  - [edit_docs.py](src/python_acp/edit_docs.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.

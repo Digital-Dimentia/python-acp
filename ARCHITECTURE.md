@@ -409,6 +409,8 @@ sequenceDiagram
 - [MCP tool annotations module](src/python_acp/mcp_tools.md)
 - [Typed command module](src/python_acp/commands.md)
 - [Markdown-safe agent text module](src/python_acp/markdown.md)
+- [Structured file-edit module](src/python_acp/edits.md)
+- [JSON edit dialect module](src/python_acp/edit_json.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 

@@ -543,7 +543,7 @@ Constructed with the `McpBackendRegistry`, not by reading one off `TurnContext`.
 directly, so the context does not widen for one executor's dependency. Servers were opened
 **and handshaked** during `session/new`, so every client here is live.
 
-## Seven typed commands sit in front of the JSON convention
+## Seven typed commands sit in front of the JSON convention, and six are announced
 
 They are recognised before the JSON parse, in `execute`, and only when the prompt is **a
 single text block**. A multi-block prompt is a composed request from a program; treating
@@ -554,6 +554,7 @@ than declining to recognise it.
 | --- | --- | --- |
 | `/tools` | `_list_tools`, from the turn's `ToolCatalogue` | `end_turn` |
 | `/invokeTool` | `_from_command` → the same `Invocation` JSON builds | the turn's |
+| *(and every MCP tool under its own name — `/alpha/echo`, sugar for the row above)* | | |
 | `/listPrompts` | `_list_prompts` | `end_turn` |
 | `/promptShow` | `_expand_prompt` → `prompts/get`, messages emitted | `end_turn` |
 | `/promptInvoke` | `_expand_prompt`, which validates and then refuses | `refusal` |
@@ -562,6 +563,35 @@ than declining to recognise it.
 
 `end_turn` rather than `refusal` for a listing: the turn did exactly what it was asked to
 do, and `refusal` would be the wrong stop reason for a command that worked.
+
+### Six of the seven are announced, and `/invokeTool` is the one that is not
+
+**Recognised, and deliberately not in the palette** (`pyacp-b50`). `/invokeTool` existed to
+reach a tool the long way round. Since `pyacp-acn` every tool is announced under its own
+name, so `/alpha/echo --text hi` is the ordinary way to call one, and a palette entry for
+the verb teaches a detour past what the client already shows.
+
+It is **not removed**, because it is the escape hatch the sugar cannot cover:
+
+- **a tool whose name contains a slash.** The sugar splits on the first slash and treats
+  the rest as the tool name; `/invokeTool` takes a free-typed target;
+- **the bare `/invokeTool echo --text hi`**, which omits the server. That is legal on a
+  single-server session and the sugar has no equivalent — a bare first token cannot be
+  told apart from prose without swallowing every non-JSON prompt.
+
+Both keep working because **`available_commands` is a discovery aid, not an allowlist**: a
+prompt is free text and nothing on the parse path consults the announcement. Removing the
+*command* would narrow what works; removing its *palette entry* only stops advertising a
+verb most users no longer need.
+
+`/tools` stays in both. A palette entry carries a name and one hint line; `/tools` prints
+every parameter with its type, required flag and description, and every listing footer
+points at it. They answer different questions.
+
+`commands.UNANNOUNCED_COMMANDS` records the omission, and
+`test_the_announced_and_the_unannounced_partition_every_command` asserts that it and
+`_BUILTIN_COMMANDS` together cover `COMMAND_NAMES` — so a command can never fall out of
+both and become undiscoverable by accident.
 
 `/tools` answers from the turn's own `ToolCatalogue`, so it costs no `tools/list` beyond
 the one the announcement already paid. **The other two listings have no catalogue behind

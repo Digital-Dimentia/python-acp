@@ -291,7 +291,9 @@ async def test_a_new_session_is_told_its_commands_after_the_response() -> None:
     # The fixture server's tools, and the built-ins the router always offers.
     names = [command["name"] for command in update["availableCommands"]]
     assert any(name.startswith("tools/") for name in names)
-    assert "invokeTool" in names
+    assert "tools" in names
+    # And not `invokeTool`, which is recognised but deliberately unannounced (`pyacp-b50`).
+    assert "invokeTool" not in names
 
     order = [
         index

@@ -44,7 +44,13 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 
-from python_acp.commands import CommandError, parse_command
+from python_acp.commands import (
+    COMMAND_NAMES,
+    LIST_TOOLS,
+    UNANNOUNCED_COMMANDS,
+    CommandError,
+    parse_command,
+)
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
@@ -2929,6 +2935,61 @@ async def test_every_announced_command_is_one_the_parser_accepts() -> None:
             f"{command.name!r} is announced but parse_command does not recognise it, so a "
             f"client sending it back gets refused as malformed JSON"
         )
+
+
+def test_the_announced_and_the_unannounced_partition_every_command() -> None:
+    """A new command must land in one set or the other, never neither.
+
+    Two things could go wrong and this catches both: a command added to the parser and
+    never announced, which no client would discover; and one dropped from the palette
+    without being recorded as deliberate, which reads as an accident to the next person to
+    diff the announcement.
+    """
+    announced = {command.name for command in _BUILTIN_COMMANDS}
+
+    assert announced.isdisjoint(UNANNOUNCED_COMMANDS)
+    assert announced | UNANNOUNCED_COMMANDS == COMMAND_NAMES
+
+
+async def test_invoke_tool_still_runs_although_it_is_not_announced() -> None:
+    """`available_commands` is a discovery aid, not an allowlist.
+
+    Nothing on the parse path consults it and a prompt is free text, so the verb keeps
+    working for the two things the per-tool sugar cannot express — a tool whose name
+    contains a slash, and the bare form a single-server session allows. Dropping the
+    palette entry narrows what is *advertised*; this is the assertion that it did not
+    narrow what *works*.
+    """
+    async with Harness("alpha") as harness:
+        result = await harness.run(typed("/invokeTool alpha/echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call")[0].title == "alpha/echo"
+    assert "invokeTool" not in [
+        c.name for c in harness.of("available_commands_update")[0].available_commands
+    ]
+
+
+async def test_the_bare_form_the_sugar_cannot_express_still_works() -> None:
+    """`/invokeTool echo --text x` omits the server, which is legal on a single-server
+    session. The sugar has no equivalent: a bare first token cannot be told apart from
+    prose without swallowing every non-JSON prompt. This is the reason the command was
+    kept rather than removed."""
+    async with Harness("alpha") as harness:
+        result = await harness.run(typed("/invokeTool echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call")[0].title == "alpha/echo"
+
+
+async def test_tools_stays_in_the_palette_because_it_answers_a_different_question() -> None:
+    """A palette entry carries a name and one hint line; `/tools` prints every parameter
+    with its type, required flag and description. Every listing footer points at it."""
+    async with Harness("alpha") as harness:
+        await harness.run(typed("/tools"))
+
+    names = [c.name for c in harness.of("available_commands_update")[0].available_commands]
+    assert LIST_TOOLS in names
 
 
 async def test_a_tool_is_called_by_its_own_palette_name() -> None:

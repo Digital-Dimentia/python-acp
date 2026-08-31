@@ -98,6 +98,20 @@ COMMAND_NAMES: frozenset[str] = frozenset(
     }
 )
 
+#: Recognised by the parser, and deliberately **not** offered in the palette
+#: (`pyacp-b50`). `/invokeTool` existed to reach a tool the long way round; since
+#: `pyacp-acn` every tool is announced under its own name and `/alpha/echo --text hi` is
+#: the ordinary way to call one, so advertising the verb teaches a detour. It stays
+#: *reachable*, because it is the escape hatch that sugar cannot cover — see
+#: `invocation_prefix`.
+#:
+#: A prompt is free text, so an unannounced command still works when typed:
+#: `available_commands` is a discovery aid, not an allowlist, and nothing on the parse
+#: path consults it. `turn_mcp_router._BUILTIN_COMMANDS` is the announced set, and
+#: `tests/test_turn_mcp_router.py` asserts these two partition `COMMAND_NAMES` so a new
+#: command cannot fall out of both.
+UNANNOUNCED_COMMANDS: frozenset[str] = frozenset({INVOKE_TOOL})
+
 #: Shown in the `available_commands` announcement, and in each listing's own footer, so the
 #: syntax is discoverable from inside the thing that needs it.
 LIST_TOOLS_HINT = "list every tool on this session's MCP servers, with parameters"

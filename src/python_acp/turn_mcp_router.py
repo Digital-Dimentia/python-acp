@@ -260,7 +260,6 @@ from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.mcp_tools import ToolCatalogue
 from python_acp.commands import (
     INVOKE_TOOL,
-    INVOKE_TOOL_HINT,
     LIST_PROMPTS,
     LIST_PROMPTS_HINT,
     LIST_RESOURCES,
@@ -566,16 +565,24 @@ SESSION_MODES = SessionModeState(
 #: would need a naming rule to keep those apart, and the entry that lost the coin toss
 #: would silently shadow the other. `/listPrompts` and `/listResources` answer the same
 #: question without inventing one.
+#:
+#: **`/invokeTool` is recognised and not announced** (`pyacp-b50`). It existed to reach a
+#: tool the long way round; since `pyacp-acn` every tool is announced under its own name,
+#: so `/alpha/echo --text hi` is the ordinary way to call one and a palette entry for the
+#: verb teaches a detour past the thing a client already shows. It is not *removed* — it
+#: is the escape hatch the sugar cannot cover, for a tool whose name contains a slash and
+#: for the bare `/invokeTool echo --text x` a single-server session allows — and a prompt
+#: is free text, so it still works when typed. `commands.UNANNOUNCED_COMMANDS` names it,
+#: and a test asserts these two sets partition `COMMAND_NAMES`.
+#:
+#: `/tools` stays in both. It prints every parameter with its type, required flag and
+#: description, where a palette entry carries a name and one hint line; they answer
+#: different questions, and every listing footer points at it.
 _BUILTIN_COMMANDS: tuple[AvailableCommand, ...] = (
     AvailableCommand(
         name=LIST_TOOLS,
         description="List this session's MCP tools with their parameters",
         input=AvailableCommandInput(root=UnstructuredCommandInput(hint=LIST_TOOLS_HINT)),
-    ),
-    AvailableCommand(
-        name=INVOKE_TOOL,
-        description="Call one tool with command-line style parameters",
-        input=AvailableCommandInput(root=UnstructuredCommandInput(hint=INVOKE_TOOL_HINT)),
     ),
     AvailableCommand(
         name=LIST_PROMPTS,

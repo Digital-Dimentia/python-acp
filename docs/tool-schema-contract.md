@@ -63,7 +63,7 @@ Both announcements, built by the same `_commands_for`:
 | --- | --- | --- |
 | `available_commands` on the session | Once, before the first turn | Yes |
 | `session/update` → `available_commands_update` | At the start of every turn | Yes |
-| The built-ins (`invokeTool`, `listTools`, …) | Both, always last | **No** |
+| The built-ins (`tools`, `listPrompts`, …) | Both, always last | **No** |
 
 The built-ins have no MCP tool behind them and no `inputSchema` to forward. Only entries
 named `<server>/<tool>` carry the key.

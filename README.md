@@ -328,7 +328,15 @@ MCP servers publish three kinds of thing, and there is a command family for each
 `/tools` lists every tool with its parameters, types, which are required, and an example
 call built from what this session actually has. It runs nothing.
 
-`/invokeTool` calls one. Values are typed from the tool's own `inputSchema` — a `string`
+`/invokeTool` calls one — though you will rarely type it, because **every tool is also
+announced under its own name**: `/demo/echo --text "hello world"` is sugar for the line
+above and produces the identical call. That is why `/invokeTool` is *recognised but not
+offered in the palette*; it stays for the two things the sugar cannot express — a tool
+whose name contains a slash, and the bare `/invokeTool echo --text x` that a
+single-server session allows. A prompt is free text, so an unannounced command still
+works when typed.
+
+Values are typed from the tool's own `inputSchema` — a `string`
 parameter given `3` stays `"3"` — and a parameter the schema does not declare is refused
 with the list of ones it takes, rather than forwarded to fail server-side. A typed call
 builds the same invocation the JSON form builds, so it inherits the session mode, the

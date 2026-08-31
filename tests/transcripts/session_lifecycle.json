@@ -139,13 +139,6 @@
               }
             },
             {
-              "name": "invokeTool",
-              "description": "Call one tool with command-line style parameters",
-              "input": {
-                "hint": "<server>/<tool> --param value [--flag]"
-              }
-            },
-            {
               "name": "listPrompts",
               "description": "List this session's MCP prompts with their arguments",
               "input": {
@@ -212,13 +205,6 @@
               "description": "List this session's MCP tools with their parameters",
               "input": {
                 "hint": "list every tool on this session's MCP servers, with parameters"
-              }
-            },
-            {
-              "name": "invokeTool",
-              "description": "Call one tool with command-line style parameters",
-              "input": {
-                "hint": "<server>/<tool> --param value [--flag]"
               }
             },
             {

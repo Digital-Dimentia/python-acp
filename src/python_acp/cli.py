@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from python_acp.agent import PythonAcpAgent
@@ -180,6 +181,8 @@ async def _run(args: argparse.Namespace) -> None:
             )
             return
 
+        _install_reload(catalogue, getattr(args, "mcp_config", None))
+
         # The key is read from the environment, never from argv — see `ACCESS_KEY_ENV`.
         # A non-loopback bind with neither a key nor the opt-out raises here, before the
         # port is bound.
@@ -204,6 +207,56 @@ async def _run(args: argparse.Namespace) -> None:
         # Sessions the client never closed still own subprocesses and, if a turn was cut
         # short, terminals. `close_all` fires the hook above for each of them.
         await sessions.close_all()
+
+
+def _install_reload(catalogue: McpCatalogue, path: str | None) -> None:
+    """Re-read `--mcp-config` on `SIGHUP`. WebSocket transport only.
+
+    **Why a signal.** Reloading is an *operator* action, and the two alternatives are
+    worse for that: an ACP extension request would need a client to send it, putting a
+    deployment decision in the hands of whoever connected; and watching the file — a poll
+    or an OS watcher — is the most convenient and the most surprising, because a
+    half-written file saved by an editor is a reload nobody asked for. `SIGHUP` is the
+    conventional daemon answer, costs one handler, and is explicit about when it happens.
+
+    **Why not under `--transport stdio`.** There the process is the client's child: the
+    editor spawned it, restarting it is trivial and is what the editor already does, and
+    an operator who could send it a signal is not the person configuring it. Not installing
+    the handler is the decision, and this branch is where it is recorded rather than
+    something that fell out of where the code happened to sit.
+
+    Nothing is installed without `--mcp-config` either: there is no file to re-read, and a
+    handler that logged "reloaded nothing" on every `SIGHUP` would be noise on a signal a
+    process may be sent for other reasons.
+
+    `SIGHUP` does not exist on Windows, hence the `hasattr`. A missing signal is not an
+    error worth failing a bind over.
+    """
+    if path is None or not hasattr(signal, "SIGHUP"):
+        return
+
+    def reload() -> None:
+        """Read the file; swap it in only if it read cleanly.
+
+        The order is the whole guarantee (`pyacp-izr` criterion 3): `load` builds a *new*
+        catalogue and raises without touching the running one, so a file an operator has
+        broken mid-edit leaves every session exactly as it was, and the log line names what
+        was wrong. There is no half-applied state to be in.
+        """
+        try:
+            replacement = load_catalogue(path)
+        except CatalogueError as exc:
+            logger.error("Ignoring MCP catalogue reload: %s", exc)
+            return
+        catalogue.replace(list(replacement))
+        logger.info(
+            "MCP catalogue reloaded: %d server(s) offered — %s",
+            len(catalogue),
+            ", ".join(catalogue.names) or "none",
+        )
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, reload)
+    logger.info("SIGHUP re-reads %s", path)
 
 
 def _load_catalogue(path: str | None) -> McpCatalogue:

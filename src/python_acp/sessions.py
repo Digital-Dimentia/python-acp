@@ -247,6 +247,48 @@ class Session:
         self.touch()
         return option
 
+    def config_option_or_none(self, config_id: str) -> ConfigOption | None:
+        """The option, or `None`. The non-raising form, for a caller asking *whether*.
+
+        `config_option` raises because its callers are serving a client that named an id;
+        a caller reconciling two lists is asking a question with a legitimate negative
+        answer, and `try/except ValueError` around a lookup reads as an error path when it
+        is the ordinary case.
+        """
+        for option in self.config_options:
+            if option.id == config_id:
+                return option
+        return None
+
+    def add_config_option(self, option: ConfigOption) -> ConfigOption:
+        """Append one option to a session that is already open.
+
+        A session's options are otherwise fixed at `session/new`, and this is the one
+        thing that changes that: an MCP catalogue reloaded under a running process can
+        gain an entry, and a session with no toggle for it could never select it. Stored
+        as a **copy**, for the same reason `session/new` deep-copies its declarations —
+        `set_config_option` mutates `current_value` in place, and a declaration shared
+        between two sessions would make one session's toggle move the other's.
+        """
+        copied = option.model_copy(deep=True)
+        self.config_options = (*self.config_options, copied)
+        self.touch()
+        return copied
+
+    def drop_config_option(self, config_id: str) -> bool:
+        """Remove one option. `False` if there was none, which is not an error.
+
+        The mirror of `add_config_option` and reached the same way: an option whose
+        catalogue entry no longer exists is worse than absent, because it would still be
+        displayed and still be settable while meaning nothing.
+        """
+        remaining = tuple(o for o in self.config_options if o.id != config_id)
+        if len(remaining) == len(self.config_options):
+            return False
+        self.config_options = remaining
+        self.touch()
+        return True
+
     def config_option(self, config_id: str) -> ConfigOption:
         for option in self.config_options:
             if option.id == config_id:

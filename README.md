@@ -279,6 +279,17 @@ used by both is `-32602`. Everything else is unchanged: each session still spawn
 subprocesses, and they still die with it. See
 [mcp_catalogue.py](src/python_acp/mcp_catalogue.md).
 
+**The catalogue is re-read on `SIGHUP`.** Send the agent one and it picks up added,
+removed and changed entries without a restart — which on a WebSocket bind would drop every
+connected client and every live session. A file that does not parse changes nothing and
+says why; a session already open is brought into line at its **next request**, so its
+`config_option_update` arrives on its own client's connection rather than being broadcast
+at whoever happens to be attached. An entry added while a session is open arrives switched
+**off** whatever its `enabled` says, because `enabled` describes how a *new* session starts.
+Nothing is installed under `--transport stdio`, where the editor spawned this process and
+restarting it is what the editor already does. See
+[agent.py](src/python_acp/agent.md) for the four cases.
+
 **And the operator can close the door the catalogue only opened an alternative to.**
 Selection being *available* is not the same as supply being *refusable*: by default this
 agent still accepts `mcpServers` from any client, which is right for stdio — there the

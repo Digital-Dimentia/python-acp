@@ -62,7 +62,7 @@ from python_acp.capabilities import (
 from python_acp.elicitation import ConnectedClient, Forwarder
 from python_acp.elicitation import forwarder as elicitation_forwarder
 from python_acp.errors import as_request_error
-from python_acp.mcp_catalogue import CatalogueEntry, McpCatalogue
+from python_acp.mcp_catalogue import CONFIG_ID_PREFIX, CatalogueEntry, McpCatalogue
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.paths import normalize_roots
 from python_acp.sessions import (
@@ -76,6 +76,13 @@ from python_acp.turn_mcp_router import McpToolRouterExecutor
 from python_acp.turns import ClientGates, Gate, TurnContext, TurnExecutor
 
 logger = logging.getLogger(__name__)
+
+#: What a reconcile changed, so the caller knows which announcements to send. Sentinels
+#: rather than an enum or two booleans: there are exactly two answers above "nothing", one
+#: strictly implies the other (servers cannot change without the options that select them),
+#: and naming them keeps the two `session/update` calls from being decided by a bare bool.
+_OPTIONS_CHANGED = "options"
+_SERVERS_CHANGED = "servers"
 
 _AGENT_NAME = "python-acp"
 
@@ -145,6 +152,11 @@ class PythonAcpAgent:
         # because there a `command` and `args` arriving from a client is a request to
         # execute an arbitrary binary. See `_reject_unsupported_mcp_servers`.
         self._accept_client_servers = accept_client_servers
+        # The catalogue generation each session was last brought into line with. A reload
+        # replaces the catalogue in place, so this is what tells a session it has work to
+        # do — see `_reconcile_catalogue`, including why a reload cannot do that work
+        # itself. Keyed by session id and cleaned up when a session closes.
+        self._reconciled: dict[str, int] = {}
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
         # Commands built *before* a minting response is written, for the announcer to
@@ -393,6 +405,9 @@ class PythonAcpAgent:
         # What *is* done here is the expensive half. The observer must not await MCP I/O
         # before it sends, or a client that pipelines `session/prompt` beats it to the
         # wire; see `_prepare_commands`.
+        # Born current: `_config_options` read the catalogue a moment ago, so the first
+        # request on this session has nothing to reconcile.
+        self._reconciled[session.session_id] = self._catalogue.generation
         await self._prepare_commands(session.session_id)
         return NewSessionResponse(
             sessionId=session.session_id,
@@ -503,6 +518,9 @@ class PythonAcpAgent:
         # Same ordering as `new_session`, and the same answer: the fork's id is news to
         # the client, so its commands are announced by `announcer.py` after this reply —
         # and built here, so that announcement is a pure send. See `_prepare_commands`.
+        # Born current: `_config_options` read the catalogue a moment ago, so the first
+        # request on this session has nothing to reconcile.
+        self._reconciled[forked.session_id] = self._catalogue.generation
         await self._prepare_commands(forked.session_id)
         return ForkSessionResponse(
             sessionId=forked.session_id,
@@ -534,6 +552,10 @@ class PythonAcpAgent:
         # invalid and unused.
         normalize_roots(cwd, additional_directories)
         session = self._sessions.resume(session_id)
+        # A client picking a session back up is the other place a reload can reach it, and
+        # the better one: it happens before the client reads the modes and options below,
+        # so what it is handed is already current.
+        await self._reconcile_catalogue(session)
         await self.announce_commands(session_id)
         return ResumeSessionResponse(
             modes=session.modes,
@@ -554,6 +576,9 @@ class PythonAcpAgent:
         # is here for the session whose client hung up in between, so a long-lived stdio
         # process does not accumulate command lists nobody will ever be sent.
         self._prepared_commands.pop(session_id, None)
+        # The generation this session was reconciled to. Dropped here so a long-lived
+        # process does not accumulate an entry per session it has ever served.
+        self._reconciled.pop(session_id, None)
         return CloseSessionResponse()
 
     @as_request_error
@@ -790,6 +815,125 @@ class PythonAcpAgent:
         else:
             await self._backends.remove(session.session_id, entry.name)
 
+    async def _reconcile_catalogue(self, session: Session) -> None:
+        """Bring one open session into line with a catalogue that has been reloaded.
+
+        **This runs on the session's own client's request, never on the operator's
+        signal, and that is the design rather than an accident.** A reload has no client
+        to notify: the WebSocket transport builds one `PythonAcpAgent` per connection and
+        nothing maps a session to the connection that cares about it, so a sweep at reload
+        time would have to send `config_option_update` down *some* connection — and any
+        choice is wrong, because a client that never touched this session should not be
+        told about it. Reconciling at the session's next request puts the notification on
+        the connection it belongs to, by construction. `agent.md` carries the full
+        argument.
+
+        The cost is that a session sees a reload when its client next uses it. A session
+        nobody is using has no observable state to be stale.
+
+        Four cases, each decided rather than fallen into:
+
+        1. **An entry was added.** The session gains a toggle, **off**, whatever the
+           entry's `enabled` says. `enabled` means "a *new* session starts with it on" —
+           it is a statement about session creation — and honouring it here would spawn a
+           subprocess for a session that never asked for one.
+        2. **An entry was removed while the session had it on.** The server is torn down
+           and the toggle dropped. Leaving it would leave an `mcp/*` option whose entry
+           `entry_for_config_id` can no longer find, so switching it back on would quietly
+           become a stored flag instead of an action — a worse failure than the teardown,
+           and a silent one.
+        3. **An entry changed while the session had it on.** The server is respawned from
+           the new recipe. A subprocess that no longer matches the catalogue is exactly
+           the drift that "read once, at startup" existed to prevent, and deferring to the
+           next session means a session left open for a week never gets the fix an
+           operator deployed. The comparison is against `backends.specs`, because a toggle
+           records *that* a server is on and never *what* it is.
+        4. **The file was invalid.** Never reaches here: `cli.py` only calls
+           `McpCatalogue.replace` once `load` has returned, so a bad file leaves the
+           running catalogue untouched and this method has nothing to do.
+
+        A spawn that fails leaves that toggle off and the session otherwise working. It is
+        **not** an error to the client: the client did not ask for this, an operator did,
+        and failing someone's prompt because a recipe they never wrote is broken bills the
+        wrong party. The log line is for the operator, who is the one who can fix it.
+        """
+        if self._reconciled.get(session.session_id) == self._catalogue.generation:
+            return
+        if session.turn_is_running:
+            # Left stale on purpose, so the next request tries again. Changing a session's
+            # backends under a running turn is the broken pipe `_select_mcp_server`
+            # refuses, and a turn already holds its backend map, so half-applying here
+            # would be invisible to it anyway.
+            return
+
+        changed = await self._apply_catalogue(session)
+        self._reconciled[session.session_id] = self._catalogue.generation
+        if not changed:
+            return
+        await self.announce_config_options(session)
+        # Only when a server actually started or stopped: the palette names this session's
+        # tools, and nothing else in a reconcile can change them.
+        if changed is _SERVERS_CHANGED:
+            await self.announce_commands(session.session_id)
+
+    async def _apply_catalogue(self, session: Session) -> object:
+        """The three cases, applied. Returns what changed, for the caller to announce."""
+        result: object = None
+        running = {spec.name: spec for spec in self._backends.specs(session.session_id)}
+
+        for option in list(session.config_options):
+            entry = self._catalogue.entry_for_config_id(option.id)
+            if entry is not None or not str(option.id).startswith(CONFIG_ID_PREFIX):
+                continue
+            # Case 2: the entry is gone.
+            if bool(option.current_value) and option.id[len(CONFIG_ID_PREFIX) :] in running:
+                await self._backends.remove(
+                    session.session_id, option.id[len(CONFIG_ID_PREFIX) :]
+                )
+                result = _SERVERS_CHANGED
+            session.drop_config_option(option.id)
+            result = result or _OPTIONS_CHANGED
+            logger.info(
+                "Catalogue reload: %r left session %s, its entry is no longer configured",
+                option.id,
+                session.session_id,
+            )
+
+        for entry in self._catalogue:
+            existing = session.config_option_or_none(entry.config_id)
+            if existing is None:
+                # Case 1: a new entry, off — see the docstring for why `enabled` does not
+                # reach a session that is already open.
+                added = session.add_config_option(entry.config_option())
+                added.current_value = False
+                result = result or _OPTIONS_CHANGED
+                continue
+            was = running.get(entry.name)
+            if not bool(existing.current_value) or was is None or was == entry.spec():
+                continue
+            # Case 3: on, running, and the recipe moved under it.
+            logger.info(
+                "Catalogue reload: respawning %r for session %s from its new recipe",
+                entry.name,
+                session.session_id,
+            )
+            await self._backends.remove(session.session_id, entry.name)
+            try:
+                await self._backends.add(
+                    session.session_id, entry.spec(), self._elicit_for(session.session_id)
+                )
+            except Exception as exc:  # noqa: BLE001 - the operator's problem, not the client's
+                logger.warning(
+                    "Catalogue reload: %r would not start for session %s (%s); its option "
+                    "is off and the session is otherwise untouched",
+                    entry.name,
+                    session.session_id,
+                    exc,
+                )
+                session.set_config_option(entry.config_id, False)
+            result = _SERVERS_CHANGED
+        return result
+
     async def announce_config_options(self, session: Session) -> None:
         """Emit `config_option_update` for a session's options.
 
@@ -911,6 +1055,11 @@ class PythonAcpAgent:
         among them, is `turns.STOP_REASON_DISPOSITIONS`.
         """
         session = self._sessions.get(session_id)
+        # Before the turn task exists, so the turn runs against the catalogue the operator
+        # currently has deployed rather than the one this session was created with. Also
+        # the only ordering that works: a turn holds its backend map for its whole life,
+        # so a server added underneath it would be invisible to it anyway.
+        await self._reconcile_catalogue(session)
         context = TurnContext(session, self.client, self._client_capabilities)
         turn = asyncio.create_task(
             self._executor.execute(context, prompt), name=f"acp-turn-{session_id}"

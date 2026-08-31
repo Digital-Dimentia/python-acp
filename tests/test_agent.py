@@ -2436,3 +2436,300 @@ def test_the_operators_refusal_comes_before_the_transport_one() -> None:
 
     with pytest.raises(ValueError, match="no HTTP, SSE, or ACP"):
         make_agent()._reject_unsupported_mcp_servers([server])
+
+
+# ---------------------------------------------------------------------------
+# Reloading the catalogue under a running process (`pyacp-izr`)
+# ---------------------------------------------------------------------------
+
+
+def an_entry(name: str, *, enabled: bool = True, marker: str = "1") -> CatalogueEntry:
+    """One fixture server under `name`. `marker` becomes an environment variable, so two
+    entries with the same name can still differ — which is how case 3 is built."""
+    return CatalogueEntry(
+        name=name,
+        command=sys.executable,
+        args=(str(FIXTURE_SERVER),),
+        env=(("MARKER", marker),),
+        description=f"{name} from the catalogue",
+        enabled=enabled,
+    )
+
+
+async def opened(agent: PythonAcpAgent, router, **options: bool):
+    """A session, with its catalogue toggles set to `options`.
+
+    The agent is given a client first: a reconcile announces, and announcing needs a
+    connection — which is itself the point being made, since the whole design is that a
+    reload reaches a session through the client that is holding it.
+    """
+    agent.on_connect(RecordingClient())  # type: ignore[arg-type]
+    created = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    for name, value in options.items():
+        await router(
+            "session/set_config_option",
+            {"sessionId": created.session_id, "type": "boolean",
+             "configId": f"mcp/{name}", "value": value},
+            False,
+        )
+    return created
+
+
+async def test_a_reload_reaches_a_session_at_its_next_request_not_at_the_signal() -> None:
+    """The design decision, asserted as behaviour.
+
+    A reload has no client to notify — the WebSocket transport builds one agent per
+    connection and nothing maps a session to the connection that cares about it — so the
+    catalogue changes silently and the session catches up when *its* client next asks for
+    something. Anything else would send `config_option_update` down a connection that
+    never heard of this session.
+    """
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        catalogue.replace([an_entry("alpha"), an_entry("beta", enabled=False)])
+        # Nothing has happened yet: the signal changed the catalogue, not the session.
+        assert [o.id for o in agent.sessions.get(session.session_id).config_options] == [
+            "announce-tools", "on-tool-failure", "mcp/alpha",
+        ]
+
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert "mcp/beta" in [
+            o.id for o in agent.sessions.get(session.session_id).config_options
+        ]
+    finally:
+        await backends.close_all()
+
+
+async def test_case_1_an_added_entry_arrives_switched_off_whatever_enabled_says() -> None:
+    """`enabled` means "a *new* session starts with it on" — a statement about session
+    creation. Honouring it here would spawn a subprocess for a session that never asked."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        catalogue.replace([an_entry("alpha"), an_entry("beta", enabled=True)])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        option = agent.sessions.get(session.session_id).config_option("mcp/beta")
+        assert option.current_value is False
+        # And nothing was spawned for it.
+        assert "beta" not in backends.backends(session.session_id)
+    finally:
+        await backends.close_all()
+
+
+async def test_case_2_a_removed_entry_is_torn_down_and_its_toggle_dropped() -> None:
+    """Leaving the option would leave one whose entry `entry_for_config_id` can no longer
+    find, so switching it back on would quietly become a stored flag instead of an action —
+    a worse failure than the teardown, and a silent one."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha"), an_entry("beta")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        assert sorted(backends.backends(session.session_id)) == ["alpha", "beta"]
+
+        catalogue.replace([an_entry("alpha")])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert sorted(backends.backends(session.session_id)) == ["alpha"]
+        assert "mcp/beta" not in [
+            o.id for o in agent.sessions.get(session.session_id).config_options
+        ]
+    finally:
+        await backends.close_all()
+
+
+async def test_case_2_leaves_an_entry_that_was_switched_off_alone() -> None:
+    """Nothing to tear down, and the option still goes: it named an entry that is gone."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha"), an_entry("beta", enabled=False)])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        catalogue.replace([an_entry("alpha")])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert sorted(backends.backends(session.session_id)) == ["alpha"]
+        assert "mcp/beta" not in [
+            o.id for o in agent.sessions.get(session.session_id).config_options
+        ]
+    finally:
+        await backends.close_all()
+
+
+async def test_case_3_a_changed_entry_is_respawned_from_its_new_recipe() -> None:
+    """A subprocess that no longer matches the catalogue is exactly the drift that
+    "read once, at startup" existed to prevent, and deferring to the next session means a
+    session left open for a week never gets the fix an operator deployed."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha", marker="1")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        before = backends.get(session.session_id, "alpha")
+
+        catalogue.replace([an_entry("alpha", marker="2")])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        after = backends.get(session.session_id, "alpha")
+        assert after is not before, "the running server still holds the old recipe"
+        assert backends.specs(session.session_id)[0].env[0].value == "2"
+    finally:
+        await backends.close_all()
+
+
+async def test_case_3_leaves_a_changed_entry_that_is_switched_off_alone() -> None:
+    """There is nothing running to respawn, and the new recipe is what a later toggle
+    will use — which is the ordinary path, not a special case."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha", enabled=False, marker="1")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        catalogue.replace([an_entry("alpha", enabled=False, marker="2")])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert backends.backends(session.session_id) == {}
+    finally:
+        await backends.close_all()
+
+
+async def test_an_unchanged_entry_is_not_respawned() -> None:
+    """The regression that would make a reload expensive and visible: a catalogue reloaded
+    with the same contents must leave every running subprocess exactly where it is."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        before = backends.get(session.session_id, "alpha")
+
+        catalogue.replace([an_entry("alpha")])
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert backends.get(session.session_id, "alpha") is before
+    finally:
+        await backends.close_all()
+
+
+async def test_a_respawn_that_will_not_start_costs_the_option_and_not_the_session() -> None:
+    """The client did not ask for this, an operator did. Failing someone's prompt because
+    a recipe they never wrote is broken bills the wrong party."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    try:
+        broken = CatalogueEntry(
+            name="alpha",
+            command=sys.executable,
+            args=("-c", "raise SystemExit(1)"),
+            description="broken",
+            enabled=True,
+        )
+        catalogue.replace([broken])
+
+        # The request succeeds. That is the assertion.
+        await router("session/resume", {"sessionId": session.session_id, "cwd": "/work"}, False)
+
+        assert "alpha" not in backends.backends(session.session_id)
+        assert (
+            agent.sessions.get(session.session_id).config_option("mcp/alpha").current_value
+            is False
+        )
+    finally:
+        await backends.close_all()
+
+
+async def test_a_reload_is_not_applied_while_a_turn_is_running() -> None:
+    """Changing a session's backends under a turn is the broken pipe `_select_mcp_server`
+    refuses. Left stale on purpose, so the next request tries again."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    session = await opened(agent, router)
+    live = agent.sessions.get(session.session_id)
+    try:
+        catalogue.replace([an_entry("alpha"), an_entry("beta", enabled=False)])
+        forever: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(60))
+        live.attach_turn(forever)
+        try:
+            await agent._reconcile_catalogue(live)
+            assert "mcp/beta" not in [o.id for o in live.config_options]
+        finally:
+            forever.cancel()
+            live.detach_turn()
+
+        # And the next request, with no turn in the way, catches up.
+        await agent._reconcile_catalogue(live)
+        assert "mcp/beta" in [o.id for o in live.config_options]
+    finally:
+        await backends.close_all()
+
+
+async def test_a_new_session_is_born_current_and_reconciles_nothing() -> None:
+    """`_config_options` read the catalogue a moment ago, so the first request on a fresh
+    session has no work to do — the common path is an integer comparison."""
+    backends = McpBackendRegistry()
+    catalogue = McpCatalogue([an_entry("alpha")])
+    agent = make_agent(backends=backends, catalogue=catalogue)
+    router = make_router(agent=agent)
+    catalogue.replace([an_entry("alpha"), an_entry("beta", enabled=False)])
+    session = await opened(agent, router)
+    try:
+        assert agent._reconciled[session.session_id] == catalogue.generation
+        assert "mcp/beta" in [
+            o.id for o in agent.sessions.get(session.session_id).config_options
+        ]
+    finally:
+        await backends.close_all()
+
+
+def test_case_4_a_catalogue_that_does_not_parse_never_replaces_the_running_one(
+    tmp_path: Path,
+) -> None:
+    """`load` builds a *new* catalogue and raises without touching the running one, so a
+    file an operator has broken mid-edit leaves every session exactly as it was. There is
+    no half-applied state to be in."""
+    from python_acp.mcp_catalogue import CatalogueError
+    from python_acp.mcp_catalogue import load as load_catalogue
+
+    catalogue = McpCatalogue([an_entry("alpha")])
+    generation = catalogue.generation
+    broken = tmp_path / "servers.toml"
+    broken.write_text("[servers.alpha]\ncommmand = 'typo'\n")
+
+    with pytest.raises(CatalogueError):
+        catalogue.replace(list(load_catalogue(broken)))
+
+    assert catalogue.names == ("alpha",)
+    assert catalogue.generation == generation
+
+
+def test_replacing_the_catalogue_mutates_the_object_every_agent_holds() -> None:
+    """The WebSocket transport hands the same catalogue to one agent per connection, so a
+    rebound name would reload the connection that did it and leave every other one reading
+    the old list."""
+    catalogue = McpCatalogue([an_entry("alpha")])
+    first = make_agent(catalogue=catalogue)
+    second = make_agent(catalogue=catalogue)
+
+    catalogue.replace([an_entry("beta")])
+
+    assert first._catalogue.names == ("beta",)
+    assert second._catalogue.names == ("beta",)

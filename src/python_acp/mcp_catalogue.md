@@ -92,8 +92,43 @@ with no environment still carries an empty list.
 **Order is the file's order**, not sorted. It is what a settings panel renders, and that is
 the operator's call.
 
-The file is read **once, at startup**. A catalogue that changed under a running process
-would leave open sessions advertising toggles for servers that no longer exist.
+## The file is re-read on `SIGHUP`
+
+It used to be read **once, at startup**, and the reason given here was that a catalogue
+changing under a running process would leave open sessions advertising toggles for servers
+that no longer exist. That was the right *first* behaviour and the wrong permanent one: it
+made adding a server cost a restart, which on the WebSocket transport drops every connected
+client and every live session — for a deployment whose whole point is being long-lived and
+shared. `pyacp-izr` answered the objection rather than the convenience: the toggles do get
+brought back into line, at a moment where there is a client to tell.
+
+**`SIGHUP`, on the WebSocket transport, only with `--mcp-config`.** Reloading is an
+*operator* action. An ACP extension request would need a client to send it, putting a
+deployment decision in the hands of whoever connected; watching the file is the most
+convenient and the most surprising, because an editor saving a half-written file is a
+reload nobody asked for. Under `--transport stdio` no handler is installed at all — there
+the process is the client's child, restarting it is trivial and is what the editor already
+does. [cli.md](cli.md) holds that decision.
+
+**A bad file changes nothing.** `load` builds a *new* catalogue and raises without touching
+the running one, so `replace` is never reached and every session stays exactly as it was.
+The log line names the file, the entry and the key, as it does at startup. There is no
+half-applied state to be in, because there is no state to half-apply until a complete
+catalogue exists.
+
+**`replace` mutates in place, and that is load-bearing.** The WebSocket transport builds
+one `PythonAcpAgent` per connection and hands each the same catalogue object; rebinding a
+name would reload the connection that happened to do it and leave every other one reading
+the old list.
+
+### What a reload means for a session already open
+
+Not decided here. This module holds a list of recipes and knows nothing about sessions —
+`agent._reconcile_catalogue` owns the four cases (an entry added, removed, changed, or the
+file being invalid) and, more importantly, owns *when*: at the session's next request, not
+at the signal. There is no client to notify at signal time, and a sweep would have to send
+`config_option_update` down a connection that never heard of the session. See
+[agent.md](agent.md).
 
 ## Why the validation is loud
 

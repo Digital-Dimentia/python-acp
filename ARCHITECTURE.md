@@ -27,6 +27,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP tool annotations (`mcp_tools.py`): reads a server's `readOnlyHint`/`destructiveHint` hints as an ACP `ToolCall.kind`, so a permission prompt says *what* it is asking about. A hint relabels the question; it never withdraws it.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
+- Structured edits (`edits.py`, `edit_json.py`, `edit_docs.py`): path-addressed edits that splice rather than re-emit, and a verifier that proves nothing outside the addressed spans moved. A plain library — it knows no ACP and no MCP — reached only from the router's `edit` directive.
 
 ```mermaid
 flowchart LR
@@ -49,6 +50,9 @@ flowchart LR
     Tools["mcp_tools.py<br/>annotations &rarr; ToolCall.kind"]
     Elicit["elicitation.py<br/>MCP question &rarr; ACP question"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
+    Edits["edits.py<br/>verifier + Op model"]
+    EditJson["edit_json.py<br/>JSON dialect"]
+    EditDocs["edit_docs.py<br/>Markdown dialect"]
     MCPProc[("MCP server subprocess<br/>one per session server")]
 
     Editor <--> TStdio
@@ -72,6 +76,12 @@ flowchart LR
     Router --> Content
     Router --> Paths
     Router --> Terminals
+    Router --> Edits
+    Router --> EditJson
+    Router --> EditDocs
+    Content --> Edits
+    Edits -. "Dialect: parse/plan/render" .-> EditJson
+    Edits -. "Dialect: parse/plan/render" .-> EditDocs
     Router --> Backends
     Agent --> Backends
     Agent --> Terminals
@@ -288,6 +298,72 @@ sequenceDiagram
   files, so a denied call touches none.
 - **A client that errors on `fs/*` fails that call, not the turn** — the same rule as a
   tool reporting `isError`, one layer out.
+
+### Structured edits, and the neutrality this deliberately trades away
+
+**This is the one place the agent authors bytes of its own, and it is a change of
+posture that needed deciding rather than refactoring.** Everywhere else this executor is
+a neutral carrier: it substitutes a client-named file into a tool argument and writes the
+*tool's own* output back, so if the bytes that land in a user's file are wrong, that is
+the tool's fault and the transcript proves it. `tests/test_executor_neutrality.py` and
+[paths.md](src/python_acp/paths.md)'s "this process opens nothing" are the standing
+statements of that thesis.
+
+An `edit` directive breaks it. The agent reads the file, computes a splice, and writes a
+result no tool ever produced. The bytes are ours.
+
+**The decision: allow it, and pay for it with a proof.** The alternative on offer was not
+"no transformation" — it was "the same transformation, done by an LLM emitting a whole
+file into `write`", which is the same posture with none of the evidence. What makes the
+edit path acceptable is that [edits.py](src/python_acp/edits.md) refuses to produce a
+result it cannot verify: seven steps, any failure rejecting the whole edit, ending in
+*every byte outside the addressed spans is unchanged*. Neutrality was never the terminal
+value; **not silently damaging a file the client trusted us with** was, and a verified
+splice serves that better than an unverified whole-file write does.
+
+Three consequences are load-bearing:
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant X as turn_mcp_router.py
+    participant E as edits.py
+    participant M as MCP server
+
+    C->>X: session/prompt (edit: {path, format, ops})
+    Note over X: both fs gates checked at parse time — an edit reads and writes
+    X->>M: tools/call
+    M-->>X: result (text output)
+    X->>C: fs/read_text_file {path}
+    C-->>X: the whole file, no line/limit window
+    X->>E: apply(source, ops, dialect)
+    alt verified
+        E-->>X: EditResult {original, updated, applied, confidence}
+        X->>C: fs/write_text_file {path, updated}
+        X-)C: tool_call_update (completed) + diff content
+    else refused at any of the seven steps
+        E-->>X: EditError
+        X-)C: tool_call_update (failed) + the reason
+        Note over X: the turn is fine; one operation in it was refused
+    end
+```
+
+- **The whole file is read, never a window.** The verifier's last step is an assertion
+  about every untouched byte, and a `line`/`limit` window would make that assertion about
+  a fragment while the write replaces a file — the one way this could quietly truncate.
+- **An edit refusal is a failed tool call, not a JSON-RPC error.** Same rule as a client
+  erroring on `fs/*`: the remaining invocations still run and the turn ends `end_turn`.
+- **`_write_file`'s empty-content guard is not inherited, and no shrink heuristic replaces
+  it.** That guard exists because a tool's output is unverified, so writing an empty
+  result over a whole file is a truncation dressed as a write. An edit result carries a
+  proof that nothing outside the address moved, so an op that empties one value is an
+  ordinary edit. A heuristic layered on top of a proof adds no information and would
+  eventually block a correct delete — the next reader will want to add one anyway, which
+  is why it is written down here.
+
+The seam test still passes unchanged: `sessions.py`, `capabilities.py`, and `turns.py`
+import nothing from `edits.py` or from any backend. The posture that moved is this one
+executor's, not the runtime's.
 
 ### Running a command in the client's terminal
 

@@ -11,6 +11,8 @@
   `session/update` — no LLM anywhere in the runtime.
 - Asks the client's permission before every tool call, reads and writes files through the
   client, and runs commands in the client's terminals.
+- Applies structured, path-addressed edits to JSON and Markdown files and **proves** they
+  changed nothing outside the address they named.
 - Works with a repo-local virtual environment.
 - Includes a `Containerfile` for containerized runs.
 - Ships with a Makefile for local build, test, lint, packaging, and release-bundle generation.
@@ -384,6 +386,7 @@ Each text content block is a JSON object naming an MCP tool:
 | `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
 | `read` | no | `{"<argument>": {"path": "/abs", "line": 1, "limit": 40}}` — files to read into arguments |
 | `write` | no | `{"path": "/abs/out.txt"}` — where the tool's text output goes |
+| `edit` | no | `{"path": "/abs/f.json", "format": "json", "ops": [...]}` — a verified structured change to one file. Mutually exclusive with `write` |
 | `run` | no | `{"<argument>": {"command": "git", "args": ["log"]}}` — commands to run into arguments |
 
 Each text block is one call, run in order, and returns `stopReason: "end_turn"`. The turn
@@ -460,6 +463,46 @@ calls them so you stay in control of what is read and written.
 
 `ToolCall.locations` carries the resolved paths, so a client can show or follow which
 files a call is about.
+
+### Editing a file, with a proof
+
+`edit` is `write`'s sharper sibling. `write` replaces a whole file with the tool's output;
+`edit` splices at an **address** and then proves it changed nothing else.
+
+```json
+{"tool": "render-changelog",
+ "arguments": {"since": "v1.2"},
+ "edit": {"path": "/abs/CHANGELOG.md",
+          "format": "markdown",
+          "ops": [{"kind": "set",
+                   "address": "/# Changes/## Unreleased",
+                   "fromOutput": true}]}}
+```
+
+- **`format` is named, never guessed from the extension** — `json` or `markdown` today. A
+  `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON, so this agent
+  does not sniff.
+- **`address` is an RFC 6901 pointer.** For Markdown it is a heading path with the `#`
+  markers kept (`/# Install/## macOS`), because without them `## Errors` and `### Errors`
+  would be the same address. The empty pointer is the document root.
+- **Each op names one value source**: `"value"` (raw source text in that format),
+  `"scalar"` (a JSON scalar, quoted for you), or `"fromOutput": true` (the tool's own text
+  output). A `"delete"` op names none.
+- **Needs both `fs.readTextFile` and `fs.writeTextFile`** — an edit reads the file it is
+  verified against and writes the result back — and the whole file is read, never a window.
+- **Nothing is written unless it verifies.** The edit is located, spliced, re-parsed,
+  compared against the same ops applied to the parsed document, and finally checked byte
+  for byte outside the addressed spans. Any failure rejects the *whole* edit; there is no
+  partial application.
+- **A refused edit is a failed tool call, not an error and not a failed turn.** The reason
+  — an address that does not resolve, an ambiguous one, a file that will not parse — comes
+  back as text on that call, and the remaining calls still run.
+- On success the call carries a **diff** content block (whole-file before and after) plus a
+  fenced unified diff for a human to read.
+
+Unlike `write`, an empty result is not refused: `write` skips an empty tool output because
+writing it would truncate a whole file on an unverified say-so, whereas an edit that empties
+one addressed value has already proved that nothing else moved.
 
 ### Running commands
 

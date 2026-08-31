@@ -27,6 +27,8 @@ module a client codes against:
   guessing which of two servers a client meant is the kind of help nobody wants.
 * `read` and `write` — optional, and both go through the *client's* filesystem methods.
   See "Files move through the client" below.
+* `edit` — optional, a structured path-addressed change to one file, verified before it
+  is written. See "An edit is the one place this agent authors bytes" below.
 * `run` — optional, and goes through the *client's* terminals. See "Commands run on the
   client's machine" below.
 
@@ -92,6 +94,60 @@ the code doing the opening — Phase 4.2". This *is* Phase 4.2, and it does not 
 anything: the client does. The lever does not exist on this side of the wire. Sending the
 resolved path narrows the window — the client is not asked to re-walk the links we already
 walked — and that is the whole of what this module can do about it.
+
+## An edit is the one place this agent authors bytes
+
+Every other directive is neutral carriage: `read` puts a client-named file into a tool
+argument, `write` puts the *tool's own* output into a file. If those bytes are wrong it is
+the tool's fault and the transcript proves it. `edit` is different — the agent reads the
+file, computes a splice, and writes back a result no tool produced. **The bytes are ours.**
+
+That trade is decided in `ARCHITECTURE.md` ("Structured edits, and the neutrality this
+deliberately trades away") and paid for with a proof: [edits.py](edits.md) refuses to
+return a result it cannot verify, ending in *every byte outside the addressed spans is
+unchanged*.
+
+```json
+{"tool": "render-changelog",
+ "arguments": {"since": "v1.2"},
+ "edit": {"path": "/abs/CHANGELOG.md",
+          "format": "markdown",
+          "ops": [{"kind": "set", "address": "/# Changes/## Unreleased",
+                   "fromOutput": true}]}}
+```
+
+* `path` — absolute and inside the session's roots, like every other path here.
+* `format` — `json` or `markdown`, **named and never sniffed from the extension**. A
+  `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON; `edits.apply`
+  refuses to guess and so does this.
+* `ops` — a non-empty list of `{"kind": "set"|"insert"|"delete"|"append", "address": ...}`.
+  The address is an RFC 6901 pointer, which for Markdown is a heading path
+  (`/# Install/## macOS`, `#` markers included) and for JSON an ordinary pointer.
+
+Every op but `delete` names **exactly one** value source, and `delete` names none:
+
+* `"value"` — raw source text in the target format. Not a JSON value: an object would need
+  a serialiser per format, which is the emitter this design exists without.
+* `"scalar"` — a JSON scalar, rendered by the format's scalar-only renderer, for the
+  common case where quoting a string correctly is the only hard part.
+* `"fromOutput": true` — the tool's own text output. **This is what makes `edit` the
+  precise sibling of `write`**: the same bytes, spliced at an address instead of over the
+  whole file.
+
+`write` and `edit` in one block is refused. That is two destinations for one tool's
+output, which is the same guess `server` already declines to make.
+
+Three rules that are not obvious and are load-bearing:
+
+* **The whole file is read** — no `line`/`limit` window. The verifier asserts something
+  about every untouched byte, and a window would make that assertion about a fragment
+  while the write replaces a file.
+* **An edit refusal is a failed tool call**, not a JSON-RPC error, and not a failed turn.
+  The turn is fine; one operation in it was refused.
+* **`_write_file`'s empty-content guard is not inherited, and no shrink heuristic replaces
+  it.** That guard exists because tool output is unverified. An edit result carries a
+  proof, so emptying one addressed value is an ordinary edit — and a heuristic on top of a
+  proof adds no information while eventually blocking a correct delete.
 
 ## Commands run on the client's machine, and are always given back
 
@@ -193,7 +249,11 @@ from acp.schema import (
     RequestPermissionResponse,
 )
 
-from python_acp.mcp_content import to_content_block, to_tool_call_content
+from python_acp.edit_docs import DOCS_DIALECT
+from python_acp.edit_json import JSON_DIALECT
+from python_acp.edits import UNSET, Dialect, EditError, Op, OpKind
+from python_acp.edits import apply as apply_edits
+from python_acp.mcp_content import to_content_block, to_edit_content, to_tool_call_content
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPStdioClient
 from python_acp.mcp_tools import ToolCatalogue
@@ -347,6 +407,55 @@ class FileWrite:
     path: str
 
 
+#: The formats an `edit` directive may name, and the only ones. Named rather than
+#: sniffed from the path's extension: a `.yml` full of Go template directives is not
+#: YAML and a `.tf.json` is JSON, so `edits.apply` refuses to guess and so does this.
+#: See `edits.py`'s `apply` docstring — the caller knows; it has to say.
+DIALECTS: dict[str, Dialect] = {
+    JSON_DIALECT.name: JSON_DIALECT,
+    DOCS_DIALECT.name: DOCS_DIALECT,
+}
+
+#: An op's value comes from exactly one of these. Kept as a tuple so the refusal can
+#: name all three in the order the doc introduces them.
+VALUE_SOURCES = ("value", "scalar", "fromOutput")
+
+
+@dataclass(frozen=True)
+class EditOp:
+    """One op from the prompt, before the tool has run.
+
+    Not an `edits.Op` yet, because an op that takes its value from the tool's output has
+    no value until the tool answers and `Op.__post_init__` requires one. So the prompt's
+    three value spellings survive to `resolve`, which builds the real op.
+    """
+
+    kind: OpKind
+    address: str
+    value: str | None = None
+    scalar: Any = UNSET
+    from_output: bool = False
+
+    def resolve(self, output: str) -> Op:
+        """The `edits.Op` this becomes once the tool's text output is known."""
+        if self.from_output:
+            return Op(kind=self.kind, address=self.address, value=output)
+        return Op(kind=self.kind, address=self.address, value=self.value, scalar=self.scalar)
+
+
+@dataclass(frozen=True)
+class FileEdit:
+    """A structured edit to make to one file after the tool runs. Resolved path, as above.
+
+    `dialect` is the object, not its name: the name was validated at parse time and
+    re-looking it up at the call would be a second chance to get it wrong.
+    """
+
+    path: str
+    dialect: Dialect
+    ops: tuple[EditOp, ...]
+
+
 @dataclass(frozen=True)
 class CommandRun:
     """One command to run in a client terminal, into one tool argument.
@@ -382,6 +491,7 @@ class Invocation:
     server: str | None = None
     reads: tuple[FileRead, ...] = ()
     write: FileWrite | None = None
+    edit: FileEdit | None = None
     runs: tuple[CommandRun, ...] = ()
 
     @property
@@ -406,6 +516,8 @@ class Invocation:
         found = [ToolCallLocation(path=read.path, line=read.line) for read in self.reads]
         if self.write is not None:
             found.append(ToolCallLocation(path=self.write.path))
+        if self.edit is not None:
+            found.append(ToolCallLocation(path=self.edit.path))
         return found or None
 
 
@@ -1029,12 +1141,20 @@ class McpToolRouterExecutor:
                 f"Prompt block {index}: 'arguments' must be an object."
             )
         reads = self._reads(context, index, payload, arguments)
+        write = self._write(context, index, payload)
+        edit = self._edit(context, index, payload)
+        if write is not None and edit is not None:
+            raise PromptConventionError(
+                f"Prompt block {index} names both 'write' and 'edit', which gives this "
+                "call two destinations for one tool's output; name one of them."
+            )
         return Invocation(
             tool=tool,
             arguments=arguments,
             server=self._server(index, payload, backends),
             reads=reads,
-            write=self._write(context, index, payload),
+            write=write,
+            edit=edit,
             runs=self._runs(context, index, payload, arguments, reads),
         )
 
@@ -1185,6 +1305,61 @@ class McpToolRouterExecutor:
         return FileWrite(path=_contained(context, index, declared.get("path"), "write"))
 
     @staticmethod
+    def _edit(context: TurnContext, index: int, payload: dict[str, Any]) -> FileEdit | None:
+        """Parse `edit`. Gated on **both** filesystem capabilities, and here is why.
+
+        An edit reads the file, splices, and writes it back, so a client that granted only
+        one half cannot be served: with no read there is nothing to verify against, and
+        with no write the verified result has nowhere to go. Asking for both up front is
+        also what keeps the parse-time refusal honest — discovering after the tool ran
+        that the result cannot be written is the failure "validate everything, then run
+        anything" exists to prevent.
+
+        Same `allows` treatment as `_reads` and `_write`, and the same reason: a client
+        without a filesystem is not a bug.
+        """
+        declared = payload.get("edit")
+        if declared is None:
+            return None
+        if not isinstance(declared, dict):
+            raise PromptConventionError(
+                f"Prompt block {index}: 'edit' must be an object with a 'path', a "
+                "'format', and an 'ops' list."
+            )
+        missing = [
+            gate.value
+            for gate in (Gate.READ_TEXT_FILE, Gate.WRITE_TEXT_FILE)
+            if not context.allows(gate)
+        ]
+        if missing:
+            raise UnsupportedByClientError(
+                f"Prompt block {index} asks to edit a file, which needs both "
+                "clientCapabilities.fs.readTextFile and "
+                "clientCapabilities.fs.writeTextFile — an edit reads the file it is "
+                f"verified against and writes the result back. This client did not "
+                f"advertise {' or '.join(missing)}."
+            )
+        fmt = declared.get("format")
+        if fmt not in DIALECTS:
+            raise PromptConventionError(
+                f"Prompt block {index}: 'edit.format' must be one of "
+                f"{sorted(DIALECTS)}; the format is named rather than guessed from the "
+                "path, because an extension is not a promise about a file's contents."
+            )
+        declared_ops = declared.get("ops")
+        if not isinstance(declared_ops, list) or not declared_ops:
+            raise PromptConventionError(
+                f"Prompt block {index}: 'edit.ops' must be a non-empty list of ops."
+            )
+        return FileEdit(
+            path=_contained(context, index, declared.get("path"), "edit"),
+            dialect=DIALECTS[fmt],
+            ops=tuple(
+                _edit_op(index, position, spec) for position, spec in enumerate(declared_ops)
+            ),
+        )
+
+    @staticmethod
     def _server(index: int, payload: dict[str, Any], backends: Any) -> str | None:
         """Which backend runs this call, refusing to guess when guessing could be wrong.
 
@@ -1330,6 +1505,11 @@ class McpToolRouterExecutor:
             note, wrote = await self._write_file(context, invocation.write, result, failed)
             failed = failed or not wrote
             content.append(tool_content(text_block(note)))
+        if invocation.edit is not None:
+            note, blocks, edited = await self._edit_file(context, invocation.edit, result, failed)
+            failed = failed or not edited
+            content.extend(blocks)
+            content.append(tool_content(text_block(note)))
         await context.emit(
             tracker.progress(
                 key,
@@ -1394,12 +1574,7 @@ class McpToolRouterExecutor:
         context.require(Gate.WRITE_TEXT_FILE)
         if failed:
             return f"{write.path} was not written: the tool failed.", False
-        text = "\n".join(
-            block["text"]
-            for block in result.get("content") or ()
-            if isinstance(block, dict) and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        )
+        text = _text_output(result)
         if not text:
             return (
                 f"{write.path} was not written: the tool returned no text content, and "
@@ -1414,6 +1589,90 @@ class McpToolRouterExecutor:
             logger.info("fs/write_text_file for %s failed: %s", write.path, exc)
             return f"Writing {write.path} through the client failed ({_why(exc)}).", False
         return f"Wrote {len(text)} characters to {write.path}.", True
+
+    @staticmethod
+    async def _edit_file(
+        context: TurnContext, edit: FileEdit, result: dict[str, Any], failed: bool
+    ) -> tuple[str, list[Any], bool]:
+        """Apply this call's structured edit. Returns a note, its content, and whether it went.
+
+        The whole file is read — no `line`/`limit` window. The verifier's last step is
+        "every byte outside the spliced spans is unchanged", and a window makes that
+        assertion about a fragment while the write replaces a file, which is the one way
+        this could quietly truncate.
+
+        **The empty-content guard `_write_file` carries is deliberately not inherited.**
+        There, an empty result is written over a whole file and the only evidence it is
+        the right thing to write is that a tool said so. Here the result is a splice at an
+        address, and `edits.apply` has already proved that nothing outside that address
+        moved — so an op that sets a value to the empty string is an ordinary edit and
+        refusing it would refuse a legitimate one. For the same reason there is no shrink
+        heuristic and there must not be: a heuristic layered on top of a proof adds no
+        information and will eventually block a correct delete.
+
+        Every failure here is a **failed tool call with a note**, never a raised error —
+        the same rule as a client that cannot write. The turn is fine; one operation in it
+        was refused.
+        """
+        context.require(Gate.READ_TEXT_FILE)
+        context.require(Gate.WRITE_TEXT_FILE)
+        if failed:
+            return f"{edit.path} was not edited: the tool failed.", [], False
+        try:
+            response = await context.client.read_text_file(
+                session_id=context.session_id, path=edit.path
+            )
+        except Exception as exc:  # noqa: BLE001 - see the module docstring
+            logger.info("fs/read_text_file for %s failed: %s", edit.path, exc)
+            return (
+                f"{edit.path} was not edited: reading it through the client failed "
+                f"({_why(exc)}), and an edit is verified against the file it changes.",
+                [],
+                False,
+            )
+        original = getattr(response, "content", None)
+        if not isinstance(original, str):
+            return (
+                f"{edit.path} was not edited: the client answered fs/read_text_file "
+                "without text content.",
+                [],
+                False,
+            )
+        output = _text_output(result)
+        try:
+            edited = apply_edits(
+                original,
+                [op.resolve(output) for op in edit.ops],
+                dialect=edit.dialect,
+                path=edit.path,
+            )
+        except EditError as exc:
+            logger.info("Edit of %s refused: %s", edit.path, exc)
+            return f"{edit.path} was not edited: {exc}", [], False
+        if not edited.changed:
+            return (
+                f"{edit.path} already holds these values, so nothing was written.",
+                [],
+                True,
+            )
+        try:
+            await context.client.write_text_file(
+                session_id=context.session_id, path=edit.path, content=edited.updated
+            )
+        except Exception as exc:  # noqa: BLE001 - see the module docstring
+            logger.info("fs/write_text_file for %s failed: %s", edit.path, exc)
+            return (
+                f"Writing the edited {edit.path} through the client failed ({_why(exc)}).",
+                [],
+                False,
+            )
+        return (
+            f"Edited {edit.path}: {len(edited.applied)} "
+            f"{'op' if len(edited.applied) == 1 else 'ops'} applied and verified "
+            f"({edited.confidence.value}).",
+            list(to_edit_content(edited)),
+            True,
+        )
 
     # ------------------------------------------------------------------
     # The client's terminals
@@ -1871,6 +2130,14 @@ def _files_note(invocation: Invocation) -> str:
         note += f" Would run {', '.join(commands)}."
     if invocation.write is not None:
         note += f" Would write its output to {invocation.write.path}."
+    if invocation.edit is not None:
+        addresses = ", ".join(
+            f"{op.kind.value} {op.address or '(root)'}" for op in invocation.edit.ops
+        )
+        note += (
+            f" Would edit {invocation.edit.path} as {invocation.edit.dialect.name}: "
+            f"{addresses}."
+        )
     return note
 
 
@@ -1894,6 +2161,83 @@ def _contained(
         return str(require_contained(path, context.session.roots, f"{label}.{field}"))
     except PathConstraintError as exc:
         raise PromptConventionError(f"Prompt block {index}: {exc}") from None
+
+
+def _text_output(result: dict[str, Any]) -> str:
+    """A `tools/call` result's text blocks, joined. The tool's output as a document.
+
+    Non-text content is skipped rather than described: this feeds a file, and a sentence
+    about an image is not what the caller asked to be written. `rawOutput` carries the
+    whole result for anyone who wants it.
+    """
+    return "\n".join(
+        block["text"]
+        for block in result.get("content") or ()
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _edit_op(index: int, position: int, spec: Any) -> EditOp:
+    """One declared op, validated before the turn runs anything.
+
+    The value rules are `edits.Op`'s own, restated here rather than deferred to it,
+    because `Op` cannot be constructed yet for an op that takes the tool's output — and a
+    prompt whose ops are wrong must be refused before the tool runs, not after.
+    """
+    label = f"edit.ops[{position}]"
+    if not isinstance(spec, dict):
+        raise PromptConventionError(
+            f"Prompt block {index}: {label!r} must be an object with a 'kind' and an "
+            "'address'."
+        )
+    raw_kind = spec.get("kind")
+    kinds = [kind.value for kind in OpKind]
+    if raw_kind not in kinds:
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}.kind' must be one of {kinds}."
+        )
+    kind = OpKind(raw_kind)
+    address = spec.get("address")
+    if not isinstance(address, str):
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}.address' must be a string. The empty string "
+            "is the document root, so it is valid and is not the same as leaving it out."
+        )
+    named = [source for source in VALUE_SOURCES if source in spec]
+    if kind is OpKind.DELETE:
+        if named:
+            raise PromptConventionError(
+                f"Prompt block {index}: '{label}' is a delete and takes no "
+                f"{' or '.join(named)}."
+            )
+        return EditOp(kind=kind, address=address)
+    if len(named) != 1:
+        raise PromptConventionError(
+            f"Prompt block {index}: '{label}' needs exactly one of "
+            f"{', '.join(VALUE_SOURCES)} — 'value' is raw source text in the target "
+            "format, 'scalar' is a JSON scalar rendered by the format, and "
+            "'fromOutput': true takes the tool's own text output. It named "
+            f"{len(named)}."
+        )
+    source = named[0]
+    if source == "fromOutput":
+        if spec["fromOutput"] is not True:
+            raise PromptConventionError(
+                f"Prompt block {index}: '{label}.fromOutput' is true or absent; there is "
+                "no other value it could mean."
+            )
+        return EditOp(kind=kind, address=address, from_output=True)
+    if source == "value":
+        if not isinstance(spec["value"], str):
+            raise PromptConventionError(
+                f"Prompt block {index}: '{label}.value' must be a string — it is raw "
+                "source text in the target format, not a JSON value. Use 'scalar' for a "
+                "JSON scalar."
+            )
+        return EditOp(kind=kind, address=address, value=spec["value"])
+    return EditOp(kind=kind, address=address, scalar=spec["scalar"])
 
 
 def _strings(index: int, value: Any, label: str) -> tuple[str, ...]:

@@ -123,6 +123,21 @@ message must fence it (`markdown.fenced_lines` with a `diff` info string), becau
 client rendering Markdown reads a leading `-` as a list bullet and eats the column that
 carries the entire meaning.
 
+## Who calls this, and the posture it cost
+
+[turn_mcp_router.py](turn_mcp_router.md)'s `edit` directive is the only caller in the
+process. It is worth knowing what that costs, because this module is the reason the cost
+was acceptable: everywhere else that executor is a **neutral carrier** — it writes the
+tool's own output, so wrong bytes are the tool's fault. An edit makes the bytes *ours*.
+`ARCHITECTURE.md`'s "Structured edits, and the neutrality this deliberately trades away"
+records the decision; the verifier above is what was traded for.
+
+One consequence runs the other way from the refusal boundary below. `EditError` is a
+`ValueError` so [errors.py](errors.md) *would* map it to `-32602`, but on the router's path
+it never reaches the wire as an error at all: an edit refusal is a **failed tool call**
+carrying the message as text. The turn is fine; one operation in it was refused. The
+`ValueError` base still matters for any future caller that lets one escape.
+
 ## Main symbols
 
 | Symbol | Purpose |
@@ -160,3 +175,4 @@ always passes on correct input, so an untested one is indistinguishable from
 - [errors.py docs](errors.md) — why every refusal is a `ValueError`
 - [mcp_content.py docs](mcp_content.md) — where an `EditResult` becomes ACP content
 - [markdown.py docs](markdown.md) — `fenced_lines`, for rendering `unified()` safely
+- [turn_mcp_router.py docs](turn_mcp_router.md) — the `edit` directive, this module's only caller

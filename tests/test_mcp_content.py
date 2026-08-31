@@ -18,7 +18,12 @@ from acp.schema import (
     TextContentBlock,
 )
 
-from python_acp.mcp_content import MAPPED_TYPES, to_content_block, to_tool_call_content
+from python_acp.mcp_content import (
+    MAPPED_TYPES,
+    to_content_block,
+    to_edit_content,
+    to_tool_call_content,
+)
 
 
 def unrendered(block: Any) -> bool:
@@ -193,3 +198,41 @@ def test_an_unmappable_block_does_not_cost_the_ones_around_it() -> None:
     )
 
     assert [c.content.text for c in content if not unrendered(c.content)] == ["before", "after"]
+
+
+# ---------------------------------------------------------------------------
+# A verified edit, which is not MCP content at all — see the module docstring
+# ---------------------------------------------------------------------------
+
+
+def edited() -> Any:
+    from python_acp.edit_json import JSON_DIALECT
+    from python_acp.edits import Op, OpKind, apply
+
+    return apply(
+        '{\n  "version": "1.0.0"\n}\n',
+        [Op(kind=OpKind.SET, address="/version", scalar="2.0.0")],
+        dialect=JSON_DIALECT,
+        path="/work/package.json",
+    )
+
+
+def test_an_edit_becomes_a_whole_file_diff_and_a_readable_one() -> None:
+    """`Diff.old_text`/`new_text` are contents, not a patch. Handing `unified()` to
+    `new_text` typechecks and would make a client replace the file with the diff."""
+    diff, readable = to_edit_content(edited())
+
+    assert (diff.type, diff.path) == ("diff", "/work/package.json")
+    assert diff.old_text == '{\n  "version": "1.0.0"\n}\n'
+    assert diff.new_text == '{\n  "version": "2.0.0"\n}\n'
+    assert "---" in readable.content.text
+
+
+def test_the_readable_diff_is_fenced_so_its_columns_survive_markdown() -> None:
+    """A bare unified diff loses its leading `-` to a list bullet — the column that
+    carries the entire meaning."""
+    text = to_edit_content(edited())[1].content.text
+
+    assert text.startswith("```")
+    assert text.rstrip().endswith("```")
+    assert '-  "version": "1.0.0"' in text

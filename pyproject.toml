@@ -7,15 +7,20 @@ name = "python-acp"
 version = "0.2.0"
 description = "ACP app that exposes MCP tools over WebSockets"
 readme = "README.md"
-# Floor is ours (3.11); the ceiling is imposed by agent-client-protocol, whose
+# Floor is ours (3.12); the ceiling is imposed by agent-client-protocol, whose
 # own requires-python is ">=3.10,<3.15". Raising it here without the SDK raising
 # it first produces an uninstallable release, so the two move together.
-requires-python = ">=3.11,<3.15"
+#
+# The floor left 3.11 when the CI matrix did. Testing a version this file claims
+# to support is the whole reason the two are in lockstep, so a matrix leg cannot
+# be dropped on its own -- doing that would keep the claim and delete the only
+# thing that checks it. `Containerfile` moved with them, because a 3.11 base
+# image can no longer install this wheel at all.
+requires-python = ">=3.12,<3.15"
 # Kept in lockstep with the python-version matrix in .github/workflows/ci.yml:
 # every version listed here is one CI actually runs lint, tests, and build against.
 # The list must also stay inside the requires-python window above.
 classifiers = [
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
@@ -48,7 +53,7 @@ classifiers = [
 # the point; the library IS the oracle.
 #
 # Cost, checked on PyPI before pinning: ruamel_yaml-0.19.1-py3-none-any.whl is
-# 118,102 bytes, declares requires-python >=3.9 (under this project's 3.11 floor,
+# 118,102 bytes, declares requires-python >=3.9 (under this project's 3.12 floor,
 # with no upper bound, so it does not touch the SDK's <3.15 ceiling), and has
 # ZERO hard dependencies. It is pure Python and adds no wheel of its own beyond
 # that 118 KB -- two orders of magnitude below the pydantic cost table in
@@ -61,8 +66,9 @@ classifiers = [
 #
 # websockets is on 17.0.1, not 12.0: `pyacp-tzd.3` rebuilt the WebSocket binding
 # on `websockets.asyncio.server`, and the legacy `websockets.serve` API that 12.0
-# offered is deprecated. 17.0.1 declares `requires-python >=3.11`, which is
-# exactly this project's floor, so the pin does not narrow the support window.
+# offered is deprecated. 17.0.1 declares `requires-python >=3.11`, one release
+# below this project's floor since it moved to 3.12, so the pin does not narrow
+# the support window.
 dependencies = [
   "agent-client-protocol==0.12.1",
   "ruamel.yaml==0.19.1",
@@ -94,7 +100,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
 # A subprocess this suite started and never reaped is otherwise invisible: nothing
-# raises, and only CPython 3.11 even mentions it, as an unraisable from
+# raises, and only CPython 3.11 ever mentioned it -- as an unraisable from
 # `BaseSubprocessTransport.__del__` finalized after its loop closed. `pyacp-6k5` traced
 # three separate causes behind one such warning, so it is an error rather than a note.
 #

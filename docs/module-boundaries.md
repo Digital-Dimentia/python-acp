@@ -44,7 +44,8 @@ pre-empt that matrix; it only places boundaries.
 
 - `agent-client-protocol` is pinned at exactly `0.12.1` in `pyproject.toml`
   (`pyacp-4ns.1`), and its `requires-python = ">=3.10,<3.15"` is now mirrored as our
-  own `requires-python = ">=3.11,<3.15"`.
+  own `requires-python = ">=3.12,<3.15"` (the floor was `3.11` when this was written and
+  moved with the CI matrix).
 - The per-method dispositions are settled in
   [docs/acp-compliance-matrix.md](acp-compliance-matrix.md) (`pyacp-4ns.2`), read off the
   installed `0.12.1` rather than the published source. It confirms the 15 `Agent` members
@@ -234,8 +235,8 @@ The rebind also moved the `websockets` pin from `12.0` to `17.0.1`. 12.0 predate
 `websockets.asyncio.server` entirely — it offered only the legacy asyncio API that
 `pyacp-exl` planned to migrate off — so "keep the `websockets` library" and "stop importing
 `websockets.server`" could not both be true on the old pin. 17.0.1 declares
-`requires-python >=3.11`, exactly this project's floor, so the pin does not narrow the
-support window. `pyacp-exl` closes as superseded.
+`requires-python >=3.11`, which was exactly this project's floor at the time and is one
+release below it now, so the pin does not narrow the support window. `pyacp-exl` closes as superseded.
 
 ### B5. `acp.run_agent`, not `AgentSideConnection`
 

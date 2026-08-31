@@ -243,10 +243,12 @@ def test_the_table_covers_every_agent_protocol_member() -> None:
 
 
 def test_the_member_walk_does_not_depend_on_the_interpreter_version() -> None:
-    """`typing.__protocol_attrs__` is 3.12+ and empty on 3.11 — the project's own floor.
+    """`typing.__protocol_attrs__` is 3.12+ and was empty on 3.11 — the floor at the time.
 
     A structural test that passes vacuously on the oldest supported interpreter is worse
-    than no structural test, because CI reports it green.
+    than no structural test, because CI reports it green. The floor has since moved to
+    3.12, so the attribute is now populated everywhere CI runs; the walk stays independent
+    of it anyway, because that is a property of the walk and not of the matrix.
     """
     assert len(protocol_members()) == 15
     assert "initialize" in protocol_members()

@@ -127,10 +127,12 @@ success by finding nothing fails open.
 `asyncio.create_subprocess_exec`, keeps a strong reference to every process the suite
 starts, and fails the run at session finish if any of their transports were never closed —
 naming the test that created each one. It exists because the alternative signal is
-useless: CPython **3.11 only** reports such a leak, once, as a
-`PytestUnraisableExceptionWarning` from a transport finalized after its loop, it fires only
-when the GC happens to run, and it names whichever test was executing rather than the one
-that leaked. `pyacp-6k5` found three unrelated leaks behind one such warning.
+useless: CPython **3.11 alone** reported such a leak, once, as a
+`PytestUnraisableExceptionWarning` from a transport finalized after its loop, it fired only
+when the GC happened to run, and it named whichever test was executing rather than the one
+that leaked. `pyacp-6k5` found three unrelated leaks behind one such warning. Since the
+floor moved to 3.12, **no version CI runs emits it at all**, which changes nothing: this
+guard replaced that warning rather than supplementing it.
 
 When that guard fails, the cause is almost always one of:
 
@@ -181,7 +183,7 @@ on 64-bit Raspberry Pi OS. The Pi 5's Cortex-A76 is ARMv8.2-A, and it runs a
 `linux/arm64` image natively, because **ARMv8.2-A is a superset of ARMv8-A, not a
 different target**.
 
-Do not add a v8.2 platform. It does not exist to add: `python:3.11-slim` publishes
+Do not add a v8.2 platform. It does not exist to add: `python:3.12-slim` publishes
 `amd64`, `arm/v5`, `arm/v7`, `arm64/v8`, `386`, `ppc64le`, `riscv64` and `s390x`, and
 neither OCI nor Docker Hub defines `arm64/v8.2`. A finer target would only pay off if we
 compiled native code with `-march=armv8.2-a`; this project ships `py3-none-any` and
@@ -196,7 +198,7 @@ Two platforms are deliberately excluded:
   `manylinux_2_17_armv7l` wheel, so there is no Rust build on the Pi — but it is a third
   emulated leg for a shrinking install base. Add it to `RELEASE_PLATFORMS` if someone
   asks; nothing else needs to change.
-- **Pi Zero and Pi 1** (ARMv6) are out of reach, not merely slow. `python:3.11-slim` has
+- **Pi Zero and Pi 1** (ARMv6) are out of reach, not merely slow. `python:3.12-slim` has
   no `arm/v6` image, and `pydantic-core` publishes no armv6 or armv5 wheel at all, so it
   would mean compiling Rust on an ARM11.
 - `make package` — build + container image, tarred to
@@ -249,11 +251,25 @@ Two platforms are deliberately excluded:
   TLS in a reverse proxy and keep the bind on loopback. `pyacp-smj` owns the better answer.
 
 CI (`.github/workflows/ci.yml`) runs `make venv && make lint && make docs-check && make test && make build`
-across a matrix of Python 3.11, 3.12, 3.13, and 3.14 — every version
-`requires-python = ">=3.11,<3.15"` claims — with `fail-fast: false` so one version's
-failure does not mask the others. Build artifacts are uploaded from the 3.11 leg only.
+across a matrix of Python 3.12, 3.13, and 3.14 — every version
+`requires-python = ">=3.12,<3.15"` claims — with `fail-fast: false` so one version's
+failure does not mask the others. Build artifacts are uploaded from the 3.12 leg only.
 Keep the matrix and the `classifiers` list in `pyproject.toml` in lockstep, and keep
 both inside the `requires-python` window.
+
+**The floor moved from 3.11 to 3.12**, and the whole lockstep moved with it. A matrix
+leg cannot be dropped on its own: testing a version this project claims to support is the
+entire point of tying the matrix to the classifiers and to `requires-python`, so deleting
+a leg while keeping the claim would keep the promise and delete the only thing checking
+it. `Containerfile` moved too — it is `python:3.12-slim` now, because a 3.11 base can no
+longer install this wheel at all, so leaving it would have failed the image build rather
+than merely aged.
+
+One signal was lost on purpose and is worth knowing about: **CPython 3.11 was the only
+version that ever reported a leaked subprocess transport**, so no interpreter CI runs
+emits that warning any more. That does not weaken the guard in `tests/conftest.py` — it
+is the reason for it, since the warning was never a reliable detector (see below) and the
+deterministic check replaced it rather than supplementing it.
 
 **That window now has a ceiling this project does not own.**
 `agent-client-protocol` declares `requires-python = ">=3.10,<3.15"`, so 3.14 is the
@@ -265,7 +281,7 @@ therefore: **matrix ↔ classifiers ↔ `requires-python`, all bounded above by 
 declared window, so a matrix leg that drifts out of it fails loudly rather than
 silently shipping. Release publishing
 (`.github/workflows/publish-artifacts.yml`) fires on a published GitHub release and
-deliberately stays on 3.11, the floor, so the published wheel is installable across the
+deliberately stays on 3.12, the floor, so the published wheel is installable across the
 whole supported range. Each leg starts from a bare runner with no venv, so it takes the
 create-and-install path; the stamp then keeps `lint`, `test`, and `build` from
 reinstalling three more times.
@@ -280,7 +296,8 @@ carries its own justification below.
 - `websockets==17.0.1` — the WebSocket server transport, driven through
   `websockets.asyncio.server`. The pin left 12.0 in `pyacp-tzd.3`, which rebuilt
   the binding: 12.0 only offered the deprecated legacy asyncio API. 17.0.1
-  declares `requires-python >=3.11`, exactly this project's floor.
+  declares `requires-python >=3.11`, one release below this project's floor since it
+  moved to 3.12, so the pin does not narrow the support window.
 - `agent-client-protocol==0.12.1` — Zed's Agent Client Protocol SDK
   ([agentclientprotocol/python-sdk](https://github.com/agentclientprotocol/python-sdk)).
   It is pre-1.0, where a *minor* bump is allowed to break, which is why the pin is exact
@@ -316,13 +333,13 @@ Read that top row before panicking about the bottom two: **our own wheel is unaf
 entirely the new test file, not the dependency. The real cost is what gets *installed*:
 `pydantic-core` (4.4 MiB) and `pydantic` (4.3 MiB) together are ~85% of it; the `acp`
 package itself is ~1.0 MiB. The last row was the closest available proxy for the
-container layer, since `Containerfile` builds on `python:3.11-slim` and pulls manylinux
+container layer, since `Containerfile` builds on `python:3.12-slim` and pulls manylinux
 wheels; `pydantic-core` alone is 2.0 MiB of it because it ships a compiled Rust
 extension. The image is now measured directly — see below, and note the two disagree.
 
 The container *image* delta is **+10,380,287 B (~9.90 MiB)**, taking the image from
 194,680,353 B to 205,060,640 B — a 5.3% increase on a 185.7 MiB image, of which podman
-reports ~155 MB is the `python:3.11-slim` base. Measured under bead `pyacp-8ub` with
+reports ~155 MB is the `python:3.11-slim` base (the tag at the time of measurement). Measured under bead `pyacp-8ub` with
 podman 6.1.0 by building `Containerfile` — byte-identical at both commits — at `e28395f^`
 and `e28395f`, the commit that added the pin, so the dependency is the only variable.
 It is a native `linux/arm64` build (no `--platform`, on an arm64 host); an `amd64` image

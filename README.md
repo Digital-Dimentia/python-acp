@@ -766,7 +766,7 @@ make container-image PLATFORMS=linux/amd64,linux/arm64
 
 Not supported: **32-bit Raspberry Pi OS** (`linux/arm/v7`) is not in the released
 manifest, though it would work if added — open an issue. **Pi Zero and Pi 1** (ARMv6)
-cannot be supported: no `python:3.11-slim` image is published for that architecture, and
+cannot be supported: no `python:3.12-slim` image is published for that architecture, and
 `pydantic-core` ships no armv6 wheel, so it would require compiling Rust on an ARM11.
 
 **The image contains the agent and nothing else** — `Containerfile` copies `src/` and

@@ -15,7 +15,11 @@ detector**, and this file exists because of that:
   later test, so a real leak can pass a whole run unreported.
 * When it does fire it names **whichever test was running at the time**, which is almost
   never the test that leaked. Chasing that name is chasing noise.
-* Only 3.11 emits it at all. On 3.14 the same leak is entirely invisible.
+* Only 3.11 emits it at all. On 3.14 the same leak is entirely invisible — and since the
+  floor moved to 3.12, **no interpreter CI runs emits it any more**. That does not weaken
+  this guard, it is the reason for it: the warning was never the detector, and the last
+  version that produced it leaving the matrix only removes a signal that was already
+  unreliable. `filterwarnings` keeps it an error for anyone still running 3.11 locally.
 
 So the check here is deterministic instead: wrap `asyncio.create_subprocess_exec`, keep a
 **strong** reference to every process it returns, and at the end of the session fail if

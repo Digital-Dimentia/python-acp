@@ -25,7 +25,7 @@ jobs:
           # Deliberately the floor from `requires-python`, not the newest version in
           # ci.yml's matrix: releases build on the oldest supported interpreter so the
           # published wheel stays installable across the whole declared range.
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Build release artifacts
         run: |
           make venv

@@ -15,9 +15,9 @@ jobs:
       # Report every version's result; a failure on one must not mask the others.
       fail-fast: false
       matrix:
-        # Every version pyproject.toml's `requires-python = ">=3.11"` claims to
-        # support. 3.11 is the declared floor; 3.14 is what local development runs on.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # Every version pyproject.toml's `requires-python = ">=3.12"` claims to
+        # support. 3.12 is the declared floor; 3.14 is what local development runs on.
+        python-version: ["3.12", "3.13", "3.14"]
     name: validate (py${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v7
@@ -35,7 +35,7 @@ jobs:
         # Publish from the floor version only: it produces the widest-compatible
         # wheel, and artifacts are immutable, so a second matrix leg uploading
         # the same name is an error rather than a merge.
-        if: matrix.python-version == '3.11'
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v7
         with:
           name: python-acp-dist

@@ -53,6 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-client-mcp-servers",
+        action="store_true",
+        help=(
+            "Refuse MCP server command lines supplied by a client on session/new or "
+            "session/fork, with -32602 rather than by ignoring them. Off by default, "
+            "which is ACP's own arrangement. Turn it on when binding a socket that "
+            "clients connect to afterwards: there, a client naming 'command' and 'args' "
+            "is asking this process to execute an arbitrary binary. Pair it with "
+            "--mcp-config so there is still somewhere for servers to come from. Honoured "
+            "on both transports, so one deployment config means one thing everywhere."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging for websocket and MCP message flow.",
@@ -116,6 +129,17 @@ async def _run(args: argparse.Namespace) -> None:
     configure_logging(args.debug)
 
     catalogue = _load_catalogue(getattr(args, "mcp_config", None))
+    accept_client_servers = not getattr(args, "no_client_mcp_servers", False)
+    if not accept_client_servers:
+        # Said at startup rather than discovered at the first refused `session/new`. An
+        # operator who set the flag and forgot `--mcp-config` has built a deployment that
+        # runs no MCP servers at all, which is a legitimate thing to want and a very easy
+        # thing to do by accident.
+        logger.info(
+            "Client-supplied MCP servers are refused (--no-client-mcp-servers); "
+            "sessions may use the catalogue only%s",
+            "" if len(catalogue) else " — and the catalogue is empty",
+        )
 
     # Both registries are process-wide, and both are created here because this is the
     # only place that constructs both: a session must outlive the connection that
@@ -147,7 +171,11 @@ async def _run(args: argparse.Namespace) -> None:
             # this process ending, so the shutdown path below is the same event.
             await run_stdio(
                 PythonAcpAgent(
-                    sessions, backends=backends, terminals=terminals, catalogue=catalogue
+                    sessions,
+                    backends=backends,
+                    terminals=terminals,
+                    catalogue=catalogue,
+                    accept_client_servers=accept_client_servers,
                 )
             )
             return
@@ -165,6 +193,7 @@ async def _run(args: argparse.Namespace) -> None:
             backends=backends,
             terminals=terminals,
             catalogue=catalogue,
+            accept_client_servers=accept_client_servers,
         )
         await server.start()
         # Never print(): under --transport stdio that corrupts the wire, and one logging

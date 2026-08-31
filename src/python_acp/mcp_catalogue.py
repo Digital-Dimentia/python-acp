@@ -22,6 +22,11 @@ that catalogue and nothing else: a file in, and two things out —
   ride `NewSessionResponse.configOptions`, `session/set_config_option` changes them, and
   `config_option_update` announces a change.
 
+Selection being *available* is not the same as supply being *refusable*, and this module
+only does the first: `mcpServers` is still accepted from any client by default. The other
+half is `agent.py`'s `--no-client-mcp-servers` (`pyacp-80k`), which refuses a client's list
+outright and points it here.
+
 **This is not `--mcp-command` coming back** (`pyacp-sld.4`). That was *one* server, shared
 by every client, with a passthrough surface that let a client drive it directly. A
 catalogue holds **recipes**: every session still spawns its own subprocesses, still gets

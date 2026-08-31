@@ -317,6 +317,37 @@ the backends are told they may send `elicitation/create`; `None` means they neve
 will put on the wire. What the forwarder reads *later* is whoever is connected then, and
 [elicitation.md](elicitation.md) records why those can differ.
 
+### An operator can refuse client-supplied servers entirely
+
+`_reject_unsupported_mcp_servers` is the one funnel every client-supplied server list goes
+through, on both `session/new` and `session/fork`, and it now makes **two** refusals. The
+operator's comes first, because it is the operative reason: telling a client its
+`HttpMcpServer` is the wrong transport, when the answer would have been no for a stdio one
+too, sends it to fix the wrong thing.
+
+By default `mcpServers` is accepted from anyone, which is right for the topology ACP was
+designed around — over stdio the client *spawned* this process, and a parent configuring
+its own child is the canonical arrangement. It is wrong for a long-lived socket clients
+connect to afterwards, where `command` and `args` from a client past the access key is a
+request to execute an arbitrary binary. `--no-client-mcp-servers` is the opt-in;
+[cli.md](cli.md) carries why it is a flag rather than a default and why it is honoured on
+both transports.
+
+It **refuses** rather than dropping the list, which is the opposite of what the next
+section describes ACP itself doing — deliberately. A silent drop is the protocol's own
+posture for an entry it cannot parse; a *policy* refusal that behaved the same way would
+hand back a session backed by fewer servers than were asked for while the operator
+believed a door was shut. An empty list is not a refusal: it is exactly what a
+catalogue-only client sends.
+
+Both callers run the funnel **before** creating anything, so a refused request leaves no
+session and no subprocess behind.
+
+Note that the transport half of that method is unreachable over the wire: an `http` or
+`sse` entry is dropped by `skip-invalid-items` before dispatch — see the next section —
+so the agent never sees one. It stands for a direct caller, and for a schema that one day
+models a transport this agent does not advertise.
+
 ### A dropped `mcpServers` entry is accepted, and that is a decision
 
 `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
@@ -438,6 +469,7 @@ in that module's table.
 | `PythonAcpAgent.connected_client` | The same facade or `None` — the non-raising form, for cleanup after a connection ends |
 | `PythonAcpAgent.terminals` | The process-wide [`TerminalRegistry`](terminals.md) this agent's turns create through |
 | `PythonAcpAgent.client_capabilities` | What the client declared at `initialize`, or `None` before it ran — Phase 4 gates every client call on this |
+| `PythonAcpAgent(..., accept_client_servers=)` | Whether a client may supply MCP server recipes. `True` by default; `cli.py`'s `--no-client-mcp-servers` sets it false |
 
 `client_capabilities` distinguishes `None` (no `initialize` yet) from "declared nothing";
 the two are deliberately not collapsed.

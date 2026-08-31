@@ -20,6 +20,7 @@ from acp.schema import (
     AgentMessageChunk,
     ClientCapabilities,
     FileSystemCapabilities,
+    HttpMcpServer,
     StopReason,
     TextContentBlock,
 )
@@ -2274,3 +2275,164 @@ async def test_an_executor_option_still_behaves_exactly_as_before() -> None:
         assert list(backends.backends(created.session_id)) == ["alpha"]
     finally:
         await backends.close_all()
+
+
+# ---------------------------------------------------------------------------
+# Refusing client-supplied servers (`pyacp-80k`)
+# ---------------------------------------------------------------------------
+
+
+def a_client_server(name: str = "mine") -> dict[str, object]:
+    return {
+        "name": name,
+        "command": sys.executable,
+        "args": [str(FIXTURE_SERVER)],
+        "env": [],
+    }
+
+
+async def test_client_servers_are_accepted_by_default() -> None:
+    """The regression that matters most, again: the flag costs nothing when unset, and
+    unset is ACP's own arrangement."""
+    backends = McpBackendRegistry()
+    router = make_router(agent=make_agent(backends=backends))
+
+    result = await router("session/new", {"cwd": "/work", "mcpServers": [a_client_server()]}, False)
+    try:
+        assert sorted(backends.backends(result.session_id)) == ["mine"]
+    finally:
+        await backends.close_all()
+
+
+async def test_the_flag_refuses_client_servers_rather_than_ignoring_them() -> None:
+    """A session backed by fewer servers than were asked for is the failure the README
+    already warns about for skip-invalid-items. This must not add a second route to it."""
+    sessions = SessionRegistry()
+    backends = McpBackendRegistry()
+    router = make_router(
+        agent=make_agent(
+            sessions=sessions,
+            backends=backends,
+            catalogue=a_catalogue("alpha"),
+            accept_client_servers=False,
+        )
+    )
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/new", {"cwd": "/work", "mcpServers": [a_client_server()]}, False)
+
+    assert excinfo.value.code == -32602
+    assert len(sessions) == 0
+    assert len(backends) == 0
+
+
+async def test_the_refusal_names_the_flag_and_says_where_servers_do_come_from() -> None:
+    """A client told 'no' without being told where servers *do* come from has nothing to
+    do next, so the message carries both halves."""
+    router = make_router(
+        agent=make_agent(catalogue=a_catalogue("alpha", "beta"), accept_client_servers=False)
+    )
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/new", {"cwd": "/work", "mcpServers": [a_client_server()]}, False)
+
+    said = str(excinfo.value.data)
+    assert "--no-client-mcp-servers" in said
+    assert "alpha" in said and "beta" in said
+    assert "mine" in said
+
+
+async def test_the_refusal_says_so_when_there_is_no_catalogue_either() -> None:
+    """A deployment with the flag and no --mcp-config runs no MCP servers at all. That is
+    a legitimate thing to want and a very easy thing to do by accident."""
+    router = make_router(agent=make_agent(accept_client_servers=False))
+
+    with pytest.raises(RequestError) as excinfo:
+        await router("session/new", {"cwd": "/work", "mcpServers": [a_client_server()]}, False)
+
+    assert "--mcp-config" in str(excinfo.value.data)
+
+
+async def test_an_empty_list_is_still_accepted_with_the_flag_set() -> None:
+    """It is exactly what a catalogue-only client sends, and what every existing test
+    sends. Refusing it would refuse the arrangement the flag exists to create."""
+    backends = McpBackendRegistry()
+    router = make_router(
+        agent=make_agent(
+            backends=backends, catalogue=a_catalogue("alpha"), accept_client_servers=False
+        )
+    )
+
+    result = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        assert sorted(backends.backends(result.session_id)) == ["alpha"]
+    finally:
+        await backends.close_all()
+
+
+async def test_a_fork_that_names_its_own_servers_is_refused_too() -> None:
+    """`session/fork` takes its own `mcpServers`, so it is the second door and it goes
+    through the same funnel."""
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry()
+    router = make_router(
+        agent=make_agent(
+            sessions=sessions,
+            backends=backends,
+            catalogue=a_catalogue("alpha"),
+            accept_client_servers=False,
+        )
+    )
+
+    parent = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        with pytest.raises(RequestError) as excinfo:
+            await router(
+                "session/fork",
+                {"sessionId": parent.session_id, "cwd": "/work",
+                 "mcpServers": [a_client_server()]},
+                False,
+            )
+
+        assert excinfo.value.code == -32602
+        # The parent is untouched and no fork was left behind.
+        assert len(sessions) == 1
+    finally:
+        await backends.close_all()
+
+
+async def test_a_fork_that_names_no_servers_is_unaffected_by_the_flag() -> None:
+    """Absent means 'inherit the parent's', which is not a client supplying anything."""
+    backends = McpBackendRegistry()
+    router = make_router(
+        agent=make_agent(
+            backends=backends, catalogue=a_catalogue("alpha"), accept_client_servers=False
+        )
+    )
+
+    parent = await router("session/new", {"cwd": "/work", "mcpServers": []}, False)
+    try:
+        forked = await router("session/fork", {"sessionId": parent.session_id, "cwd": "/work"}, False)
+        assert sorted(backends.backends(forked.session_id)) == ["alpha"]
+    finally:
+        await backends.close_all()
+
+
+def test_the_operators_refusal_comes_before_the_transport_one() -> None:
+    """Telling a client its HttpMcpServer is the wrong transport, when the answer would
+    have been no for a stdio one too, sends it to fix the wrong thing.
+
+    Asserted against the method rather than through the router, because an HTTP entry
+    never reaches the agent over the wire: ACP marks `mcpServers` `skip-invalid-items`,
+    and the SDK drops anything that is not a variant the schema models *before* dispatch —
+    the same silent removal `_server` in `turn_mcp_router.py` exists to explain. The
+    ordering is still the contract for any caller that reaches this directly, and for a
+    schema that one day models the transport we do not advertise.
+    """
+    server = HttpMcpServer(type="http", name="remote", url="https://example.com/mcp", headers=[])
+
+    with pytest.raises(ValueError, match="--no-client-mcp-servers"):
+        make_agent(accept_client_servers=False)._reject_unsupported_mcp_servers([server])
+
+    with pytest.raises(ValueError, match="no HTTP, SSE, or ACP"):
+        make_agent()._reject_unsupported_mcp_servers([server])

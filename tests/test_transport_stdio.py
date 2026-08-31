@@ -407,6 +407,22 @@ def test_the_mcp_catalogue_path_is_taken_on_both_transports() -> None:
         assert args.mcp_config == "servers.toml"
 
 
+def test_client_supplied_servers_are_accepted_unless_the_flag_says_otherwise() -> None:
+    """Off by default, because that is ACP's own arrangement: over stdio the client
+    spawned this process, and a parent configuring its own child is the canonical case."""
+    assert build_parser().parse_args([]).no_client_mcp_servers is False
+
+
+def test_the_refusal_flag_is_taken_on_both_transports() -> None:
+    """One deployment config means one thing everywhere. It is *most* useful on a socket
+    clients connect to afterwards, but an operator wrapping this agent in a launcher may
+    want it under stdio too, and a flag that is silently ignored on one transport is worse
+    than either answer."""
+    for transport in ("ws", "stdio"):
+        args = build_parser().parse_args(["--transport", transport, "--no-client-mcp-servers"])
+        assert args.no_client_mcp_servers is True
+
+
 def test_a_catalogue_that_cannot_be_read_stops_the_process_before_it_serves(
     tmp_path: Path,
 ) -> None:

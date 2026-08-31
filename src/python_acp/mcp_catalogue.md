@@ -27,6 +27,13 @@ safer than supply: the client picks from a list the operator approved.
 knows its own servers keeps naming them, a thin client selects from the catalogue, and one
 session can have both.
 
+**Until an operator says otherwise.** This module made selection *available*; it did not
+make supply *refusable*, and by default a client past the access key can still name a
+command line. `--no-client-mcp-servers` is the other half (`pyacp-80k`): with it, a
+non-empty `mcpServers` is `-32602` naming the flag and listing this catalogue, so the
+selection above becomes the only way in. Off by default, because refusing is wrong for the
+transport ACP was designed around. See [cli.md](cli.md) and [agent.md](agent.md).
+
 ## This is not `--mcp-command` returning
 
 `pyacp-sld.4` removed a flag that bound **one** MCP server, process-wide, shared by every

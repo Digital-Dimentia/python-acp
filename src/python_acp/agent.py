@@ -101,6 +101,7 @@ class PythonAcpAgent:
         terminals: TerminalRegistry | None = None,
         *,
         catalogue: McpCatalogue | None = None,
+        accept_client_servers: bool = True,
         unstable: bool = True,
     ) -> None:
         # `sessions` is required rather than defaulted, and that is the point. One
@@ -138,6 +139,12 @@ class PythonAcpAgent:
         # specs, and every path below behaves exactly as it did before it existed. See
         # `mcp_catalogue.py`, including why this is not `--mcp-command` returning.
         self._catalogue = catalogue if catalogue is not None else McpCatalogue()
+        # Whether `session/new` and `session/fork` may still be handed server *recipes* by
+        # the client. True is the ACP arrangement and the default; an operator binding a
+        # socket clients connect to afterwards turns it off with `--no-client-mcp-servers`,
+        # because there a `command` and `args` arriving from a client is a request to
+        # execute an arbitrary binary. See `_reject_unsupported_mcp_servers`.
+        self._accept_client_servers = accept_client_servers
         self._client: Client | None = None
         self._client_capabilities: ClientCapabilities | None = None
         # Commands built *before* a minting response is written, for the announcer to
@@ -999,18 +1006,56 @@ class PythonAcpAgent:
     # Internals
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _reject_unsupported_mcp_servers(mcp_servers: list[Any]) -> list[McpServerStdio]:
-        """Keep the stdio servers, refuse the transports `initialize` did not advertise.
+    def _reject_unsupported_mcp_servers(self, mcp_servers: list[Any]) -> list[McpServerStdio]:
+        """Keep the stdio servers; refuse what this deployment will not run.
 
-        `mcpCapabilities.http`, `.sse`, and `.acp` are all `false` in
-        `capabilities.AGENT_CAPABILITY_MANIFEST`, and stdio needs no capability at all.
-        Accepting an `HttpMcpServer` anyway would make the advertisement a lie and hand
-        back a session whose tools silently do not exist.
+        Two refusals, and the operator's comes first because it is the operative reason:
+        telling a client its `HttpMcpServer` is the wrong transport, when the answer would
+        have been no for a stdio one too, sends it to fix the wrong thing.
+
+        **The operator's refusal.** `mcpServers` is accepted from any client by default,
+        which is right for the transport ACP was designed around — over stdio the client
+        *spawned* this process, and a parent configuring its own child is the canonical
+        arrangement. It is wrong for a long-lived socket clients connect to afterwards,
+        where `command` and `args` from a client past the access key is a request to
+        execute an arbitrary binary. `--no-client-mcp-servers` is the opt-in, and it is
+        honoured on **both** transports so one deployment config means one thing
+        everywhere. The refusal names the flag and points at the catalogue, because a
+        client that is told "no" without being told where servers *do* come from has
+        nothing to do next.
+
+        It **refuses** rather than dropping the list. A session backed by fewer servers
+        than were asked for is the failure mode the README already warns about for ACP's
+        `skip-invalid-items`, and adding a second route to it would be worse than the door
+        this closes. An *empty* list is not a refusal: it is exactly what a
+        catalogue-only client sends.
+
+        **The transport refusal.** `mcpCapabilities.http`, `.sse`, and `.acp` are all
+        `false` in `capabilities.AGENT_CAPABILITY_MANIFEST`, and stdio needs no capability
+        at all. Accepting an `HttpMcpServer` anyway would make the advertisement a lie and
+        hand back a session whose tools silently do not exist.
 
         Partitioning rather than validating-then-reusing, so `mcp_registry` is handed a
         list whose element type it can rely on instead of re-checking.
+
+        A `ValueError` either way, which `errors.py` maps to `-32602`: the parameter is
+        the problem, and both callers run this **before** the session is created, so a
+        refused request leaves nothing behind.
         """
+        if mcp_servers and not self._accept_client_servers:
+            offered = ", ".join(self._catalogue.names)
+            raise ValueError(
+                "This agent was started with --no-client-mcp-servers, so it does not "
+                "accept MCP server command lines from a client. "
+                + (
+                    f"Select from the catalogue instead, using the session config "
+                    f"options named after its servers: {offered}."
+                    if offered
+                    else "It offers no catalogue either, so this deployment runs no MCP "
+                    "servers at all; ask the operator for --mcp-config."
+                )
+                + f" Rejected: {[getattr(server, 'name', '?') for server in mcp_servers]}"
+            )
         unsupported = [
             server for server in mcp_servers if not isinstance(server, McpServerStdio)
         ]

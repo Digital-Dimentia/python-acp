@@ -279,6 +279,23 @@ used by both is `-32602`. Everything else is unchanged: each session still spawn
 subprocesses, and they still die with it. See
 [mcp_catalogue.py](src/python_acp/mcp_catalogue.md).
 
+**And the operator can close the door the catalogue only opened an alternative to.**
+Selection being *available* is not the same as supply being *refusable*: by default this
+agent still accepts `mcpServers` from any client, which is right for stdio — there the
+client spawned this process — and wrong for a socket clients connect to afterwards.
+
+```bash
+python-acp --mcp-config servers.toml --no-client-mcp-servers
+```
+
+With that flag, a `session/new` or `session/fork` carrying a **non-empty** `mcpServers` is
+`-32602`, and the message names the flag and lists the catalogue so a client knows what to
+send instead. It **refuses rather than ignores**: a session backed by fewer servers than
+were asked for is the failure mode described below for `skip-invalid-items`, and this must
+not add a second route to it. An empty list is still fine — that is exactly what a
+catalogue-only client sends. Off by default, so nothing that works today changes; honoured
+on both transports, so one deployment config means one thing everywhere.
+
 Only **stdio** servers are accepted. `initialize` advertises
 `mcpCapabilities: {http: false, sse: false, acp: false}`, so an `http` or `sse` entry is
 refused with `-32602` rather than accepted and quietly ignored. If any server fails to

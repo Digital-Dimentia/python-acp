@@ -18,7 +18,8 @@ client-facing transport. It owns no protocol logic of its own.
 
 ## Main Symbols
 
-- `build_parser()`: defines `--transport`, `--host`, `--port`, `--mcp-config`, `--debug`.
+- `build_parser()`: defines `--transport`, `--host`, `--port`, `--mcp-config`,
+  `--no-client-mcp-servers`, `--debug`.
 - `_load_catalogue(path)`: reads `--mcp-config`, or the empty catalogue when it was
   not given. Called before a port is bound, so a bad file fails at startup.
 - `configure_logging(debug)`: installs the root handler on `sys.stderr`, with the
@@ -205,6 +206,44 @@ are in [mcp_catalogue.py](mcp_catalogue.md).
 
 The file is read **here**, before a port is bound, so a mistyped path or key fails at
 startup with exit 2 rather than at the first `session/new`.
+
+## `--no-client-mcp-servers` is the other half of the catalogue
+
+`--mcp-config` made selection **available**. It did not make supply **refusable**: without
+this flag, `session/new` still accepts `mcpServers` from any client, so on a shared socket
+a client past the access key can still make this process spawn an arbitrary binary. The
+catalogue offered an alternative to that; this closes it.
+
+**Why a flag and not a default.** Refusing by default would break every client that names
+its own servers today — including `tests/interop/client.py` and a good part of the suite —
+and it would be *wrong* under `--transport stdio`, where the client spawned this process
+and supplying its own configuration is the canonical ACP arrangement. The risk is specific
+to a long-lived socket with clients the operator did not start, so the refusal is an
+opt-in an operator sets when binding somewhere shared.
+
+**Honoured on both transports** even so. The flag is most useful on a socket, but an
+operator wrapping this agent in a launcher may want it under stdio too, and one deployment
+config should mean one thing everywhere. A flag silently ignored on one transport is worse
+than either answer, and refusing the *combination* at startup would make a config
+non-portable for no safety gained.
+
+Three properties worth stating, all asserted in `tests/test_agent.py`:
+
+- **It refuses; it does not filter.** A non-empty `mcpServers` is `-32602`. A session
+  backed by fewer servers than were asked for is the failure mode the README warns about
+  for ACP's `skip-invalid-items`, and a second route to it would be worse than the door
+  this shuts.
+- **An empty list is still accepted.** That is exactly what a catalogue-only client sends,
+  and what every existing test sends.
+- **The refusal names the flag and lists the catalogue.** A client told "no" without being
+  told where servers *do* come from has nothing to do next. When there is no catalogue
+  either, it says that instead and points at `--mcp-config`, because a deployment with the
+  flag and no catalogue runs no MCP servers at all — legitimate to want, and very easy to
+  do by accident. `run()` says the same thing once at startup for the operator.
+
+Both doors go through one funnel: `agent._reject_unsupported_mcp_servers`, which
+`session/new` and `session/fork` both call **before** creating anything, so a refused
+request leaves nothing behind. See [agent.py](agent.md).
 
 ## Related
 

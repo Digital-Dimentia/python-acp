@@ -23,6 +23,10 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
 - MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
 - MCP content mapping (`mcp_content.py`): the seam between MCP's content model and ACP's. Unmappable content becomes a visible placeholder rather than a gap.
+- Slash commands (`commands.py`): the seven typed commands a person can type, and the hand-rolled `--flag` parser behind them. Six are announced; `/invokeTool` is recognised and deliberately not.
+- Outbound Markdown safety (`markdown.py`): every ACP client renders agent text as Markdown, so anything this agent says passes through here first — code spans and fences sized to survive it.
+- Post-response notifications (`announcer.py`): a stream observer, because `session/new` mints the id its own palette announcement needs. The SDK fires it strictly after the response bytes are written; both transports pass the same one.
+- Operator MCP catalogue (`mcp_catalogue.py`): the servers an operator configured for clients to select from, re-read on `SIGHUP`.
 - MCP elicitation forwarding (`elicitation.py`): an MCP server's `elicitation/create` becomes an ACP one, so a question from a backend reaches the only human in the system.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP tool annotations (`mcp_tools.py`): reads a server's `readOnlyHint`/`destructiveHint` hints as an ACP `ToolCall.kind`, so a permission prompt says *what* it is asking about. A hint relabels the question; it never withdraws it.
@@ -44,6 +48,10 @@ flowchart LR
     Paths["paths.py<br/>containment rule"]
     Terminals["terminals.py<br/>TerminalRegistry"]
     Content["mcp_content.py<br/>MCP content &rarr; ACP blocks"]
+    Commands["commands.py<br/>typed slash commands"]
+    Markdown["markdown.py<br/>outbound Markdown safety"]
+    Announcer["announcer.py<br/>post-response notifications"]
+    Catalogue["mcp_catalogue.py<br/>the operator's server list"]
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
@@ -62,10 +70,16 @@ flowchart LR
     CLI --> TStdio
     CLI --> TWs
     CLI --> Sessions
+    CLI --> Catalogue
+    Agent --> Catalogue
     CLI --> Backends
     CLI --> Terminals
     TStdio --> SDK
     TWs --> SDK
+    TStdio --> Announcer
+    TWs --> Announcer
+    SDK -. "stream observer, after the response is written" .-> Announcer
+    Announcer -. "announce_prepared_commands" .-> Agent
     TWs --> Errors
     SDK <--> Agent
     Agent --> Caps
@@ -76,6 +90,10 @@ flowchart LR
     Turns -.implemented by.-> Router
     Router --> Tools
     Router --> Content
+    Router --> Commands
+    Router --> Markdown
+    Commands --> Markdown
+    Content --> Markdown
     Router --> Paths
     Router --> Terminals
     Router --> Edits

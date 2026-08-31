@@ -732,7 +732,7 @@ need no table at all.
 | `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
-| `_BUILTIN_COMMANDS` | The seven commands this executor answers itself, in announcement order. Verbs only — no per-prompt or per-resource entry |
+| `_BUILTIN_COMMANDS` | The **announced** built-ins, in announcement order — six of the seven this executor answers, `/invokeTool` being recognised but deliberately unlisted. Verbs only: no per-prompt or per-resource entry |
 | `_resolve_server(verb, server, target, backends, separator)` | Which server a command goes to, and the runnable suggestion when a session has several |
 | `_require_capability(verb, server, backend, capability)` | Refuses a prompt or resource command the server's own handshake says it cannot answer |
 | `McpToolRouterExecutor._catalogue` | Every server's `prompts/list` or `resources/list`, plus the servers that declared no such capability. Two values, because "publishes none" and "does not implement it" want different reactions |

@@ -323,9 +323,10 @@ per text block.
 
 ### Commands for a person
 
-All seven are announced in `available_commands`, so a client's slash palette offers them
-without being taught, and each answers with plain multi-line text. The leading slash is
-optional on input.
+Six of the seven are announced in `available_commands`, so a client's slash palette offers
+them without being taught, and each answers with plain multi-line text. The leading slash
+is optional on input. `/invokeTool` is the exception — recognised but not advertised, since
+every tool now carries its own palette entry; see below.
 
 MCP servers publish three kinds of thing, and there is a command family for each.
 

@@ -4,7 +4,7 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **c5a70bf 2026-08-31**. These are a snapshot and go out of date with the
+Counted at commit **051674f 2026-08-31**. These are a snapshot and go out of date with the
 next commit, which is why the commit is stamped rather than the date alone. The
 stamp is ignored when checking whether the numbers are current — it names the
 commit *before* the one that committed this file, and always will.
@@ -35,7 +35,7 @@ does. Docstring totals below are therefore lower than a naive span count.
 | Test code to production code | 1.9 : 1 | 12,677 lines of test code against 6,543 of production code |
 | Prose share of production source | 35% | 3,627 docstring + 997 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
 | Co-located module docs | 5,730 lines | 24 files beside the 24 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
-| Markdown across the repo | 10,533 lines | 42 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
+| Markdown across the repo | 10,552 lines | 42 files, module docs included and this one excluded — its own length would otherwise be part of its own content |
 
 **Test functions are not test cases.** The table counts `def test_*`; pytest
 collects more, because `@pytest.mark.parametrize` expands one function into many.
@@ -81,10 +81,10 @@ here rather than a by-product, so it is counted per file and not only in total.
 
 | File | Lines |
 | --- | ---: |
-| [`README.md`](README.md) | 786 |
+| [`README.md`](README.md) | 787 |
 | [`src/python_acp/turn_mcp_router.md`](src/python_acp/turn_mcp_router.md) | 778 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 576 |
 | [`src/python_acp/mcp_stdio.md`](src/python_acp/mcp_stdio.md) | 562 |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 558 |
 | [`src/python_acp/agent.md`](src/python_acp/agent.md) | 536 |
 | [`AGENTS.md`](AGENTS.md) | 455 |
 | [`docs/module-boundaries.md`](docs/module-boundaries.md) | 439 |
@@ -123,7 +123,7 @@ here rather than a by-product, so it is counted per file and not only in total.
 | [`.agents/skills/beads/SKILL.md`](.agents/skills/beads/SKILL.md) | 80 |
 | [`tests/data/edits/markdown/guide.md`](tests/data/edits/markdown/guide.md) | 49 |
 | [`tests/data/edits/markdown/duplicates.md`](tests/data/edits/markdown/duplicates.md) | 9 |
-| **42 files** | **10,533** |
+| **42 files** | **10,552** |
 
 ## Test modules
 

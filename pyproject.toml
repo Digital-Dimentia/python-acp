@@ -38,12 +38,34 @@ classifiers = [
 # not take: it is ASGI-shaped and would pull starlette/uvicorn, and we already
 # pin websockets directly and drive our own transport (decision B4).
 #
+# ruamel.yaml is the one runtime pin that is not protocol surface, and the
+# justification has to be a different one. It is this: THERE IS NO YAML PARSER
+# IN THE STANDARD LIBRARY, and `edit_yaml.py`'s whole product is a verifier that
+# checks a splice against an *independent* parser. A hand-rolled loader sitting
+# beside the hand-rolled scanner would not be independent in the sense that
+# matters -- same author, same misreading of the spec, shared bugs -- so the
+# verifier would agree with itself and prove nothing. Buying a second opinion is
+# the point; the library IS the oracle.
+#
+# Cost, checked on PyPI before pinning: ruamel_yaml-0.19.1-py3-none-any.whl is
+# 118,102 bytes, declares requires-python >=3.9 (under this project's 3.11 floor,
+# with no upper bound, so it does not touch the SDK's <3.15 ceiling), and has
+# ZERO hard dependencies. It is pure Python and adds no wheel of its own beyond
+# that 118 KB -- two orders of magnitude below the pydantic cost table in
+# CLAUDE.md.
+#
+# NEVER TAKE THE `libyaml` OR `oldlibyaml` EXTRAS. Every ruamel.yaml.clib
+# requirement is gated behind them, and clib is a C extension: taking either
+# would reintroduce per-architecture wheels for a speed-up this project has no
+# use for, since it parses one file per edit and not a stream.
+#
 # websockets is on 17.0.1, not 12.0: `pyacp-tzd.3` rebuilt the WebSocket binding
 # on `websockets.asyncio.server`, and the legacy `websockets.serve` API that 12.0
 # offered is deprecated. 17.0.1 declares `requires-python >=3.11`, which is
 # exactly this project's floor, so the pin does not narrow the support window.
 dependencies = [
   "agent-client-protocol==0.12.1",
+  "ruamel.yaml==0.19.1",
   "websockets==17.0.1",
 ]
 

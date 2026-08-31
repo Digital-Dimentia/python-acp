@@ -306,6 +306,7 @@ class WebSocketAgentServer:
         terminals: TerminalRegistry | None = None,
         executor: TurnExecutor | None = None,
         catalogue: McpCatalogue | None = None,
+        accept_client_servers: bool = True,
         use_unstable_protocol: bool = True,
     ) -> None:
         # Before anything else, and in the constructor rather than in `start()`: the point
@@ -323,6 +324,10 @@ class WebSocketAgentServer:
         # The operator's MCP servers, shared by every connection for the same reason the
         # registries are: it is process configuration, read once at startup.
         self._catalogue = catalogue
+        # Process configuration like the catalogue, and read the same way: once, at
+        # startup, then handed to every per-connection agent. This is the transport the
+        # flag exists for — see `agent._reject_unsupported_mcp_servers`.
+        self._accept_client_servers = accept_client_servers
         self._use_unstable_protocol = use_unstable_protocol
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
         self._server: Server | None = None
@@ -407,6 +412,7 @@ class WebSocketAgentServer:
                 terminals=self._terminals,
                 executor=self._executor,
                 catalogue=self._catalogue,
+                accept_client_servers=self._accept_client_servers,
                 use_unstable_protocol=self._use_unstable_protocol,
             )
         finally:
@@ -421,6 +427,7 @@ async def serve_websocket(
     terminals: TerminalRegistry | None = None,
     executor: TurnExecutor | None = None,
     catalogue: McpCatalogue | None = None,
+    accept_client_servers: bool = True,
     use_unstable_protocol: bool = True,
 ) -> None:
     """Bind one already-accepted socket to a fresh agent and run until EOF.
@@ -442,6 +449,7 @@ async def serve_websocket(
         backends if backends is not None else McpBackendRegistry(),
         live_terminals,
         catalogue=catalogue,
+        accept_client_servers=accept_client_servers,
     )
     try:
         await run_agent(

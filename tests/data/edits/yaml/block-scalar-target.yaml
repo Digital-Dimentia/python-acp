@@ -1,0 +1,4 @@
+name: demo
+script: |
+  set -euo pipefail
+  echo hello

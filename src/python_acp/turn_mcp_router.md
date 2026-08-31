@@ -29,6 +29,7 @@ A **text** content block whose entire text is a JSON object:
 | `server` | only when the session opened **more than one** MCP server | Which server from `session/new`'s `mcpServers` |
 | `read` | no | `{argument: {path, line?, limit?}}` — files to read **through the client** into arguments |
 | `write` | no | `{path}` — where the tool's text output goes, **through the client** |
+| `edit` | no | `{path, format, ops}` — a verified structured change to one file, read and written **through the client**. Mutually exclusive with `write` |
 | `run` | no | `{argument: {command, args?, cwd?, env?, outputByteLimit?}}` — commands to run **in the client's terminal**, into arguments |
 
 Explicit `server`/`tool` fields rather than a single `"server/tool"` string: both names
@@ -82,6 +83,89 @@ become a symlink out of the tree a microsecond later — and says closing that n
 this side can do is send the resolved path, so the client is not asked to re-walk links we
 already walked, and that is what it does. Closing the window properly is the *client's*
 `fs/*` implementation, and no ACP agent can do it on the client's behalf.
+
+## An edit is the one place this agent authors bytes
+
+Every other directive is neutral carriage. `read` puts a client-named file into a tool
+argument; `write` puts the **tool's own** output into a file. When those bytes are wrong it
+is the tool's fault and the transcript proves it — that is the thesis
+`tests/test_executor_neutrality.py` and [paths.md](paths.md)'s "this process opens nothing"
+stand behind.
+
+`edit` breaks it, knowingly. The agent reads the file, computes a splice, and writes back a
+result no tool ever produced: **the bytes are ours.** The decision to allow that, and what
+it is paid for with, is recorded in
+[ARCHITECTURE.md](../../ARCHITECTURE.md) — "Structured edits, and the neutrality this
+deliberately trades away". The short version: the alternative on offer was not "no
+transformation", it was the same transformation done by a model emitting a whole file into
+`write`, with none of the evidence. [edits.py](edits.md) will not return a result it cannot
+verify, and its last step is *every byte outside the addressed spans is unchanged*.
+
+```json
+{"tool": "render-changelog",
+ "arguments": {"since": "v1.2"},
+ "edit": {"path": "/abs/CHANGELOG.md",
+          "format": "markdown",
+          "ops": [{"kind": "set",
+                   "address": "/# Changes/## Unreleased",
+                   "fromOutput": true}]}}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `path` | yes | Absolute, inside the session's roots, resolved before it goes on the wire — like every other path here |
+| `format` | yes | `json`, `yaml`, or `markdown`. **Named, never sniffed from the extension** |
+| `ops` | yes, non-empty | `{kind, address}` plus one value source — see below |
+
+`format` is named because an extension is not a promise about a file's contents: a `.yml`
+full of Go template directives is not YAML and a `.tf.json` is JSON. `edits.apply` takes a
+dialect rather than a path for exactly that reason, and this module does not add the guess
+back on top.
+
+`address` is an RFC 6901 pointer. For JSON and YAML that is the ordinary thing; for
+Markdown it is a **heading path** with the `#` markers included (`/# Install/## macOS`), because without them
+`/# API/## Errors` and `/# API/### Errors` are the same address in a document that has both.
+The empty pointer is the document root — for Markdown, the preamble before the first
+heading — so it is a valid address and not the same as omitting the field.
+
+### One value source per op, and `fromOutput` is the interesting one
+
+Every op but `delete` names exactly one of three; `delete` names none.
+
+| Source | Meaning |
+|---|---|
+| `"value"` | Raw source text **in the target format**. Not a JSON value: an object would need a serialiser per format, which is the emitter [edits.py](edits.md) exists without |
+| `"scalar"` | A JSON scalar, rendered by the format's scalar-only renderer — the common case, where quoting a string correctly for a format you do not know is the only hard part |
+| `"fromOutput": true` | The tool's own text output, joined from its text blocks exactly as `write` joins them |
+
+`fromOutput` is what makes `edit` the precise sibling of `write` rather than a second
+unrelated feature: **the same bytes, spliced at an address instead of over the whole file.**
+An op that names it is the reason the tool call is in the block at all.
+
+`write` and `edit` in one block is refused. Two destinations for one tool's output is the
+same guess `server` already declines to make.
+
+### Three rules that are not obvious
+
+- **The whole file is read — no `line`/`limit` window.** The verifier's last step asserts
+  something about every untouched byte; a window would make that assertion about a fragment
+  while the write replaces a file. That is the one way this could quietly truncate.
+- **An edit refusal is a failed tool call**, with the reason as a text block — never a
+  JSON-RPC error and never a failed turn. The same rule as a client erroring on `fs/*`, and
+  it covers all of it: an unparseable target, an address that does not resolve, an ambiguous
+  one, a value fragment that does not parse, and a verification failure.
+- **`_write_file`'s empty-content guard is deliberately not inherited, and no shrink
+  heuristic replaces it.** That guard exists because tool output is unverified, so writing an
+  empty result over a whole file is a truncation dressed as a write. An edit result carries a
+  proof that nothing outside the address moved, so an op that empties one value is an
+  ordinary edit and refusing it would refuse a correct one. A heuristic layered on a proof
+  adds no information and will eventually block a legitimate delete — this paragraph is here
+  because the next reader will want to add one.
+
+On success the tool call's content gains two blocks: a `FileEditToolCallContent`
+(`type: "diff"`) whose `oldText`/`newText` are **whole-file contents**, and a fenced
+`diff`-tagged text block carrying the unified diff for a human. [mcp_content.py](mcp_content.md)
+builds both; `edits.py` never imports `acp.schema`.
 
 ## Commands run on the client's machine, and are always given back
 
@@ -459,7 +543,7 @@ Constructed with the `McpBackendRegistry`, not by reading one off `TurnContext`.
 directly, so the context does not widen for one executor's dependency. Servers were opened
 **and handshaked** during `session/new`, so every client here is live.
 
-## Seven typed commands sit in front of the JSON convention
+## Seven typed commands sit in front of the JSON convention, and six are announced
 
 They are recognised before the JSON parse, in `execute`, and only when the prompt is **a
 single text block**. A multi-block prompt is a composed request from a program; treating
@@ -470,6 +554,7 @@ than declining to recognise it.
 | --- | --- | --- |
 | `/tools` | `_list_tools`, from the turn's `ToolCatalogue` | `end_turn` |
 | `/invokeTool` | `_from_command` → the same `Invocation` JSON builds | the turn's |
+| *(and every MCP tool under its own name — `/alpha/echo`, sugar for the row above)* | | |
 | `/listPrompts` | `_list_prompts` | `end_turn` |
 | `/promptShow` | `_expand_prompt` → `prompts/get`, messages emitted | `end_turn` |
 | `/promptInvoke` | `_expand_prompt`, which validates and then refuses | `refusal` |
@@ -478,6 +563,35 @@ than declining to recognise it.
 
 `end_turn` rather than `refusal` for a listing: the turn did exactly what it was asked to
 do, and `refusal` would be the wrong stop reason for a command that worked.
+
+### Six of the seven are announced, and `/invokeTool` is the one that is not
+
+**Recognised, and deliberately not in the palette** (`pyacp-b50`). `/invokeTool` existed to
+reach a tool the long way round. Since `pyacp-acn` every tool is announced under its own
+name, so `/alpha/echo --text hi` is the ordinary way to call one, and a palette entry for
+the verb teaches a detour past what the client already shows.
+
+It is **not removed**, because it is the escape hatch the sugar cannot cover:
+
+- **a tool whose name contains a slash.** The sugar splits on the first slash and treats
+  the rest as the tool name; `/invokeTool` takes a free-typed target;
+- **the bare `/invokeTool echo --text hi`**, which omits the server. That is legal on a
+  single-server session and the sugar has no equivalent — a bare first token cannot be
+  told apart from prose without swallowing every non-JSON prompt.
+
+Both keep working because **`available_commands` is a discovery aid, not an allowlist**: a
+prompt is free text and nothing on the parse path consults the announcement. Removing the
+*command* would narrow what works; removing its *palette entry* only stops advertising a
+verb most users no longer need.
+
+`/tools` stays in both. A palette entry carries a name and one hint line; `/tools` prints
+every parameter with its type, required flag and description, and every listing footer
+points at it. They answer different questions.
+
+`commands.UNANNOUNCED_COMMANDS` records the omission, and
+`test_the_announced_and_the_unannounced_partition_every_command` asserts that it and
+`_BUILTIN_COMMANDS` together cover `COMMAND_NAMES` — so a command can never fall out of
+both and become undiscoverable by accident.
 
 `/tools` answers from the turn's own `ToolCatalogue`, so it costs no `tools/list` beyond
 the one the announcement already paid. **The other two listings have no catalogue behind
@@ -608,15 +722,17 @@ need no table at all.
 | Symbol | Purpose |
 |---|---|
 | `McpToolRouterExecutor(backends)` | The executor. `agent.py`'s default |
-| `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title`, `reads`, `write`, `locations` |
+| `Invocation` | One parsed call: `tool`, `arguments`, `server`, `title`, `reads`, `write`, `edit`, `locations` |
 | `FileRead` / `FileWrite` | One file to read into an argument, and where the output goes. Both carry the **resolved** path |
+| `FileEdit` / `EditOp` | One file to edit, its dialect, and the ops. `EditOp` is not an `edits.Op` yet: an op taking `fromOutput` has no value until the tool answers, and `Op.__post_init__` requires one |
+| `DIALECTS` | The formats `edit.format` may name, mapped to the `edits.Dialect` that handles each |
 | `CommandRun` | One command to run in a client terminal, into one tool argument — `FileRead`'s mirror. `output_byte_limit` is never absent |
 | `Session.running_tool_call` (written here) | Set to the live `toolCallId` for the length of each `tools/call` and cleared in `finally`, so a server's `elicitation/create` can name the call it interrupted. See [elicitation.md](elicitation.md) |
 | `PromptConventionError` | A prompt this executor will not run. Caught by `execute` and turned into a refusal; a `ValueError` so a future caller that let it escape gets `-32602`. `explains_convention` says whether the refusal appends `CONVENTION` |
 | `UnsupportedByClientError` | The prompt correctly asked for a client method the client never advertised. A refusal, **not** an `UngatedClientCallError` |
 | `CONVENTION` | The explanation appended to every refusal |
 | `DECLINED_BLOCKS` | Each non-text block type and why it is refused |
-| `_BUILTIN_COMMANDS` | The seven commands this executor answers itself, in announcement order. Verbs only — no per-prompt or per-resource entry |
+| `_BUILTIN_COMMANDS` | The **announced** built-ins, in announcement order — six of the seven this executor answers, `/invokeTool` being recognised but deliberately unlisted. Verbs only: no per-prompt or per-resource entry |
 | `_resolve_server(verb, server, target, backends, separator)` | Which server a command goes to, and the runnable suggestion when a session has several |
 | `_require_capability(verb, server, backend, capability)` | Refuses a prompt or resource command the server's own handshake says it cannot answer |
 | `McpToolRouterExecutor._catalogue` | Every server's `prompts/list` or `resources/list`, plus the servers that declared no such capability. Two values, because "publishes none" and "does not implement it" want different reactions |

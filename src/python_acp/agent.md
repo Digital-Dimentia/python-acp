@@ -317,6 +317,83 @@ the backends are told they may send `elicitation/create`; `None` means they neve
 will put on the wire. What the forwarder reads *later* is whoever is connected then, and
 [elicitation.md](elicitation.md) records why those can differ.
 
+### A reloaded catalogue reaches a session at its next request
+
+`SIGHUP` re-reads `--mcp-config` and swaps the entries into the catalogue object every
+per-connection agent holds ([mcp_catalogue.md](mcp_catalogue.md)). What that *means* for a
+session already open is decided here, in `_reconcile_catalogue`, and the first decision is
+**when**.
+
+**Not at the signal.** A reload has no client to notify. The WebSocket transport builds one
+`PythonAcpAgent` per connection, `announce_config_options` sends through `self.client`, and
+nothing maps a session to the connection that cares about it — a `Session` holds no client
+handle, and it cannot, because a session outlives connections and can be resumed from a
+different one. A sweep at signal time would therefore have to push
+`config_option_update` down *some* connection, and every choice is wrong: telling a client
+about a session it never touched is worse than telling it late.
+
+So the reconcile runs where a client is definitely present and definitely the right one:
+
+| Where | Why there |
+|---|---|
+| `session/prompt`, before the turn task exists | The turn then runs against what the operator has deployed. It is also the only ordering that works — a turn holds its backend map for its whole life, so a server added underneath it would be invisible to it |
+| `session/resume` | A client picking a session back up, and it happens before the response hands over the modes and options, so what it reads is already current |
+
+A session nobody is using has no observable state to be stale, so "late" costs nothing.
+The common path is an integer comparison: `McpCatalogue.generation` against the generation
+this session was last reconciled to. A session created after a reload is born current.
+
+**A turn already running leaves the session stale on purpose**, to be retried at the next
+request. Changing a session's backends under a turn is the broken pipe `_select_mcp_server`
+refuses, for the same reason and with the same alternative.
+
+#### The four cases
+
+| Case | Answer | Why |
+|---|---|---|
+| An entry was **added** | The session gains the toggle, **off** — whatever `enabled` says | `enabled` means "a *new* session starts with it on": a statement about session creation. Honouring it here spawns a subprocess for a session that never asked |
+| An entry was **removed** while the session had it on | Tear the server down, drop the toggle | Leaving it leaves an `mcp/*` option `entry_for_config_id` can no longer resolve, so switching it back on quietly becomes a stored flag instead of an action — a worse failure than the teardown, and a silent one |
+| An entry **changed** while the session had it on | Respawn from the new recipe | A subprocess that no longer matches the catalogue is the drift "read once, at startup" existed to prevent, and waiting for the next session means a session open for a week never gets the operator's fix. Compared against `backends.specs`, because a toggle records *that* a server is on and never *what* it is |
+| The file was **invalid** | Never reaches here | `cli.py` calls `replace` only once `load` has returned, so a broken file leaves the running catalogue untouched and there is nothing to reconcile |
+
+An entry that did not change is **not** respawned — the regression that would make every
+reload expensive and visible.
+
+**A spawn that fails costs the toggle, not the session.** The option goes off, the failure
+is logged for the operator, and the client's request succeeds. The client did not ask for
+this; failing its prompt because a recipe it never wrote is broken bills the wrong party.
+
+### An operator can refuse client-supplied servers entirely
+
+`_reject_unsupported_mcp_servers` is the one funnel every client-supplied server list goes
+through, on both `session/new` and `session/fork`, and it now makes **two** refusals. The
+operator's comes first, because it is the operative reason: telling a client its
+`HttpMcpServer` is the wrong transport, when the answer would have been no for a stdio one
+too, sends it to fix the wrong thing.
+
+By default `mcpServers` is accepted from anyone, which is right for the topology ACP was
+designed around — over stdio the client *spawned* this process, and a parent configuring
+its own child is the canonical arrangement. It is wrong for a long-lived socket clients
+connect to afterwards, where `command` and `args` from a client past the access key is a
+request to execute an arbitrary binary. `--no-client-mcp-servers` is the opt-in;
+[cli.md](cli.md) carries why it is a flag rather than a default and why it is honoured on
+both transports.
+
+It **refuses** rather than dropping the list, which is the opposite of what the next
+section describes ACP itself doing — deliberately. A silent drop is the protocol's own
+posture for an entry it cannot parse; a *policy* refusal that behaved the same way would
+hand back a session backed by fewer servers than were asked for while the operator
+believed a door was shut. An empty list is not a refusal: it is exactly what a
+catalogue-only client sends.
+
+Both callers run the funnel **before** creating anything, so a refused request leaves no
+session and no subprocess behind.
+
+Note that the transport half of that method is unreachable over the wire: an `http` or
+`sse` entry is dropped by `skip-invalid-items` before dispatch — see the next section —
+so the agent never sees one. It stands for a direct caller, and for a schema that one day
+models a transport this agent does not advertise.
+
 ### A dropped `mcpServers` entry is accepted, and that is a decision
 
 `NewSessionRequest.mcp_servers` carries a `skip_invalid_items` wrap validator, so an entry
@@ -438,6 +515,8 @@ in that module's table.
 | `PythonAcpAgent.connected_client` | The same facade or `None` — the non-raising form, for cleanup after a connection ends |
 | `PythonAcpAgent.terminals` | The process-wide [`TerminalRegistry`](terminals.md) this agent's turns create through |
 | `PythonAcpAgent.client_capabilities` | What the client declared at `initialize`, or `None` before it ran — Phase 4 gates every client call on this |
+| `PythonAcpAgent(..., accept_client_servers=)` | Whether a client may supply MCP server recipes. `True` by default; `cli.py`'s `--no-client-mcp-servers` sets it false |
+| `PythonAcpAgent._reconcile_catalogue(session)` | Brings one open session into line with a reloaded catalogue, at that session's own next request |
 
 `client_capabilities` distinguishes `None` (no `initialize` yet) from "declared nothing";
 the two are deliberately not collapsed.

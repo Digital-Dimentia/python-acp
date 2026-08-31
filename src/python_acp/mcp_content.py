@@ -41,6 +41,15 @@ nothing" — a wrong answer — rather than "there was something here we could n
 Nothing is lost either way: `ToolCallProgress.rawOutput` already carries the server's
 result verbatim, so a client that wants the original always has it. The placeholder is
 for the humans.
+
+## One thing here is not MCP content: `to_edit_content`
+
+`edits.EditResult` is ours, not a server's, and it lands here anyway because this module
+is where "one of our value types becomes ACP tool-call content" already lives.
+[edits.py](edits.md) must not import `acp.schema` — that is what keeps it a plain library
+a unit test can drive with no connection — so the conversion has to happen somewhere, and
+a second module holding one function would be a worse home than the one that already owns
+the direction.
 """
 
 from __future__ import annotations
@@ -59,7 +68,11 @@ from acp.helpers import (
     text_block,
     tool_content,
 )
+from acp.helpers import tool_diff_content
 from acp.schema import Annotations
+
+from python_acp.edits import EditResult
+from python_acp.markdown import fenced_lines
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +118,24 @@ def to_tool_call_content(result: dict[str, Any]) -> list[ToolCallContentVariant]
     """
     blocks = [tool_content(to_content_block(block)) for block in result.get("content") or []]
     return blocks or None
+
+
+def to_edit_content(result: EditResult) -> list[ToolCallContentVariant]:
+    """A verified edit as two tool-call content blocks: the diff, then a readable one.
+
+    **`Diff.old_text`/`new_text` are whole-file contents**, not a diff string — the schema
+    says "The new content after modification" — so `original` and `updated` go in
+    verbatim. Handing `unified()` to `new_text` is a mistake that typechecks and would
+    make a client replace the file with a patch.
+
+    The human-readable diff is a second, separate block, **fenced** with a `diff` info
+    string. A client renders tool-call text as Markdown, where a leading `-` is a list
+    bullet: unfenced, the column carrying the whole meaning of the diff is eaten.
+    """
+    return [
+        tool_diff_content(path=result.path, old_text=result.original, new_text=result.updated),
+        tool_content(text_block("\n".join(fenced_lines(result.unified().splitlines())))),
+    ]
 
 
 def _map(kind: str, block: dict[str, Any]) -> Any:

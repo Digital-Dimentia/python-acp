@@ -291,7 +291,9 @@ async def test_a_new_session_is_told_its_commands_after_the_response() -> None:
     # The fixture server's tools, and the built-ins the router always offers.
     names = [command["name"] for command in update["availableCommands"]]
     assert any(name.startswith("tools/") for name in names)
-    assert "invokeTool" in names
+    assert "tools" in names
+    # And not `invokeTool`, which is recognised but deliberately unannounced (`pyacp-b50`).
+    assert "invokeTool" not in names
 
     order = [
         index
@@ -1210,3 +1212,49 @@ async def test_the_websocket_names_a_curly_quote() -> None:
     assert "curly quotes" in said
     assert '--text "hello there"' in said
     assert_markdown_safe(said)
+
+
+async def test_the_refusal_of_client_servers_reaches_the_socket_it_exists_for() -> None:
+    """`--no-client-mcp-servers` is a socket-shaped concern, so it is asserted over a
+    socket: the value has to survive `cli.py` -> `WebSocketAgentServer` -> the per-
+    connection agent, and a flag that stopped anywhere along that chain would leave an
+    operator believing a door was shut.
+    """
+    backends = McpBackendRegistry()
+    sessions = SessionRegistry(on_close=backends.close)
+    websocket = FakeWebSocket()
+    connection = asyncio.create_task(
+        serve_websocket(
+            websocket, sessions=sessions, backends=backends, accept_client_servers=False
+        )
+    )
+    try:
+        await websocket.ask(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}},
+            }
+        )
+        reply = await websocket.ask(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/new",
+                "params": {
+                    "cwd": "/work",
+                    "mcpServers": [
+                        {"name": "mine", "command": "python", "args": ["x.py"], "env": []}
+                    ],
+                },
+            }
+        )
+    finally:
+        websocket.hang_up()
+        await asyncio.wait_for(connection, timeout=15)
+        await sessions.close_all()
+
+    assert reply["error"]["code"] == -32602
+    assert "--no-client-mcp-servers" in str(reply["error"]["data"])
+    assert len(sessions) == 0

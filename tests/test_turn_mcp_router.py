@@ -44,7 +44,13 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 
-from python_acp.commands import CommandError, parse_command
+from python_acp.commands import (
+    COMMAND_NAMES,
+    LIST_TOOLS,
+    UNANNOUNCED_COMMANDS,
+    CommandError,
+    parse_command,
+)
 from python_acp.mcp_registry import McpBackendRegistry
 from python_acp.mcp_stdio import MCPProtocolError
 from python_acp.sessions import SessionRegistry
@@ -2931,6 +2937,61 @@ async def test_every_announced_command_is_one_the_parser_accepts() -> None:
         )
 
 
+def test_the_announced_and_the_unannounced_partition_every_command() -> None:
+    """A new command must land in one set or the other, never neither.
+
+    Two things could go wrong and this catches both: a command added to the parser and
+    never announced, which no client would discover; and one dropped from the palette
+    without being recorded as deliberate, which reads as an accident to the next person to
+    diff the announcement.
+    """
+    announced = {command.name for command in _BUILTIN_COMMANDS}
+
+    assert announced.isdisjoint(UNANNOUNCED_COMMANDS)
+    assert announced | UNANNOUNCED_COMMANDS == COMMAND_NAMES
+
+
+async def test_invoke_tool_still_runs_although_it_is_not_announced() -> None:
+    """`available_commands` is a discovery aid, not an allowlist.
+
+    Nothing on the parse path consults it and a prompt is free text, so the verb keeps
+    working for the two things the per-tool sugar cannot express — a tool whose name
+    contains a slash, and the bare form a single-server session allows. Dropping the
+    palette entry narrows what is *advertised*; this is the assertion that it did not
+    narrow what *works*.
+    """
+    async with Harness("alpha") as harness:
+        result = await harness.run(typed("/invokeTool alpha/echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call")[0].title == "alpha/echo"
+    assert "invokeTool" not in [
+        c.name for c in harness.of("available_commands_update")[0].available_commands
+    ]
+
+
+async def test_the_bare_form_the_sugar_cannot_express_still_works() -> None:
+    """`/invokeTool echo --text x` omits the server, which is legal on a single-server
+    session. The sugar has no equivalent: a bare first token cannot be told apart from
+    prose without swallowing every non-JSON prompt. This is the reason the command was
+    kept rather than removed."""
+    async with Harness("alpha") as harness:
+        result = await harness.run(typed("/invokeTool echo --text hi"))
+
+    assert result.stop_reason == "end_turn"
+    assert harness.of("tool_call")[0].title == "alpha/echo"
+
+
+async def test_tools_stays_in_the_palette_because_it_answers_a_different_question() -> None:
+    """A palette entry carries a name and one hint line; `/tools` prints every parameter
+    with its type, required flag and description. Every listing footer points at it."""
+    async with Harness("alpha") as harness:
+        await harness.run(typed("/tools"))
+
+    names = [c.name for c in harness.of("available_commands_update")[0].available_commands]
+    assert LIST_TOOLS in names
+
+
 async def test_a_tool_is_called_by_its_own_palette_name() -> None:
     """`/alpha/echo --text hi` is sugar for `/invokeTool alpha/echo --text hi`.
 
@@ -3018,3 +3079,353 @@ async def test_the_palette_name_and_invoke_tool_produce_the_same_call() -> None:
     one = sugar.of("tool_call")[0]
     two = verbose.of("tool_call")[0]
     assert (one.title, one.kind, one.raw_input) == (two.title, two.kind, two.raw_input)
+
+
+# ---------------------------------------------------------------------------
+# Structured edits — the one place this agent authors bytes of its own
+# ---------------------------------------------------------------------------
+
+
+def edit_block(path: Path, fmt: str, *ops: dict[str, Any], **payload: Any) -> Any:
+    payload.setdefault("tool", "echo")
+    return block(edit={"path": str(path), "format": fmt, "ops": list(ops)}, **payload)
+
+
+async def test_a_structured_edit_is_applied_and_written_back(tmp_path: Path) -> None:
+    """The whole point: one addressed value changes and the file is otherwise identical."""
+    target = tmp_path / "package.json"
+    target.write_text('{\n  "name": "demo",\n  "version": "1.0.0"\n}\n')
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                target,
+                "json",
+                {"kind": "set", "address": "/version", "scalar": "2.0.0"},
+                arguments={"text": "ignored"},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert target.read_text() == '{\n  "name": "demo",\n  "version": "2.0.0"\n}\n'
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "completed"
+    assert "1 op applied and verified (semantic)" in last.content[-1].content.text
+
+
+async def test_the_edit_reaches_the_client_as_a_whole_file_diff(tmp_path: Path) -> None:
+    """`Diff.old_text`/`new_text` are file contents, not a patch — the mistake that
+    typechecks. The unified diff rides alongside as its own fenced block."""
+    target = tmp_path / "package.json"
+    before = '{\n  "name": "demo",\n  "version": "1.0.0"\n}\n'
+    target.write_text(before)
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2.0.0"})
+        )
+
+    content = harness.of("tool_call_update")[-1].content
+    diff = content[-3]
+    assert diff.type == "diff"
+    assert diff.path == str(target.resolve())
+    assert diff.old_text == before
+    assert diff.new_text == target.read_text()
+    readable = content[-2].content.text
+    assert readable.startswith("```") and readable.rstrip().endswith("```")
+    assert '-  "version": "1.0.0"' in readable
+
+
+async def test_an_op_can_take_the_tools_own_output_as_its_value(tmp_path: Path) -> None:
+    """`fromOutput` is what makes `edit` the precise sibling of `write`: the same bytes,
+    spliced at an address instead of over the whole file."""
+    target = tmp_path / "CHANGELOG.md"
+    target.write_text("# Changes\n\n## Unreleased\n\nnothing yet\n\n## 1.0\n\nshipped\n")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                target,
+                "markdown",
+                {"kind": "set", "address": "/# Changes/## Unreleased", "fromOutput": True},
+                arguments={"text": "\n- a new line\n\n"},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert target.read_text() == "# Changes\n\n## Unreleased\n\n- a new line\n\n## 1.0\n\nshipped\n"
+
+
+async def test_an_empty_tool_output_is_a_legal_splice(tmp_path: Path) -> None:
+    """`_write_file`'s empty-content guard is deliberately not inherited. There an empty
+    result truncates a whole file on a tool's unverified say-so; here the verifier has
+    already proved nothing outside the address moved, so emptying one section is an
+    ordinary edit and refusing it would refuse a correct one."""
+    target = tmp_path / "notes.md"
+    target.write_text("# Notes\n\n## Scratch\n\ndelete me\n\n## Keep\n\nkept\n")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                target,
+                "markdown",
+                {"kind": "set", "address": "/# Notes/## Scratch", "fromOutput": True},
+                arguments={"text": ""},
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert target.read_text() == "# Notes\n\n## Scratch\n## Keep\n\nkept\n"
+    assert harness.of("tool_call_update")[-1].status == "completed"
+
+
+async def test_every_untouched_byte_survives_the_edit(tmp_path: Path) -> None:
+    """A file whose formatting no emitter would reproduce. Locate-then-splice means the
+    rest of it is not merely preserved but untouched."""
+    target = tmp_path / "odd.json"
+    before = '{"a":1,\n\n\t"b" : [1,2,   3],\n  "c":{"d":  "keep"}\n}'
+    target.write_text(before)
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/b/1", "scalar": 99})
+        )
+
+    after = target.read_text()
+    assert after == before.replace("[1,2,   3]", "[1,99,   3]")
+
+
+async def test_an_edit_that_changes_nothing_writes_nothing(tmp_path: Path) -> None:
+    """Setting a value to what it already holds verifies fine and is not worth a write."""
+    target = tmp_path / "same.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "1.0.0"})
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.writes == []
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "completed"
+    assert "already holds these values" in last.content[-1].content.text
+
+
+async def test_an_edit_refusal_is_a_failed_call_and_not_a_failed_turn(tmp_path: Path) -> None:
+    """Mirrors the rule for a client erroring on `fs/*`: the turn is fine, one operation
+    in it was refused, and the refusal names the address rather than a JSON-RPC code."""
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/nope", "scalar": 1})
+        )
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert "/nope" in last.content[-1].content.text
+    assert harness.client.writes == []
+    assert target.read_text() == '{"version": "1.0.0"}'
+
+
+async def test_an_unparseable_target_is_refused_rather_than_edited(tmp_path: Path) -> None:
+    """A file we cannot read is a file we do not edit — step 1 of the verifier."""
+    target = tmp_path / "broken.json"
+    target.write_text("{not json at all")
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/a", "scalar": 1})
+        )
+
+    assert harness.of("tool_call_update")[-1].status == "failed"
+    assert harness.client.writes == []
+
+
+async def test_a_failed_tool_is_not_edited_into_the_file(tmp_path: Path) -> None:
+    """Same asymmetry as a write: the edit belongs to this call, and the call failed."""
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(
+                tool="boom",
+                edit={
+                    "path": str(target),
+                    "format": "json",
+                    "ops": [{"kind": "set", "address": "/version", "scalar": "2.0.0"}],
+                },
+            )
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert harness.client.writes == []
+    assert "the tool failed" in harness.of("tool_call_update")[-1].content[-1].content.text
+
+
+async def test_a_client_that_errors_on_the_edits_write_marks_the_call_failed(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+    client = FilesystemClient(write_error=RequestError(-32603, "read-only filesystem"))
+
+    async with fs_harness(tmp_path, client=client) as harness:
+        result = await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2.0.0"})
+        )
+
+    assert result.stop_reason == "end_turn"
+    last = harness.of("tool_call_update")[-1]
+    assert last.status == "failed"
+    assert "-32603: read-only filesystem" in last.content[-1].content.text
+
+
+async def test_an_edit_needs_both_filesystem_capabilities(tmp_path: Path) -> None:
+    """An edit reads the file it is verified against and writes the result back, so half
+    a filesystem cannot serve it — and the refusal happens before anything runs."""
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path, capabilities=has_fs(read=True, write=False)) as harness:
+        result = await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2"})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "fs.writeTextFile" in harness.refusal()
+    assert harness.tool_calls() == []
+
+    async with fs_harness(tmp_path, capabilities=has_fs(read=False, write=True)) as second:
+        result = await second.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2"})
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "fs.readTextFile" in second.refusal()
+
+
+async def test_an_edit_path_is_contained_like_every_other_path(tmp_path: Path) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                Path("/etc/python-acp-should-never-edit"),
+                "json",
+                {"kind": "set", "address": "/a", "scalar": 1},
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert harness.client.writes == []
+    assert harness.tool_calls() == []
+
+
+async def test_write_and_edit_in_one_block_are_refused(tmp_path: Path) -> None:
+    """Two destinations for one tool's output is the same guess `server` refuses to make."""
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            block(
+                tool="echo",
+                write={"path": str(tmp_path / "out.txt")},
+                edit={
+                    "path": str(tmp_path / "in.json"),
+                    "format": "json",
+                    "ops": [{"kind": "set", "address": "/a", "scalar": 1}],
+                },
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "two destinations" in harness.refusal()
+
+
+async def test_the_format_is_named_and_never_guessed(tmp_path: Path) -> None:
+    """An extension is not a promise about a file's contents, so there is no sniffing and
+    an unknown format is a refusal that lists the real ones."""
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(tmp_path / "x.toml", "toml", {"kind": "set", "address": "/a", "scalar": 1})
+        )
+
+    assert result.stop_reason == "refusal"
+    for known in ("json", "markdown", "yaml"):
+        assert known in harness.refusal()
+
+
+async def test_an_op_with_two_value_sources_is_refused_before_anything_runs(
+    tmp_path: Path,
+) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                tmp_path / "x.json",
+                "json",
+                {"kind": "set", "address": "/a", "scalar": 1, "fromOutput": True},
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "exactly one of" in harness.refusal()
+    assert harness.tool_calls() == []
+
+
+async def test_a_delete_op_takes_no_value(tmp_path: Path) -> None:
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(
+                tmp_path / "x.json", "json", {"kind": "delete", "address": "/a", "scalar": 1}
+            )
+        )
+
+    assert result.stop_reason == "refusal"
+    assert "takes no" in harness.refusal()
+
+
+async def test_a_dry_run_says_which_file_it_would_have_edited(tmp_path: Path) -> None:
+    """A preview that named the tool but stayed quiet about the file it was about to
+    rewrite would be a preview of the wrong thing."""
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path) as harness:
+        in_mode(harness, "dry-run")
+        await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2.0.0"})
+        )
+
+    note = harness.of("tool_call_update")[-1].content[0].content.text
+    assert "Would edit" in note and "set /version" in note
+    assert target.read_text() == '{"version": "1.0.0"}'
+
+
+async def test_the_edited_file_is_a_tool_call_location(tmp_path: Path) -> None:
+    """`locations` is what lets a client show — or follow — which file a call is about."""
+    target = tmp_path / "package.json"
+    target.write_text('{"version": "1.0.0"}')
+
+    async with fs_harness(tmp_path) as harness:
+        await harness.run(
+            edit_block(target, "json", {"kind": "set", "address": "/version", "scalar": "2.0.0"})
+        )
+
+    assert [loc.path for loc in harness.of("tool_call")[0].locations] == [str(target.resolve())]
+
+
+async def test_a_yaml_edit_runs_through_the_same_directive(tmp_path: Path) -> None:
+    """The third dialect is a registration, not a second code path — the directive, the
+    gates, the diff content and the refusal rules are the ones already tested above."""
+    target = tmp_path / "kustomization.yaml"
+    target.write_text("# keep me\nnamespace: payments\nresources:\n- ../../base\n")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(target, "yaml", {"kind": "set", "address": "/namespace", "scalar": "billing"})
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert target.read_text() == "# keep me\nnamespace: billing\nresources:\n- ../../base\n"
+    assert harness.of("tool_call_update")[-1].content[-3].type == "diff"

@@ -22,6 +22,11 @@ that catalogue and nothing else: a file in, and two things out —
   ride `NewSessionResponse.configOptions`, `session/set_config_option` changes them, and
   `config_option_update` announces a change.
 
+Selection being *available* is not the same as supply being *refusable*, and this module
+only does the first: `mcpServers` is still accepted from any client by default. The other
+half is `agent.py`'s `--no-client-mcp-servers` (`pyacp-80k`), which refuses a client's list
+outright and points it here.
+
 **This is not `--mcp-command` coming back** (`pyacp-sld.4`). That was *one* server, shared
 by every client, with a passthrough surface that let a client drive it directly. A
 catalogue holds **recipes**: every session still spawns its own subprocesses, still gets
@@ -48,6 +53,19 @@ have. A bare top-level map works as well.
 
 **Order is the file's order**, not sorted: it is what a settings panel shows, and that is
 the operator's to decide.
+
+## Reloadable, since `pyacp-izr`
+
+The file was read once at startup and never again, on the reasoning that a catalogue
+changing under a running process would leave open sessions advertising toggles for servers
+that no longer exist. That objection was right and is now *answered* rather than avoided:
+`SIGHUP` re-reads the file (`cli._install_reload`), `replace` swaps the entries **in
+place** so the one object every per-connection agent holds is updated at once, and
+`agent._reconcile_catalogue` brings each open session into line at its next request — where
+there is a client to tell.
+
+A file that does not parse changes nothing: `load` builds a new catalogue and raises
+without touching the running one, so there is no half-applied state to be in.
 
 ## Why the validation is loud
 
@@ -147,6 +165,32 @@ class McpCatalogue:
 
     def __init__(self, entries: Sequence[CatalogueEntry] = ()) -> None:
         self._entries = tuple(entries)
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """How many times this catalogue has been replaced. `0` for one never reloaded.
+
+        A session records the generation it was last reconciled against, so the common
+        path — no reload since — is an integer comparison rather than a diff of two lists.
+        """
+        return self._generation
+
+    def replace(self, entries: Sequence[CatalogueEntry]) -> None:
+        """Swap the configured servers **in place**, bumping `generation`.
+
+        In place, and this is the load-bearing part. The WebSocket transport builds one
+        `PythonAcpAgent` per connection and hands each the same catalogue object, so
+        rebinding a name would reload the agent that happened to do it and leave every
+        other connection reading the old list. Mutating the object every agent already
+        holds is what makes one reload reach the whole process.
+
+        Nothing here touches a session. What a reload *means* for a session already open
+        is `agent._reconcile_catalogue`, and it deliberately does not happen here — see
+        `agent.md` for why a reload cannot sweep sessions from the outside.
+        """
+        self._entries = tuple(entries)
+        self._generation += 1
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -203,9 +247,12 @@ class McpCatalogue:
 def load(path: str | Path) -> McpCatalogue:
     """Read a catalogue file. Raises `CatalogueError` for anything wrong with it.
 
-    Format is chosen by suffix: `.json` is JSON, everything else is TOML. The file is read
-    once, at startup, and never re-read — a catalogue that changed under a running process
-    would leave sessions advertising toggles for servers that no longer exist.
+    Format is chosen by suffix: `.json` is JSON, everything else is TOML.
+
+    Read at startup, and again on every `SIGHUP` (`pyacp-izr`). It **returns** a catalogue
+    rather than mutating one, which is what makes a bad file harmless: the caller only
+    calls `McpCatalogue.replace` once this has returned, so a parse error leaves the
+    running catalogue exactly as it was.
     """
     source = Path(path)
     try:

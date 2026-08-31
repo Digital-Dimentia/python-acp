@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from python_acp.agent import PythonAcpAgent
@@ -50,6 +51,19 @@ def build_parser() -> argparse.ArgumentParser:
             "with session config options instead of naming command lines itself. TOML, "
             "or JSON with the mcpServers shape editors already write. Optional: without "
             "it a session's servers are exactly the ones its client named."
+        ),
+    )
+    parser.add_argument(
+        "--no-client-mcp-servers",
+        action="store_true",
+        help=(
+            "Refuse MCP server command lines supplied by a client on session/new or "
+            "session/fork, with -32602 rather than by ignoring them. Off by default, "
+            "which is ACP's own arrangement. Turn it on when binding a socket that "
+            "clients connect to afterwards: there, a client naming 'command' and 'args' "
+            "is asking this process to execute an arbitrary binary. Pair it with "
+            "--mcp-config so there is still somewhere for servers to come from. Honoured "
+            "on both transports, so one deployment config means one thing everywhere."
         ),
     )
     parser.add_argument(
@@ -116,6 +130,17 @@ async def _run(args: argparse.Namespace) -> None:
     configure_logging(args.debug)
 
     catalogue = _load_catalogue(getattr(args, "mcp_config", None))
+    accept_client_servers = not getattr(args, "no_client_mcp_servers", False)
+    if not accept_client_servers:
+        # Said at startup rather than discovered at the first refused `session/new`. An
+        # operator who set the flag and forgot `--mcp-config` has built a deployment that
+        # runs no MCP servers at all, which is a legitimate thing to want and a very easy
+        # thing to do by accident.
+        logger.info(
+            "Client-supplied MCP servers are refused (--no-client-mcp-servers); "
+            "sessions may use the catalogue only%s",
+            "" if len(catalogue) else " — and the catalogue is empty",
+        )
 
     # Both registries are process-wide, and both are created here because this is the
     # only place that constructs both: a session must outlive the connection that
@@ -147,10 +172,16 @@ async def _run(args: argparse.Namespace) -> None:
             # this process ending, so the shutdown path below is the same event.
             await run_stdio(
                 PythonAcpAgent(
-                    sessions, backends=backends, terminals=terminals, catalogue=catalogue
+                    sessions,
+                    backends=backends,
+                    terminals=terminals,
+                    catalogue=catalogue,
+                    accept_client_servers=accept_client_servers,
                 )
             )
             return
+
+        _install_reload(catalogue, getattr(args, "mcp_config", None))
 
         # The key is read from the environment, never from argv — see `ACCESS_KEY_ENV`.
         # A non-loopback bind with neither a key nor the opt-out raises here, before the
@@ -165,6 +196,7 @@ async def _run(args: argparse.Namespace) -> None:
             backends=backends,
             terminals=terminals,
             catalogue=catalogue,
+            accept_client_servers=accept_client_servers,
         )
         await server.start()
         # Never print(): under --transport stdio that corrupts the wire, and one logging
@@ -175,6 +207,56 @@ async def _run(args: argparse.Namespace) -> None:
         # Sessions the client never closed still own subprocesses and, if a turn was cut
         # short, terminals. `close_all` fires the hook above for each of them.
         await sessions.close_all()
+
+
+def _install_reload(catalogue: McpCatalogue, path: str | None) -> None:
+    """Re-read `--mcp-config` on `SIGHUP`. WebSocket transport only.
+
+    **Why a signal.** Reloading is an *operator* action, and the two alternatives are
+    worse for that: an ACP extension request would need a client to send it, putting a
+    deployment decision in the hands of whoever connected; and watching the file — a poll
+    or an OS watcher — is the most convenient and the most surprising, because a
+    half-written file saved by an editor is a reload nobody asked for. `SIGHUP` is the
+    conventional daemon answer, costs one handler, and is explicit about when it happens.
+
+    **Why not under `--transport stdio`.** There the process is the client's child: the
+    editor spawned it, restarting it is trivial and is what the editor already does, and
+    an operator who could send it a signal is not the person configuring it. Not installing
+    the handler is the decision, and this branch is where it is recorded rather than
+    something that fell out of where the code happened to sit.
+
+    Nothing is installed without `--mcp-config` either: there is no file to re-read, and a
+    handler that logged "reloaded nothing" on every `SIGHUP` would be noise on a signal a
+    process may be sent for other reasons.
+
+    `SIGHUP` does not exist on Windows, hence the `hasattr`. A missing signal is not an
+    error worth failing a bind over.
+    """
+    if path is None or not hasattr(signal, "SIGHUP"):
+        return
+
+    def reload() -> None:
+        """Read the file; swap it in only if it read cleanly.
+
+        The order is the whole guarantee (`pyacp-izr` criterion 3): `load` builds a *new*
+        catalogue and raises without touching the running one, so a file an operator has
+        broken mid-edit leaves every session exactly as it was, and the log line names what
+        was wrong. There is no half-applied state to be in.
+        """
+        try:
+            replacement = load_catalogue(path)
+        except CatalogueError as exc:
+            logger.error("Ignoring MCP catalogue reload: %s", exc)
+            return
+        catalogue.replace(list(replacement))
+        logger.info(
+            "MCP catalogue reloaded: %d server(s) offered — %s",
+            len(catalogue),
+            ", ".join(catalogue.names) or "none",
+        )
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, reload)
+    logger.info("SIGHUP re-reads %s", path)
 
 
 def _load_catalogue(path: str | None) -> McpCatalogue:

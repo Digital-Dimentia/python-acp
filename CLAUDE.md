@@ -272,9 +272,10 @@ reinstalling three more times.
 
 ### Dependencies
 
-Runtime dependencies are **exact-pinned** (`==`). They are protocol surface, not
-conveniences, so an upgrade is a deliberate, reviewed commit of its own rather than
-whatever a resolver picks on the day.
+Runtime dependencies are **exact-pinned** (`==`). Two of the three are protocol surface,
+not conveniences, so an upgrade is a deliberate, reviewed commit of its own rather than
+whatever a resolver picks on the day. The third is `ruamel.yaml`, which is neither and
+carries its own justification below.
 
 - `websockets==17.0.1` — the WebSocket server transport, driven through
   `websockets.asyncio.server`. The pin left 12.0 in `pyacp-tzd.3`, which rebuilt
@@ -288,6 +289,16 @@ whatever a resolver picks on the day.
   the other. Its WebSocket/HTTP transport sits behind the SDK's `http` extra
   (`httpx[http2]>=0.27` + `websockets>=12.0`); we do not take that extra, because this
   bridge already pins `websockets` and drives its own transport.
+- `ruamel.yaml==0.19.1` — the **oracle** `edit_yaml.py` verifies its splices against.
+  This is the one runtime pin that is not protocol surface, and the justification is a
+  different one: there is no YAML parser in the standard library, and without an
+  *independent* parser the verifier — the entire product of the `edits.py` family —
+  cannot exist for YAML. A hand-rolled loader beside the hand-rolled scanner would share
+  an author and therefore its bugs. Cost: a 118,102-byte pure-Python wheel,
+  `requires-python >=3.9`, and **zero hard dependencies**. **Never take the `libyaml` or
+  `oldlibyaml` extras** — every `ruamel.yaml.clib` requirement is gated behind them, and
+  `clib` is a C extension that would reintroduce per-architecture wheels for a speed-up
+  nothing here needs. See [edit_yaml.md](src/python_acp/edit_yaml.md).
 
 The SDK brings `pydantic>=2.7` transitively (with `pydantic-core`, `typing-extensions`,
 `typing-inspection`, `annotated-types`) — the first non-pure-Python dependency this

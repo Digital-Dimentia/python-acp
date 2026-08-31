@@ -11,6 +11,8 @@
   `session/update` — no LLM anywhere in the runtime.
 - Asks the client's permission before every tool call, reads and writes files through the
   client, and runs commands in the client's terminals.
+- Applies structured, path-addressed edits to JSON, YAML and Markdown files and **proves**
+  they changed nothing outside the address they named.
 - Works with a repo-local virtual environment.
 - Includes a `Containerfile` for containerized runs.
 - Ships with a Makefile for local build, test, lint, packaging, and release-bundle generation.
@@ -38,6 +40,10 @@
   - [mcp_stdio.py](src/python_acp/mcp_stdio.md)
   - [mcp_tools.py](src/python_acp/mcp_tools.md)
   - [markdown.py](src/python_acp/markdown.md)
+  - [edits.py](src/python_acp/edits.md)
+  - [edit_json.py](src/python_acp/edit_json.md)
+  - [edit_docs.py](src/python_acp/edit_docs.md)
+  - [edit_yaml.py](src/python_acp/edit_yaml.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.
@@ -273,6 +279,34 @@ used by both is `-32602`. Everything else is unchanged: each session still spawn
 subprocesses, and they still die with it. See
 [mcp_catalogue.py](src/python_acp/mcp_catalogue.md).
 
+**The catalogue is re-read on `SIGHUP`.** Send the agent one and it picks up added,
+removed and changed entries without a restart — which on a WebSocket bind would drop every
+connected client and every live session. A file that does not parse changes nothing and
+says why; a session already open is brought into line at its **next request**, so its
+`config_option_update` arrives on its own client's connection rather than being broadcast
+at whoever happens to be attached. An entry added while a session is open arrives switched
+**off** whatever its `enabled` says, because `enabled` describes how a *new* session starts.
+Nothing is installed under `--transport stdio`, where the editor spawned this process and
+restarting it is what the editor already does. See
+[agent.py](src/python_acp/agent.md) for the four cases.
+
+**And the operator can close the door the catalogue only opened an alternative to.**
+Selection being *available* is not the same as supply being *refusable*: by default this
+agent still accepts `mcpServers` from any client, which is right for stdio — there the
+client spawned this process — and wrong for a socket clients connect to afterwards.
+
+```bash
+python-acp --mcp-config servers.toml --no-client-mcp-servers
+```
+
+With that flag, a `session/new` or `session/fork` carrying a **non-empty** `mcpServers` is
+`-32602`, and the message names the flag and lists the catalogue so a client knows what to
+send instead. It **refuses rather than ignores**: a session backed by fewer servers than
+were asked for is the failure mode described below for `skip-invalid-items`, and this must
+not add a second route to it. An empty list is still fine — that is exactly what a
+catalogue-only client sends. Off by default, so nothing that works today changes; honoured
+on both transports, so one deployment config means one thing everywhere.
+
 Only **stdio** servers are accepted. `initialize` advertises
 `mcpCapabilities: {http: false, sse: false, acp: false}`, so an `http` or `sse` entry is
 refused with `-32602` rather than accepted and quietly ignored. If any server fails to
@@ -289,9 +323,10 @@ per text block.
 
 ### Commands for a person
 
-All seven are announced in `available_commands`, so a client's slash palette offers them
-without being taught, and each answers with plain multi-line text. The leading slash is
-optional on input.
+Six of the seven are announced in `available_commands`, so a client's slash palette offers
+them without being taught, and each answers with plain multi-line text. The leading slash
+is optional on input. `/invokeTool` is the exception — recognised but not advertised, since
+every tool now carries its own palette entry; see below.
 
 MCP servers publish three kinds of thing, and there is a command family for each.
 
@@ -305,7 +340,15 @@ MCP servers publish three kinds of thing, and there is a command family for each
 `/tools` lists every tool with its parameters, types, which are required, and an example
 call built from what this session actually has. It runs nothing.
 
-`/invokeTool` calls one. Values are typed from the tool's own `inputSchema` — a `string`
+`/invokeTool` calls one — though you will rarely type it, because **every tool is also
+announced under its own name**: `/demo/echo --text "hello world"` is sugar for the line
+above and produces the identical call. That is why `/invokeTool` is *recognised but not
+offered in the palette*; it stays for the two things the sugar cannot express — a tool
+whose name contains a slash, and the bare `/invokeTool echo --text x` that a
+single-server session allows. A prompt is free text, so an unannounced command still
+works when typed.
+
+Values are typed from the tool's own `inputSchema` — a `string`
 parameter given `3` stays `"3"` — and a parameter the schema does not declare is refused
 with the list of ones it takes, rather than forwarded to fail server-side. A typed call
 builds the same invocation the JSON form builds, so it inherits the session mode, the
@@ -381,6 +424,7 @@ Each text content block is a JSON object naming an MCP tool:
 | `server` | only when the session opened more than one MCP server | Which server from `session/new`'s `mcpServers` |
 | `read` | no | `{"<argument>": {"path": "/abs", "line": 1, "limit": 40}}` — files to read into arguments |
 | `write` | no | `{"path": "/abs/out.txt"}` — where the tool's text output goes |
+| `edit` | no | `{"path": "/abs/f.json", "format": "json", "ops": [...]}` — a verified structured change to one file. Mutually exclusive with `write` |
 | `run` | no | `{"<argument>": {"command": "git", "args": ["log"]}}` — commands to run into arguments |
 
 Each text block is one call, run in order, and returns `stopReason: "end_turn"`. The turn
@@ -457,6 +501,53 @@ calls them so you stay in control of what is read and written.
 
 `ToolCall.locations` carries the resolved paths, so a client can show or follow which
 files a call is about.
+
+### Editing a file, with a proof
+
+`edit` is `write`'s sharper sibling. `write` replaces a whole file with the tool's output;
+`edit` splices at an **address** and then proves it changed nothing else.
+
+```json
+{"tool": "render-changelog",
+ "arguments": {"since": "v1.2"},
+ "edit": {"path": "/abs/CHANGELOG.md",
+          "format": "markdown",
+          "ops": [{"kind": "set",
+                   "address": "/# Changes/## Unreleased",
+                   "fromOutput": true}]}}
+```
+
+- **`format` is named, never guessed from the extension** — `json`, `yaml`, or `markdown`.
+  A `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON, so this
+  agent does not sniff.
+- **`address` is an RFC 6901 pointer.** JSON and YAML share it (`/images/0/newTag`). For
+  Markdown it is a heading path with the `#` markers kept (`/# Install/## macOS`), because
+  without them `## Errors` and `### Errors` would be the same address. The empty pointer is
+  the document root.
+- **YAML refuses more than it accepts, on purpose.** Anchors, aliases, merge keys, tags,
+  multi-document streams and tabbed indentation are refused for the whole file; flow
+  collections are refused only where an address goes *inside* one, and block scalars only
+  where one is the target. Each refusal names the construct and the line. A splice that
+  landed plausibly but wrongly would still produce a file that parses, which is exactly the
+  failure worth an error instead.
+- **Each op names one value source**: `"value"` (raw source text in that format),
+  `"scalar"` (a JSON scalar, quoted for you), or `"fromOutput": true` (the tool's own text
+  output). A `"delete"` op names none.
+- **Needs both `fs.readTextFile` and `fs.writeTextFile`** — an edit reads the file it is
+  verified against and writes the result back — and the whole file is read, never a window.
+- **Nothing is written unless it verifies.** The edit is located, spliced, re-parsed,
+  compared against the same ops applied to the parsed document, and finally checked byte
+  for byte outside the addressed spans. Any failure rejects the *whole* edit; there is no
+  partial application.
+- **A refused edit is a failed tool call, not an error and not a failed turn.** The reason
+  — an address that does not resolve, an ambiguous one, a file that will not parse — comes
+  back as text on that call, and the remaining calls still run.
+- On success the call carries a **diff** content block (whole-file before and after) plus a
+  fenced unified diff for a human to read.
+
+Unlike `write`, an empty result is not refused: `write` skips an empty tool output because
+writing it would truncate a whole file on an unverified say-so, whereas an edit that empties
+one addressed value has already proved that nothing else moved.
 
 ### Running commands
 

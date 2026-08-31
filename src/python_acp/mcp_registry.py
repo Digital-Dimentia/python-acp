@@ -350,6 +350,16 @@ class McpBackendRegistry:
         """
         return dict(self._backends.get(session_id, {}))
 
+    def specs(self, session_id: str) -> tuple[McpServerStdio, ...]:
+        """The recipes this session's servers were opened from, in the order they arrived.
+
+        Kept for `fork`, and read by `agent._reconcile_catalogue` to answer the one
+        question a config option cannot: whether a running server still matches the
+        catalogue entry that started it. A toggle records *that* a server is on, never
+        *what* it is.
+        """
+        return self._specs.get(session_id, ())
+
     def get(self, session_id: str, name: str) -> MCPStdioClient:
         try:
             return self._backends[session_id][name]

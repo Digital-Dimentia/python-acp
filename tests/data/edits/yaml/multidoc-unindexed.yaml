@@ -1,0 +1,7 @@
+kind: ConfigMap
+metadata:
+  name: first
+---
+kind: Secret
+metadata:
+  name: second

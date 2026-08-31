@@ -62,12 +62,39 @@ the humans, and is bracketed and prefixed so it cannot be mistaken for a tool's 
 The same treatment covers a block of a *known* type missing what that type needs — a
 half-built `ImageContentBlock` is worse than a sentence saying the image was malformed.
 
+## One thing here is not MCP content at all
+
+`to_edit_content` converts an [edits.py](edits.md) `EditResult` — ours, not a server's —
+into tool-call content. It lands in this module because this is where "one of our value
+types becomes ACP content" already lives, and because `edits.py` **must not import
+`acp.schema`**: keeping that import out is what lets it be a plain library a unit test can
+drive with no connection, and what keeps the seam in `tests/test_executor_neutrality.py`
+honest. A second module holding one function would be a worse home than the one that
+already owns the direction.
+
+It returns two blocks:
+
+| Block | Contents |
+|---|---|
+| `FileEditToolCallContent` (`type: "diff"`) | `oldText` = `result.original`, `newText` = `result.updated` |
+| A text block | `result.unified()`, **fenced** with a `diff` info string |
+
+Both halves are worth stating because both are easy to get wrong:
+
+- **`Diff.oldText`/`newText` are whole-file contents, not a patch.** The schema says "The
+  new content after modification". Handing `unified()` to `newText` typechecks and would
+  make a client replace the file with the diff.
+- **The unified diff is fenced.** A client renders tool-call text as Markdown, where a
+  leading `-` is a list bullet — unfenced, the column carrying the entire meaning of the
+  diff is eaten. [markdown.py](markdown.md)'s `fenced_lines` sizes the fence.
+
 ## Main symbols
 
 | Symbol | Purpose |
 |---|---|
 | `to_content_block(block)` | One MCP content block as an ACP one. **Never `None`** — unmappable becomes a placeholder |
 | `to_tool_call_content(result)` | A whole `tools/call` result's content, wrapped as ACP tool-call content |
+| `to_edit_content(result)` | A verified `edits.EditResult` as a whole-file diff block plus a fenced human-readable one |
 | `MAPPED_TYPES` | The five MCP `type` values with a real mapping |
 
 `to_tool_call_content` returns `None` rather than `[]` for a result with no content: the
@@ -86,3 +113,5 @@ the whole unit-test file.
 
 - [turn_mcp_router.py docs](turn_mcp_router.md) — the caller, and the inbound direction
 - [mcp_stdio.py docs](mcp_stdio.md) — where a `tools/call` result comes from
+- [edits.py docs](edits.md) — where an `EditResult` comes from, and why it cannot build
+  its own ACP content

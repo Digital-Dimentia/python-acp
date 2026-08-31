@@ -18,7 +18,9 @@ client-facing transport. It owns no protocol logic of its own.
 
 ## Main Symbols
 
-- `build_parser()`: defines `--transport`, `--host`, `--port`, `--mcp-config`, `--debug`.
+- `build_parser()`: defines `--transport`, `--host`, `--port`, `--mcp-config`,
+  `--no-client-mcp-servers`, `--debug`.
+- `_install_reload(catalogue, path)`: the `SIGHUP` handler, WebSocket transport only.
 - `_load_catalogue(path)`: reads `--mcp-config`, or the empty catalogue when it was
   not given. Called before a port is bound, so a bad file fails at startup.
 - `configure_logging(debug)`: installs the root handler on `sys.stderr`, with the
@@ -205,6 +207,78 @@ are in [mcp_catalogue.py](mcp_catalogue.md).
 
 The file is read **here**, before a port is bound, so a mistyped path or key fails at
 startup with exit 2 rather than at the first `session/new`.
+
+## `SIGHUP` re-reads the catalogue, on one transport
+
+`--mcp-config` was read once and never again, so adding a server cost a restart — which on
+the WebSocket transport drops every connected client and every live session, for a
+deployment whose whole point is being long-lived and shared. `_install_reload` fixes that
+(`pyacp-izr`).
+
+**Why a signal.** Reloading is an *operator* action, and both alternatives fit it worse. An
+ACP extension request would need a client to send it, putting a deployment decision in the
+hands of whoever connected. Watching the file — a poll or an OS watcher — is the most
+convenient and the most surprising: an editor saving a half-written file is a reload nobody
+asked for. `SIGHUP` is the conventional daemon answer, costs one handler, and is explicit
+about when it happens.
+
+**Why not under `--transport stdio`.** There the process is the client's **child**: the
+editor spawned it, restarting it is trivial and is what the editor already does, and an
+operator in a position to send it a signal is not the person configuring it. The handler is
+simply not installed, and the branch that does not install it is where that decision is
+recorded rather than something that fell out of where the code sits.
+
+Nothing is installed without `--mcp-config` either — there is no file to re-read, and a
+handler logging "reloaded nothing" on every `SIGHUP` would be noise on a signal a process
+may be sent for other reasons. `SIGHUP` does not exist on Windows, which is one `hasattr`
+and not a reason to fail a bind.
+
+**A file that does not parse changes nothing.** `load` builds a *new* catalogue and raises
+before `replace` is reached, so the running one is untouched and the error names the file,
+the entry and the key exactly as it does at startup. There is no half-applied state to be
+in.
+
+What a reload *means* for a session already open — the four cases, and why the work happens
+at the session's next request rather than at the signal — is
+[agent.md](agent.md); this module only decides when the file is read.
+
+## `--no-client-mcp-servers` is the other half of the catalogue
+
+`--mcp-config` made selection **available**. It did not make supply **refusable**: without
+this flag, `session/new` still accepts `mcpServers` from any client, so on a shared socket
+a client past the access key can still make this process spawn an arbitrary binary. The
+catalogue offered an alternative to that; this closes it.
+
+**Why a flag and not a default.** Refusing by default would break every client that names
+its own servers today — including `tests/interop/client.py` and a good part of the suite —
+and it would be *wrong* under `--transport stdio`, where the client spawned this process
+and supplying its own configuration is the canonical ACP arrangement. The risk is specific
+to a long-lived socket with clients the operator did not start, so the refusal is an
+opt-in an operator sets when binding somewhere shared.
+
+**Honoured on both transports** even so. The flag is most useful on a socket, but an
+operator wrapping this agent in a launcher may want it under stdio too, and one deployment
+config should mean one thing everywhere. A flag silently ignored on one transport is worse
+than either answer, and refusing the *combination* at startup would make a config
+non-portable for no safety gained.
+
+Three properties worth stating, all asserted in `tests/test_agent.py`:
+
+- **It refuses; it does not filter.** A non-empty `mcpServers` is `-32602`. A session
+  backed by fewer servers than were asked for is the failure mode the README warns about
+  for ACP's `skip-invalid-items`, and a second route to it would be worse than the door
+  this shuts.
+- **An empty list is still accepted.** That is exactly what a catalogue-only client sends,
+  and what every existing test sends.
+- **The refusal names the flag and lists the catalogue.** A client told "no" without being
+  told where servers *do* come from has nothing to do next. When there is no catalogue
+  either, it says that instead and points at `--mcp-config`, because a deployment with the
+  flag and no catalogue runs no MCP servers at all — legitimate to want, and very easy to
+  do by accident. `run()` says the same thing once at startup for the operator.
+
+Both doors go through one funnel: `agent._reject_unsupported_mcp_servers`, which
+`session/new` and `session/fork` both call **before** creating anything, so a refused
+request leaves nothing behind. See [agent.py](agent.md).
 
 ## Related
 

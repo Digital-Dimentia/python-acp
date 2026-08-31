@@ -23,10 +23,15 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - Turn seam (`turns.py`): the `TurnExecutor` a `session/prompt` runs behind — the `session/update` emission channel, client-capability gating, cancellation, and the `stopReason`/`usage` a turn reports. The default is the deterministic MCP tool-router below.
 - MCP tool-router (`turn_mcp_router.py`): the shipped executor. Reads each text prompt block as a JSON tool invocation, runs it against the session's MCP backends, and streams real `tool_call` status transitions. No LLM, no reasoning.
 - MCP content mapping (`mcp_content.py`): the seam between MCP's content model and ACP's. Unmappable content becomes a visible placeholder rather than a gap.
+- Slash commands (`commands.py`): the seven typed commands a person can type, and the hand-rolled `--flag` parser behind them. Six are announced; `/invokeTool` is recognised and deliberately not.
+- Outbound Markdown safety (`markdown.py`): every ACP client renders agent text as Markdown, so anything this agent says passes through here first — code spans and fences sized to survive it.
+- Post-response notifications (`announcer.py`): a stream observer, because `session/new` mints the id its own palette announcement needs. The SDK fires it strictly after the response bytes are written; both transports pass the same one.
+- Operator MCP catalogue (`mcp_catalogue.py`): the servers an operator configured for clients to select from, re-read on `SIGHUP`.
 - MCP elicitation forwarding (`elicitation.py`): an MCP server's `elicitation/create` becomes an ACP one, so a question from a backend reaches the only human in the system.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP tool annotations (`mcp_tools.py`): reads a server's `readOnlyHint`/`destructiveHint` hints as an ACP `ToolCall.kind`, so a permission prompt says *what* it is asking about. A hint relabels the question; it never withdraws it.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
+- Structured edits (`edits.py`, `edit_json.py`, `edit_docs.py`, `edit_yaml.py`): path-addressed edits that splice rather than re-emit, and a verifier that proves nothing outside the addressed spans moved. A plain library — it knows no ACP and no MCP — reached only from the router's `edit` directive. `edit_yaml.py` is where the one non-protocol runtime dependency lives: `ruamel.yaml` is the independent parser the verifier needs and the standard library does not have.
 
 ```mermaid
 flowchart LR
@@ -43,12 +48,21 @@ flowchart LR
     Paths["paths.py<br/>containment rule"]
     Terminals["terminals.py<br/>TerminalRegistry"]
     Content["mcp_content.py<br/>MCP content &rarr; ACP blocks"]
+    Commands["commands.py<br/>typed slash commands"]
+    Markdown["markdown.py<br/>outbound Markdown safety"]
+    Announcer["announcer.py<br/>post-response notifications"]
+    Catalogue["mcp_catalogue.py<br/>the operator's server list"]
     Turns["turns.py<br/>TurnExecutor"]
     Router["turn_mcp_router.py<br/>McpToolRouterExecutor"]
     Backends["mcp_registry.py<br/>McpBackendRegistry"]
     Tools["mcp_tools.py<br/>annotations &rarr; ToolCall.kind"]
     Elicit["elicitation.py<br/>MCP question &rarr; ACP question"]
     MCPClient["mcp_stdio.py<br/>MCPStdioClient"]
+    Edits["edits.py<br/>verifier + Op model"]
+    EditJson["edit_json.py<br/>JSON dialect"]
+    EditDocs["edit_docs.py<br/>Markdown dialect"]
+    EditYaml["edit_yaml.py<br/>YAML dialect"]
+    Ruamel[("ruamel.yaml<br/>the independent oracle")]
     MCPProc[("MCP server subprocess<br/>one per session server")]
 
     Editor <--> TStdio
@@ -56,10 +70,16 @@ flowchart LR
     CLI --> TStdio
     CLI --> TWs
     CLI --> Sessions
+    CLI --> Catalogue
+    Agent --> Catalogue
     CLI --> Backends
     CLI --> Terminals
     TStdio --> SDK
     TWs --> SDK
+    TStdio --> Announcer
+    TWs --> Announcer
+    SDK -. "stream observer, after the response is written" .-> Announcer
+    Announcer -. "announce_prepared_commands" .-> Agent
     TWs --> Errors
     SDK <--> Agent
     Agent --> Caps
@@ -70,8 +90,21 @@ flowchart LR
     Turns -.implemented by.-> Router
     Router --> Tools
     Router --> Content
+    Router --> Commands
+    Router --> Markdown
+    Commands --> Markdown
+    Content --> Markdown
     Router --> Paths
     Router --> Terminals
+    Router --> Edits
+    Router --> EditJson
+    Router --> EditDocs
+    Router --> EditYaml
+    Content --> Edits
+    Edits -. "Dialect: parse/plan/render" .-> EditJson
+    Edits -. "Dialect: parse/plan/render" .-> EditDocs
+    Edits -. "Dialect: parse/plan/render" .-> EditYaml
+    EditYaml --> Ruamel
     Router --> Backends
     Agent --> Backends
     Agent --> Terminals
@@ -289,6 +322,72 @@ sequenceDiagram
 - **A client that errors on `fs/*` fails that call, not the turn** — the same rule as a
   tool reporting `isError`, one layer out.
 
+### Structured edits, and the neutrality this deliberately trades away
+
+**This is the one place the agent authors bytes of its own, and it is a change of
+posture that needed deciding rather than refactoring.** Everywhere else this executor is
+a neutral carrier: it substitutes a client-named file into a tool argument and writes the
+*tool's own* output back, so if the bytes that land in a user's file are wrong, that is
+the tool's fault and the transcript proves it. `tests/test_executor_neutrality.py` and
+[paths.md](src/python_acp/paths.md)'s "this process opens nothing" are the standing
+statements of that thesis.
+
+An `edit` directive breaks it. The agent reads the file, computes a splice, and writes a
+result no tool ever produced. The bytes are ours.
+
+**The decision: allow it, and pay for it with a proof.** The alternative on offer was not
+"no transformation" — it was "the same transformation, done by an LLM emitting a whole
+file into `write`", which is the same posture with none of the evidence. What makes the
+edit path acceptable is that [edits.py](src/python_acp/edits.md) refuses to produce a
+result it cannot verify: seven steps, any failure rejecting the whole edit, ending in
+*every byte outside the addressed spans is unchanged*. Neutrality was never the terminal
+value; **not silently damaging a file the client trusted us with** was, and a verified
+splice serves that better than an unverified whole-file write does.
+
+Three consequences are load-bearing:
+
+```mermaid
+sequenceDiagram
+    participant C as ACP client
+    participant X as turn_mcp_router.py
+    participant E as edits.py
+    participant M as MCP server
+
+    C->>X: session/prompt (edit: {path, format, ops})
+    Note over X: both fs gates checked at parse time — an edit reads and writes
+    X->>M: tools/call
+    M-->>X: result (text output)
+    X->>C: fs/read_text_file {path}
+    C-->>X: the whole file, no line/limit window
+    X->>E: apply(source, ops, dialect)
+    alt verified
+        E-->>X: EditResult {original, updated, applied, confidence}
+        X->>C: fs/write_text_file {path, updated}
+        X-)C: tool_call_update (completed) + diff content
+    else refused at any of the seven steps
+        E-->>X: EditError
+        X-)C: tool_call_update (failed) + the reason
+        Note over X: the turn is fine; one operation in it was refused
+    end
+```
+
+- **The whole file is read, never a window.** The verifier's last step is an assertion
+  about every untouched byte, and a `line`/`limit` window would make that assertion about
+  a fragment while the write replaces a file — the one way this could quietly truncate.
+- **An edit refusal is a failed tool call, not a JSON-RPC error.** Same rule as a client
+  erroring on `fs/*`: the remaining invocations still run and the turn ends `end_turn`.
+- **`_write_file`'s empty-content guard is not inherited, and no shrink heuristic replaces
+  it.** That guard exists because a tool's output is unverified, so writing an empty
+  result over a whole file is a truncation dressed as a write. An edit result carries a
+  proof that nothing outside the address moved, so an op that empties one value is an
+  ordinary edit. A heuristic layered on top of a proof adds no information and would
+  eventually block a correct delete — the next reader will want to add one anyway, which
+  is why it is written down here.
+
+The seam test still passes unchanged: `sessions.py`, `capabilities.py`, and `turns.py`
+import nothing from `edits.py` or from any backend. The posture that moved is this one
+executor's, not the runtime's.
+
 ### Running a command in the client's terminal
 
 The same direction as the file calls, with one thing the file calls do not have: a
@@ -409,6 +508,10 @@ sequenceDiagram
 - [MCP tool annotations module](src/python_acp/mcp_tools.md)
 - [Typed command module](src/python_acp/commands.md)
 - [Markdown-safe agent text module](src/python_acp/markdown.md)
+- [Structured file-edit module](src/python_acp/edits.md)
+- [JSON edit dialect module](src/python_acp/edit_json.md)
+- [Markdown edit dialect module](src/python_acp/edit_docs.md)
+- [YAML edit dialect module](src/python_acp/edit_yaml.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 

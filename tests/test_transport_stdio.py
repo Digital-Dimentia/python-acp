@@ -14,6 +14,8 @@ import contextlib
 import io
 import json
 import logging
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +26,9 @@ from acp import PROTOCOL_VERSION, RequestError
 from acp.stdio import spawn_agent_process
 
 from python_acp import __version__
-from python_acp.cli import _load_catalogue, build_parser, configure_logging
+from python_acp.cli import _install_reload, _load_catalogue, build_parser, configure_logging
 from python_acp.agent import PythonAcpAgent
+from python_acp.mcp_catalogue import McpCatalogue
 from python_acp.sessions import SessionRegistry
 from python_acp.transport_stdio import _observers, _stdout_reserved
 
@@ -407,6 +410,22 @@ def test_the_mcp_catalogue_path_is_taken_on_both_transports() -> None:
         assert args.mcp_config == "servers.toml"
 
 
+def test_client_supplied_servers_are_accepted_unless_the_flag_says_otherwise() -> None:
+    """Off by default, because that is ACP's own arrangement: over stdio the client
+    spawned this process, and a parent configuring its own child is the canonical case."""
+    assert build_parser().parse_args([]).no_client_mcp_servers is False
+
+
+def test_the_refusal_flag_is_taken_on_both_transports() -> None:
+    """One deployment config means one thing everywhere. It is *most* useful on a socket
+    clients connect to afterwards, but an operator wrapping this agent in a launcher may
+    want it under stdio too, and a flag that is silently ignored on one transport is worse
+    than either answer."""
+    for transport in ("ws", "stdio"):
+        args = build_parser().parse_args(["--transport", transport, "--no-client-mcp-servers"])
+        assert args.no_client_mcp_servers is True
+
+
 def test_a_catalogue_that_cannot_be_read_stops_the_process_before_it_serves(
     tmp_path: Path,
 ) -> None:
@@ -529,3 +548,87 @@ def test_debug_logging_names_the_logger_that_emitted_each_record(
         root.setLevel(saved_level)
 
     assert captured.getvalue().strip() == expected
+
+
+def test_sighup_reloads_the_catalogue_only_where_reloading_means_something(
+    tmp_path: Path, caplog
+) -> None:
+    """`_install_reload` is where the stdio decision is *recorded*, not somewhere it fell
+    out of.
+
+    Under stdio the process is the client's child: the editor spawned it, restarting it is
+    trivial and is what the editor already does, and an operator who could send it a signal
+    is not the person configuring it. So the handler is a WebSocket-transport thing, and it
+    is skipped with no file to re-read either.
+    """
+    catalogue = McpCatalogue()
+
+    async def install(path: str | None) -> bool:
+        installed: list[Any] = []
+        loop = asyncio.get_running_loop()
+        original = loop.add_signal_handler
+
+        def record(sig: Any, callback: Any, *args: Any) -> None:
+            installed.append(sig)
+            original(sig, callback, *args)
+
+        loop.add_signal_handler = record  # type: ignore[method-assign]
+        try:
+            _install_reload(catalogue, path)
+            return bool(installed)
+        finally:
+            loop.add_signal_handler = original  # type: ignore[method-assign]
+            for sig in installed:
+                loop.remove_signal_handler(sig)
+
+    servers = tmp_path / "servers.toml"
+    servers.write_text("[servers.alpha]\ncommand = 'echo'\n")
+
+    assert asyncio.run(install(str(servers))) is True
+    assert asyncio.run(install(None)) is False, "no --mcp-config means nothing to re-read"
+
+
+def test_a_reload_that_cannot_read_the_file_keeps_the_running_catalogue(
+    tmp_path: Path, caplog
+) -> None:
+    """Criterion 3, at the level that decides it: `load` returns a *new* catalogue and
+    raises without touching the running one, so `replace` is never reached for a file an
+    operator has broken mid-edit."""
+    servers = tmp_path / "servers.toml"
+    servers.write_text("[servers.alpha]\ncommand = 'echo'\n")
+    catalogue = McpCatalogue(list(_load_catalogue(str(servers))))
+
+    async def hup() -> None:
+        _install_reload(catalogue, str(servers))
+        servers.write_text("[servers.alpha]\ncommmand = 'typo'\n")
+        os.kill(os.getpid(), signal.SIGHUP)
+        # The handler runs on the loop, so yield to it before asserting.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    with caplog.at_level(logging.ERROR, logger="python_acp.cli"):
+        asyncio.run(hup())
+
+    assert catalogue.names == ("alpha",)
+    assert catalogue.generation == 0
+    assert "Ignoring MCP catalogue reload" in caplog.text
+
+
+def test_a_reload_that_reads_cleanly_swaps_the_catalogue_in_place(tmp_path: Path) -> None:
+    """In place, which is what makes one signal reach every connection: the WebSocket
+    transport hands the same object to one agent per socket."""
+    servers = tmp_path / "servers.toml"
+    servers.write_text("[servers.alpha]\ncommand = 'echo'\n")
+    catalogue = McpCatalogue(list(_load_catalogue(str(servers))))
+
+    async def hup() -> None:
+        _install_reload(catalogue, str(servers))
+        servers.write_text("[servers.beta]\ncommand = 'echo'\n")
+        os.kill(os.getpid(), signal.SIGHUP)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(hup())
+
+    assert catalogue.names == ("beta",)
+    assert catalogue.generation == 1

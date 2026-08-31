@@ -192,6 +192,16 @@ which is sugar for `/invokeTool Demo/echo --text "hello world"` and produces the
 the permission prompt, the tool-call `kind` and the on-tool-failure policy without knowing
 they exist, for exactly the reason `/invokeTool` does.
 
+**Which is why `/invokeTool` is no longer announced** (`pyacp-b50`). Once every tool
+carries its own palette entry, a slot for the verb teaches a detour past what the client
+already shows. It stays *recognised*, because the sugar cannot express two things: a tool
+whose name contains a slash — the sugar splits on the first one and `/invokeTool` takes a
+free-typed target — and the bare `/invokeTool echo --text x` that omits the server, which
+a single-server session allows and a bare first token could never be told apart from prose.
+`UNANNOUNCED_COMMANDS` names it, `COMMAND_NAMES` still contains it, and nothing on the
+parse path reads the announcement: `available_commands` is a discovery aid, not an
+allowlist.
+
 This closes `pyacp-acn`, where the palette advertised names the parser did not accept. A
 client fills its composer from `available_commands` and sends back the name it was given;
 before the fix that name fell through to the JSON convention and was refused as *malformed
@@ -405,6 +415,9 @@ would silently hand its own bad quoting to the JSON parser.
 - `CommandError`: recognised, and wrong.
 - `COMMAND_NAMES`: every command name, for the one check that has to recognise before it
   can parse.
+- `UNANNOUNCED_COMMANDS`: the names deliberately kept out of the palette — `/invokeTool`
+  alone. It and `turn_mcp_router._BUILTIN_COMMANDS` partition `COMMAND_NAMES`, asserted, so
+  a new command cannot fall out of both and become undiscoverable.
 - `NEEDS_A_MODEL`: why `/promptInvoke` refuses, in one place because it is said twice.
 - The name and hint constants, shared with the `available_commands` announcement so the
   palette and the parser cannot disagree.

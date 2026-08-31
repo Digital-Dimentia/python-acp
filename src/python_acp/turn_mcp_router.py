@@ -117,9 +117,9 @@ unchanged*.
 ```
 
 * `path` — absolute and inside the session's roots, like every other path here.
-* `format` — `json` or `markdown`, **named and never sniffed from the extension**. A
-  `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON; `edits.apply`
-  refuses to guess and so does this.
+* `format` — `json`, `markdown`, or `yaml`, **named and never sniffed from the
+  extension**. A `.yml` full of Go template directives is not YAML and a `.tf.json` is
+  JSON; `edits.apply` refuses to guess and so does this.
 * `ops` — a non-empty list of `{"kind": "set"|"insert"|"delete"|"append", "address": ...}`.
   The address is an RFC 6901 pointer, which for Markdown is a heading path
   (`/# Install/## macOS`, `#` markers included) and for JSON an ordinary pointer.
@@ -251,6 +251,7 @@ from acp.schema import (
 
 from python_acp.edit_docs import DOCS_DIALECT
 from python_acp.edit_json import JSON_DIALECT
+from python_acp.edit_yaml import YAML_DIALECT
 from python_acp.edits import UNSET, Dialect, EditError, Op, OpKind
 from python_acp.edits import apply as apply_edits
 from python_acp.mcp_content import to_content_block, to_edit_content, to_tool_call_content
@@ -414,6 +415,7 @@ class FileWrite:
 DIALECTS: dict[str, Dialect] = {
     JSON_DIALECT.name: JSON_DIALECT,
     DOCS_DIALECT.name: DOCS_DIALECT,
+    YAML_DIALECT.name: YAML_DIALECT,
 }
 
 #: An op's value comes from exactly one of these. Kept as a tuple so the refusal can

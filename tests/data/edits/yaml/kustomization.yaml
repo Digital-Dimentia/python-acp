@@ -1,0 +1,42 @@
+# The overlay every cluster starts from. Keep the comments: they are the thing
+# a re-emitting editor loses, and this file is here to prove we do not.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: payments
+
+# A flush sequence, dashes at the parent's own column.
+resources:
+- ../../base
+- service.yaml   # the one thing this overlay adds
+
+commonLabels:
+  app: payments
+  tier: "backend"
+
+# An indented sequence of mappings, in the same file as the flush one above.
+# No dumper setting reproduces both, which is why step 3 is not a byte comparison.
+images:
+  - name: registry.example.com/payments
+    newTag: v1.4.2
+  - name: registry.example.com/sidecar
+    newTag: v0.9.1
+
+replicas:
+  - name: payments
+    count: 3
+
+configMapGenerator:
+  - name: settings
+    literals:
+    - LOG_LEVEL=info
+    - REGION=eu-west-1
+
+patches: []
+
+# A block scalar, present but never the target of an edit in the tests.
+notes: |
+  This overlay is owned by the payments team.
+  Ask before changing the replica count.
+
+emptyValue:

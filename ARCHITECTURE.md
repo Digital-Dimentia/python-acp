@@ -27,7 +27,7 @@ capability block, and one error mapping, whichever wire a client arrives on.
 - MCP backend registry (`mcp_registry.py`): the MCP servers each session opened, spawned from `session/new`'s `mcpServers` and torn down with the session.
 - MCP tool annotations (`mcp_tools.py`): reads a server's `readOnlyHint`/`destructiveHint` hints as an ACP `ToolCall.kind`, so a permission prompt says *what* it is asking about. A hint relabels the question; it never withdraws it.
 - MCP stdio client (`mcp_stdio.py`): drives one MCP server subprocess over newline-delimited JSON-RPC.
-- Structured edits (`edits.py`, `edit_json.py`, `edit_docs.py`): path-addressed edits that splice rather than re-emit, and a verifier that proves nothing outside the addressed spans moved. A plain library — it knows no ACP and no MCP — reached only from the router's `edit` directive.
+- Structured edits (`edits.py`, `edit_json.py`, `edit_docs.py`, `edit_yaml.py`): path-addressed edits that splice rather than re-emit, and a verifier that proves nothing outside the addressed spans moved. A plain library — it knows no ACP and no MCP — reached only from the router's `edit` directive. `edit_yaml.py` is where the one non-protocol runtime dependency lives: `ruamel.yaml` is the independent parser the verifier needs and the standard library does not have.
 
 ```mermaid
 flowchart LR
@@ -53,6 +53,8 @@ flowchart LR
     Edits["edits.py<br/>verifier + Op model"]
     EditJson["edit_json.py<br/>JSON dialect"]
     EditDocs["edit_docs.py<br/>Markdown dialect"]
+    EditYaml["edit_yaml.py<br/>YAML dialect"]
+    Ruamel[("ruamel.yaml<br/>the independent oracle")]
     MCPProc[("MCP server subprocess<br/>one per session server")]
 
     Editor <--> TStdio
@@ -79,9 +81,12 @@ flowchart LR
     Router --> Edits
     Router --> EditJson
     Router --> EditDocs
+    Router --> EditYaml
     Content --> Edits
     Edits -. "Dialect: parse/plan/render" .-> EditJson
     Edits -. "Dialect: parse/plan/render" .-> EditDocs
+    Edits -. "Dialect: parse/plan/render" .-> EditYaml
+    EditYaml --> Ruamel
     Router --> Backends
     Agent --> Backends
     Agent --> Terminals
@@ -488,6 +493,7 @@ sequenceDiagram
 - [Structured file-edit module](src/python_acp/edits.md)
 - [JSON edit dialect module](src/python_acp/edit_json.md)
 - [Markdown edit dialect module](src/python_acp/edit_docs.md)
+- [YAML edit dialect module](src/python_acp/edit_yaml.md)
 - [ACP stdio transport module](src/python_acp/transport_stdio.md)
 - [ACP WebSocket transport module](src/python_acp/transport_ws.md)
 

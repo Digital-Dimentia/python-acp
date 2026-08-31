@@ -3287,11 +3287,12 @@ async def test_the_format_is_named_and_never_guessed(tmp_path: Path) -> None:
     an unknown format is a refusal that lists the real ones."""
     async with fs_harness(tmp_path) as harness:
         result = await harness.run(
-            edit_block(tmp_path / "x.yaml", "yaml", {"kind": "set", "address": "/a", "scalar": 1})
+            edit_block(tmp_path / "x.toml", "toml", {"kind": "set", "address": "/a", "scalar": 1})
         )
 
     assert result.stop_reason == "refusal"
-    assert "json" in harness.refusal() and "markdown" in harness.refusal()
+    for known in ("json", "markdown", "yaml"):
+        assert known in harness.refusal()
 
 
 async def test_an_op_with_two_value_sources_is_refused_before_anything_runs(
@@ -3351,3 +3352,19 @@ async def test_the_edited_file_is_a_tool_call_location(tmp_path: Path) -> None:
         )
 
     assert [loc.path for loc in harness.of("tool_call")[0].locations] == [str(target.resolve())]
+
+
+async def test_a_yaml_edit_runs_through_the_same_directive(tmp_path: Path) -> None:
+    """The third dialect is a registration, not a second code path — the directive, the
+    gates, the diff content and the refusal rules are the ones already tested above."""
+    target = tmp_path / "kustomization.yaml"
+    target.write_text("# keep me\nnamespace: payments\nresources:\n- ../../base\n")
+
+    async with fs_harness(tmp_path) as harness:
+        result = await harness.run(
+            edit_block(target, "yaml", {"kind": "set", "address": "/namespace", "scalar": "billing"})
+        )
+
+    assert result.stop_reason == "end_turn"
+    assert target.read_text() == "# keep me\nnamespace: billing\nresources:\n- ../../base\n"
+    assert harness.of("tool_call_update")[-1].content[-3].type == "diff"

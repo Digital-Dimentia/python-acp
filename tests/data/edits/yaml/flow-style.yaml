@@ -1,0 +1,3 @@
+name: demo
+limits: {cpu: 500m, memory: 256Mi}
+ports: [80, 443]

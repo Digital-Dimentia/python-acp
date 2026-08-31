@@ -11,8 +11,8 @@
   `session/update` — no LLM anywhere in the runtime.
 - Asks the client's permission before every tool call, reads and writes files through the
   client, and runs commands in the client's terminals.
-- Applies structured, path-addressed edits to JSON and Markdown files and **proves** they
-  changed nothing outside the address they named.
+- Applies structured, path-addressed edits to JSON, YAML and Markdown files and **proves**
+  they changed nothing outside the address they named.
 - Works with a repo-local virtual environment.
 - Includes a `Containerfile` for containerized runs.
 - Ships with a Makefile for local build, test, lint, packaging, and release-bundle generation.
@@ -43,6 +43,7 @@
   - [edits.py](src/python_acp/edits.md)
   - [edit_json.py](src/python_acp/edit_json.md)
   - [edit_docs.py](src/python_acp/edit_docs.md)
+  - [edit_yaml.py](src/python_acp/edit_yaml.md)
   - [transport_stdio.py](src/python_acp/transport_stdio.md)
   - [transport_ws.py](src/python_acp/transport_ws.md)
 - [ACP conformance suite](tests/test_conformance.py) — the compliance matrix, executable.
@@ -479,12 +480,19 @@ files a call is about.
                    "fromOutput": true}]}}
 ```
 
-- **`format` is named, never guessed from the extension** — `json` or `markdown` today. A
-  `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON, so this agent
-  does not sniff.
-- **`address` is an RFC 6901 pointer.** For Markdown it is a heading path with the `#`
-  markers kept (`/# Install/## macOS`), because without them `## Errors` and `### Errors`
-  would be the same address. The empty pointer is the document root.
+- **`format` is named, never guessed from the extension** — `json`, `yaml`, or `markdown`.
+  A `.yml` full of Go template directives is not YAML and a `.tf.json` is JSON, so this
+  agent does not sniff.
+- **`address` is an RFC 6901 pointer.** JSON and YAML share it (`/images/0/newTag`). For
+  Markdown it is a heading path with the `#` markers kept (`/# Install/## macOS`), because
+  without them `## Errors` and `### Errors` would be the same address. The empty pointer is
+  the document root.
+- **YAML refuses more than it accepts, on purpose.** Anchors, aliases, merge keys, tags,
+  multi-document streams and tabbed indentation are refused for the whole file; flow
+  collections are refused only where an address goes *inside* one, and block scalars only
+  where one is the target. Each refusal names the construct and the line. A splice that
+  landed plausibly but wrongly would still produce a file that parses, which is exactly the
+  failure worth an error instead.
 - **Each op names one value source**: `"value"` (raw source text in that format),
   `"scalar"` (a JSON scalar, quoted for you), or `"fromOutput": true` (the tool's own text
   output). A `"delete"` op names none.

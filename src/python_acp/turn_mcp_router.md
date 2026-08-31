@@ -114,7 +114,7 @@ verify, and its last step is *every byte outside the addressed spans is unchange
 | Field | Required | Meaning |
 |---|---|---|
 | `path` | yes | Absolute, inside the session's roots, resolved before it goes on the wire — like every other path here |
-| `format` | yes | `json` or `markdown`. **Named, never sniffed from the extension** |
+| `format` | yes | `json`, `yaml`, or `markdown`. **Named, never sniffed from the extension** |
 | `ops` | yes, non-empty | `{kind, address}` plus one value source — see below |
 
 `format` is named because an extension is not a promise about a file's contents: a `.yml`
@@ -122,8 +122,8 @@ full of Go template directives is not YAML and a `.tf.json` is JSON. `edits.appl
 dialect rather than a path for exactly that reason, and this module does not add the guess
 back on top.
 
-`address` is an RFC 6901 pointer. For JSON that is the ordinary thing; for Markdown it is a
-**heading path** with the `#` markers included (`/# Install/## macOS`), because without them
+`address` is an RFC 6901 pointer. For JSON and YAML that is the ordinary thing; for
+Markdown it is a **heading path** with the `#` markers included (`/# Install/## macOS`), because without them
 `/# API/## Errors` and `/# API/### Errors` are the same address in a document that has both.
 The empty pointer is the document root — for Markdown, the preamble before the first
 heading — so it is a valid address and not the same as omitting the field.

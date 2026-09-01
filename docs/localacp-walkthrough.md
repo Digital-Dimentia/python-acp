@@ -17,6 +17,11 @@ makes the forms below possible.
 
 ## What is connected to what
 
+![You in LocalACP feed the LocalACP client, which speaks ACP over stdio to the python-acp agent; the agent speaks JSON-RPC over stdio to the Demo MCP server subprocess. The server returns tools, prompts and resources to the agent, and the agent returns session/update and request_permission to the client](screenshots/diagram-connections.png)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
   user[You, in LocalACP]
@@ -30,6 +35,8 @@ flowchart LR
   demo -->|tools, prompts, resources| agent
   agent -->|session/update, request_permission| client
 ```
+
+</details>
 
 Two hops, two protocols, one process tree. LocalACP speaks **ACP** and knows nothing
 about MCP; the Demo server speaks **MCP** and knows nothing about ACP. `python-acp` is
@@ -91,6 +98,11 @@ it is editing, because **the agent has none**. `python-acp` reads no MCP server 
 credentials file, and no config of its own. Everything it knows about a server arrives in
 the `session/new` request that asks for it.
 
+![The Settings dialog and the env of API keys and tokens both write agents.json in Application Support/acp-ui; that file supplies session/new with its mcpServers array, which reaches agent.new_session, then McpBackendRegistry.open, then MCPStdioClient with env, which spawns the Demo MCP server subprocess with os.environ plus env; the subprocess returns tools, prompts and resources to the registry](screenshots/diagram-config-and-credentials.png)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart TB
   subgraph gui["LocalACP - the GUI app"]
@@ -120,6 +132,8 @@ flowchart TB
   client -->|"spawn with os.environ plus env"| proc
   proc -->|"tools, prompts, resources"| registry
 ```
+
+</details>
 
 ### The config is the client's, and it travels per session
 

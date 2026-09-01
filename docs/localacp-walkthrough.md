@@ -93,23 +93,23 @@ the `session/new` request that asks for it.
 
 ```mermaid
 flowchart TB
-  subgraph gui[LocalACP - the GUI app]
-    settings[Settings dialog]
+  subgraph gui["LocalACP - the GUI app"]
+    settings["Settings dialog"]
     store["agents.json in Application Support/acp-ui"]
     creds["env: API keys, tokens"]
   end
 
-  subgraph wire[The ACP wire]
+  subgraph wire["The ACP wire"]
     newsession["session/new with mcpServers array"]
   end
 
-  subgraph bridge[python-acp - no config of its own]
+  subgraph bridge["python-acp - no config of its own"]
     agentpy["agent.new_session"]
     registry["McpBackendRegistry.open"]
-    client["MCPStdioClient(env=...)"]
+    client["MCPStdioClient with env"]
   end
 
-  proc[Demo MCP server subprocess]
+  proc["Demo MCP server subprocess"]
 
   settings --> store
   creds --> store
@@ -117,8 +117,8 @@ flowchart TB
   newsession --> agentpy
   agentpy --> registry
   registry --> client
-  client -->|spawn with os.environ + env| proc
-  proc -->|tools, prompts, resources| registry
+  client -->|"spawn with os.environ plus env"| proc
+  proc -->|"tools, prompts, resources"| registry
 ```
 
 ### The config is the client's, and it travels per session

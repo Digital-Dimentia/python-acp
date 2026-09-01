@@ -226,3 +226,6 @@ __marimo__/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# macOS Finder
+.DS_Store

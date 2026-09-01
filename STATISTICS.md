@@ -4,7 +4,7 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **32ac039 2026-08-31**. These are a snapshot and go out of date with the
+Counted at commit **336c8f3 2026-09-01**. These are a snapshot and go out of date with the
 next commit, which is why the commit is stamped rather than the date alone. The
 stamp is ignored when checking whether the numbers are current — it names the
 commit *before* the one that committed this file, and always will.
@@ -35,7 +35,7 @@ does. Docstring totals below are therefore lower than a naive span count.
 | Test code to production code | 1.9 : 1 | 12,702 lines of test code against 6,543 of production code |
 | Prose share of production source | 35% | 3,627 docstring + 997 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
 | Co-located module docs | 5,730 lines | 24 files beside the 24 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
-| Project documentation | 9,609 lines | 35 files — the repository root plus `docs/`, `src/python_acp/`, module docs included and this one excluded, since its own length would otherwise be part of its own content |
+| Project documentation | 10,179 lines | 36 files — the repository root plus `docs/`, `src/python_acp/`, module docs included and this one excluded, since its own length would otherwise be part of its own content |
 
 **Test functions are not test cases.** The table counts `def test_*`; pytest
 collects more, because `@pytest.mark.parametrize` expands one function into many.
@@ -87,22 +87,23 @@ project — see `DOC_ROOTS` in [scripts/code_stats.py](scripts/code_stats.py).
 
 | File | Lines |
 | --- | ---: |
-| [`README.md`](README.md) | 787 |
+| [`README.md`](README.md) | 790 |
 | [`src/python_acp/turn_mcp_router.md`](src/python_acp/turn_mcp_router.md) | 778 |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 576 |
 | [`src/python_acp/mcp_stdio.md`](src/python_acp/mcp_stdio.md) | 562 |
 | [`src/python_acp/agent.md`](src/python_acp/agent.md) | 536 |
 | [`AGENTS.md`](AGENTS.md) | 472 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 459 |
 | [`docs/module-boundaries.md`](docs/module-boundaries.md) | 440 |
 | [`src/python_acp/commands.md`](src/python_acp/commands.md) | 437 |
 | [`CLAUDE.md`](CLAUDE.md) | 402 |
+| [`docs/localacp-walkthrough.md`](docs/localacp-walkthrough.md) | 333 |
 | [`src/python_acp/transport_ws.md`](src/python_acp/transport_ws.md) | 308 |
 | [`src/python_acp/turns.md`](src/python_acp/turns.md) | 303 |
 | [`src/python_acp/cli.md`](src/python_acp/cli.md) | 291 |
 | [`docs/acp-compliance-matrix.md`](docs/acp-compliance-matrix.md) | 263 |
 | [`docs/full-apc-plan.md`](docs/full-apc-plan.md) | 240 |
 | [`docs/tool-schema-contract.md`](docs/tool-schema-contract.md) | 237 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 225 |
 | [`src/python_acp/sessions.md`](src/python_acp/sessions.md) | 217 |
 | [`src/python_acp/edit_yaml.md`](src/python_acp/edit_yaml.md) | 207 |
 | [`src/python_acp/mcp_registry.md`](src/python_acp/mcp_registry.md) | 193 |
@@ -122,7 +123,7 @@ project — see `DOC_ROOTS` in [scripts/code_stats.py](scripts/code_stats.py).
 | [`src/python_acp/markdown.md`](src/python_acp/markdown.md) | 113 |
 | [`src/python_acp/transport_stdio.md`](src/python_acp/transport_stdio.md) | 105 |
 | [`docs/mcp-gateway-ideals.md`](docs/mcp-gateway-ideals.md) | 85 |
-| **35 files** | **9,609** |
+| **36 files** | **10,179** |
 
 ## Test modules
 

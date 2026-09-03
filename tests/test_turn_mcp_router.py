@@ -15,6 +15,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -3079,6 +3080,236 @@ async def test_the_palette_name_and_invoke_tool_produce_the_same_call() -> None:
     one = sugar.of("tool_call")[0]
     two = verbose.of("tool_call")[0]
     assert (one.title, one.kind, one.raw_input) == (two.title, two.kind, two.raw_input)
+
+
+# The tool zoo's opt-in is the prompt and resource zoo's opt-in, on the server the
+# prompt and resource tests use. Same flag, same reason it is a flag: every test above
+# expects `demo` to publish exactly one prompt, one resource and one template.
+ZOO_DEMO = {"demo": {"MOCK_MCP_SCHEMA_ZOO": "1"}}
+
+
+async def test_the_prompt_and_resource_zoo_is_absent_unless_asked_for() -> None:
+    """The counterpart of the tool-zoo opt-in test, and it protects the tests above."""
+    async with Harness("demo") as harness:
+        await harness.run(typed("/listPrompts"))
+        await harness.run(typed("/listResources"))
+
+    text = said(harness)
+    assert "1 prompt on 1 server." in text
+    assert "1 resource on 1 server." in text
+    assert "zoo" not in text
+
+
+async def test_the_zoo_prompts_and_resources_reach_the_listings() -> None:
+    """One entry per rendering concern, and the templates stay in their own section.
+
+    A resource template is published by `resources/templates/list` and by nothing else
+    (`pyacp-as5`), so the zoo's own template has to arrive the same way `greeting://{name}`
+    does rather than sneaking into the resource list.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/listPrompts"))
+        await harness.run(typed("/listResources"))
+
+    text = said(harness)
+    assert "5 prompts on 1 server." in text
+    assert "7 resources on 1 server." in text
+    for name in (
+        "demo/zoo-prompt-bare",
+        "demo/zoo-prompt-arguments",
+        "demo/zoo-prompt-conversation",
+        "demo/zoo-prompt-contents",
+    ):
+        assert name in text
+    for uri in (
+        "zoo://text",
+        "zoo://data.json",
+        "zoo://blob.bin",
+        "zoo://multi",
+        "zoo://ticks",
+        "zoo://animals",
+    ):
+        assert uri in text
+    # The template is a shape, not a resource, and it is listed as one.
+    assert "demo (7 resources, 3 templates)" in text
+    # `rindex`, because the summary line names the templates before the section does.
+    assert text.index("zoo://ticks") < text.rindex("URI templates") < text.index("zoo://echo/")
+
+
+async def test_a_zoo_prompt_substitutes_its_arguments_and_defaults_the_optional_one() -> None:
+    """The substitution is the server's, which is the whole reason `/promptShow` needs no
+    model: `tone` is optional, and the *server* decides what an omitted one means."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        result = await harness.run(typed("/promptShow demo/zoo-prompt-arguments --subject lemurs"))
+
+    assert result.stop_reason == "end_turn"
+    assert "Write about lemurs in a plain tone." in said(harness)
+
+
+async def test_a_zoo_prompt_missing_its_required_argument_is_refused_before_the_wire() -> None:
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        result = await harness.run(typed("/promptShow demo/zoo-prompt-arguments --tone terse"))
+
+    assert result.stop_reason == "refusal"
+    assert "subject" in harness.refusal()
+
+
+async def test_a_zoo_prompt_expands_to_several_messages_with_their_roles() -> None:
+    """A prompt is a message *list*. A client that shows the first message and stops, or
+    that flattens the roles away, is right about `greeting` and wrong about this one."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/promptShow demo/zoo-prompt-conversation"))
+
+    text = said(harness)
+    assert "3 messages" in text
+    assert text.index("What lives here?") < text.index("Show me the strange ones.")
+    assert "assistant:" in text
+
+
+async def test_a_zoo_prompts_non_text_messages_stay_non_text() -> None:
+    """`to_content_block`, exercised through a prompt rather than a tool result.
+
+    The image survives as an `ImageContentBlock` instead of being flattened to a
+    description — `said()` skips it for exactly that reason, so its absence from the text
+    is half the assertion and its presence on the update stream is the other half.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/promptShow demo/zoo-prompt-contents"))
+
+    kinds = [u.content.type for u in harness.of("agent_message_chunk")]
+    assert "image" in kinds and "audio" in kinds
+    assert "aGk=" not in said(harness)
+
+
+async def test_a_zoo_resource_that_is_a_blob_is_never_printed() -> None:
+    """Base64 in a transcript is unreadable and bounded only by the file's size."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        result = await harness.run(typed("/resourceShow demo zoo://blob.bin"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "application/octet-stream" in text
+    assert "binary, about 28 bytes, not shown" in text
+    assert "aGkg" not in text
+
+
+async def test_a_zoo_resource_can_return_several_contents() -> None:
+    """`resources/read` answers with a *list*; `zoo://multi` is the only entry that
+    proves a client reading `contents[0]` and stopping is wrong."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/resourceShow demo zoo://multi"))
+
+    text = said(harness)
+    assert "3 contents" in text
+    assert "first content" in text and "second content" in text
+    assert "not shown" in text
+
+
+async def test_the_dynamic_zoo_resource_grows_by_one_line_per_read() -> None:
+    """`zoo://ticks` is the one body in the zoo that is not a constant.
+
+    Two things a static resource cannot show: that the second read really went to the
+    server rather than to a cache, and that a resource is a window on state. The stamp is
+    minute-resolution on purpose, so two reads in the same second share it and the
+    sequence number is what separates them — a client de-duplicating by content is caught
+    by that rather than flattered by it.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/resourceShow demo zoo://ticks"))
+        first = said(harness)
+        await harness.run(typed("/resourceShow demo zoo://ticks"))
+        second = said(harness)[len(first) :]
+
+    assert re.search(r"0001  \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z", first)
+    assert "0002  " not in first
+    assert "0001  " in second and "0002  " in second
+
+
+async def test_the_dynamic_zoo_resource_keeps_only_the_last_ten() -> None:
+    """Eleven reads, ten entries: the window rolls, and the sequence number keeps
+    counting past it so the oldest line is visibly gone rather than renumbered."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        for _ in range(11):
+            await harness.run(typed("/resourceShow demo zoo://ticks"))
+        text = said(harness)
+
+    last = text[text.rindex("# read 11 time(s)") :]
+    stamped = re.findall(r"^(\d{4})  \S+$", last, flags=re.MULTILINE)
+    assert stamped == ["%04d" % n for n in range(2, 12)]
+
+
+async def test_the_animal_listing_publishes_the_vocabulary_its_template_takes() -> None:
+    """The pair a real server has: a listing small enough to send whole beside a template
+    for the per-member read that would not be.
+
+    Spelt as a JSON Schema enum fragment because that is the form a client can render a
+    picker from — and `enumNames` has to survive the trip for the same reason it does on
+    `zoo-choices`: it is not a JSON Schema keyword, so a normalising pass is exactly what
+    would drop the labels a dropdown needs.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        result = await harness.run(typed("/resourceShow demo zoo://animals"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "application/json" in text
+    body = json.loads(text[text.index("{") : text.rindex("}") + 1])
+    assert body["type"] == "string"
+    assert body["enum"] == ["axolotl", "capybara", "okapi", "pangolin", "quokka", "red-panda"]
+    assert body["enumNames"][-1] == "Red Panda"
+    # The listing names where to spend one of its ids, so it is usable without the
+    # template listing beside it.
+    assert body["readOne"] == "zoo://animals/{id}"
+
+
+async def test_an_animals_details_come_from_the_expanded_uri() -> None:
+    """`zoo://animals/{id}` expanded client-side (RFC 6570) into a URI the server accepts.
+
+    The id is the only input — there is no `arguments` member on `resources/read`, and the
+    fixture stopped honouring one in `pyacp-ito` — so this is the whole of how a templated
+    resource is parameterised.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        result = await harness.run(typed("/resourceShow demo zoo://animals/okapi"))
+
+    assert result.stop_reason == "end_turn"
+    text = said(harness)
+    assert "zoo://animals/okapi" in text
+    body = json.loads(text[text.index("{") : text.rindex("}") + 1])
+    assert body["id"] == "okapi"
+    assert body["scientificName"] == "Okapia johnstoni"
+    assert body["conservationStatus"] == "Endangered"
+
+
+async def test_an_id_with_a_hyphen_survives_the_expansion() -> None:
+    """`red-panda`, deliberately: a client that assumes an identifier is a bare word, or
+    that splits the URI on anything but the template's own boundary, gets this one wrong."""
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        await harness.run(typed("/resourceShow demo zoo://animals/red-panda"))
+
+    assert '"id": "red-panda"' in said(harness)
+
+
+async def test_an_unknown_animal_is_a_resource_not_found_rather_than_a_generic_failure(
+) -> None:
+    """A mistyped expansion of a *real* template is its own failure, and MCP gives it its
+    own code — `-32002`, with the URI in `data`.
+
+    The `greeting://` branch still answers `-32000`, which is what makes this worth
+    asserting: the two codes reach the client apart rather than flattened into one. It
+    propagates rather than becoming a refusal for the same reason a server-level error on
+    `tools/call` does — the server said the read failed, and that is not this agent's
+    verdict to soften.
+    """
+    async with Harness("demo", server_env=ZOO_DEMO) as harness:
+        with pytest.raises(MCPProtocolError) as excinfo:
+            await harness.run(typed("/resourceShow demo zoo://animals/griffin"))
+        assert excinfo.value.code == -32002
+
+        # The older branch is untouched, and the two stay distinguishable.
+        with pytest.raises(MCPProtocolError) as excinfo:
+            await harness.run(typed("/resourceShow demo greeting-not-a-uri"))
+        assert excinfo.value.code == -32000
 
 
 # ---------------------------------------------------------------------------

@@ -460,6 +460,408 @@ SCHEMA_ZOO = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# The prompt and resource zoo (MOCK_MCP_SCHEMA_ZOO=1)
+# ---------------------------------------------------------------------------
+# The same flag, the same reasoning, the other two primitives. `/listPrompts`,
+# `/promptShow`, `/listResources` and `/resourceShow` are as much client-rendered surface
+# as a tool's form is, and the baseline fixture publishes exactly one prompt, one
+# resource and one template -- enough to prove the plumbing works, not enough to find out
+# what a renderer does with an argument it must ask for, a blob it must not print, a body
+# that opens a fence of its own, or a read whose answer changes.
+#
+# One entry per concern, as with the tools above. Every name and URI carries the `zoo`
+# mark, so a listing shows at a glance what the flag added.
+ZOO_PROMPTS = [
+    {
+        "name": "zoo-prompt-bare",
+        "description": "Takes no arguments; expands to a single user message",
+        # `arguments: []` is a statement -- this prompt asks for nothing -- and it is the
+        # case a client must not render an argument form for.
+        "arguments": [],
+    },
+    {
+        "name": "zoo-prompt-arguments",
+        "description": "One required argument and one optional one",
+        # MCP types prompt arguments as `{[key: string]: string}`: there is no schema
+        # here and no type to infer, which is the whole difference from a tool's
+        # inputSchema. A client renders text boxes and marks one of them required.
+        "arguments": [
+            {
+                "name": "subject",
+                "description": "What to write about",
+                "required": True,
+            },
+            {
+                "name": "tone",
+                "description": "How to write it. Optional; the server defaults it",
+            },
+        ],
+    },
+    {
+        "name": "zoo-prompt-conversation",
+        "description": "Expands to several messages, alternating user and assistant",
+        # A prompt is a message *list*, not a string. A client that shows only the first
+        # message, or that flattens the roles away, looks right until it meets this one.
+        "arguments": [],
+    },
+    {
+        "name": "zoo-prompt-contents",
+        "description": "One message per MCP content type, including a blob nobody prints",
+        # `every-content` does this for a tool result; expanded prompt messages travel the
+        # same `to_content_block` mapping, and nothing exercised them through it.
+        "arguments": [],
+    },
+]
+
+ZOO_RESOURCES = [
+    {
+        "uri": "zoo://text",
+        "name": "zoo-text",
+        "description": "Plain text, and it opens a fenced block of its own",
+        "mimeType": "text/plain",
+    },
+    {
+        "uri": "zoo://data.json",
+        "name": "zoo-json",
+        "description": "A JSON body -- still `text`, with a mimeType that says otherwise",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "zoo://blob.bin",
+        "name": "zoo-blob",
+        "description": "Binary: carries `blob` and never `text`",
+        "mimeType": "application/octet-stream",
+    },
+    {
+        "uri": "zoo://multi",
+        "name": "zoo-multi",
+        "description": "One read, three contents -- `resources/read` returns a list",
+        "mimeType": "text/plain",
+    },
+    {
+        "uri": "zoo://ticks",
+        "name": "zoo-ticks",
+        "description": "Dynamic: one minute-stamped line per read, the last ten kept",
+        "mimeType": "text/plain",
+    },
+    {
+        "uri": "zoo://animals",
+        "name": "zoo-animals",
+        "description": "The known animals, as an enum -- the vocabulary the template takes",
+        "mimeType": "application/json",
+    },
+]
+
+ZOO_TEMPLATES = [
+    {
+        # Published here and by nothing else, the way `greeting://{name}` is: a template
+        # is expanded client-side (RFC 6570) into a URI `resources/read` will accept.
+        "uriTemplate": "zoo://echo/{word}",
+        "name": "zoo-echo-template",
+        "description": "Expand it client-side; reading the result echoes the word",
+        "mimeType": "text/plain",
+    },
+    {
+        # The pair worth having: `zoo://animals` publishes the vocabulary and this reads
+        # one member of it. That is the shape a real templated resource has -- a listing
+        # small enough to send whole, and a detail read that would not be.
+        "uriTemplate": "zoo://animals/{id}",
+        "name": "zoo-animal-template",
+        "description": "Details for one animal; `id` comes from zoo://animals",
+        "mimeType": "application/json",
+    },
+]
+
+# `zoo://ticks` is the one body here that is not a constant. Every read appends a line
+# stamped to the *minute* and keeps the last ten, which makes two things visible that a
+# static resource cannot show: that a second read really went to the server rather than a
+# cache, and that a resource is a window on state rather than a file. Minute resolution
+# on purpose -- reads inside one minute share a stamp, so the sequence number is what
+# separates them, and a client that de-duplicates by content is caught by it.
+ZOO_TICK_KEEP = 10
+_zoo_ticks = []
+_zoo_tick_reads = 0
+
+
+def zoo_tick_text():
+    """Record this read and return the rolling window, newest last."""
+    global _zoo_tick_reads
+    _zoo_tick_reads += 1
+    _zoo_ticks.append("%04d  %s" % (_zoo_tick_reads, time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())))
+    # Keep the last ten. `del list[:-10]` is a no-op until there are more than ten.
+    del _zoo_ticks[:-ZOO_TICK_KEEP]
+    return "\n".join(
+        [
+            "# read %d time(s); the last %d kept, newest last. Minute resolution."
+            % (_zoo_tick_reads, ZOO_TICK_KEEP),
+            *_zoo_ticks,
+        ]
+    )
+
+
+ZOO_TEXT = """A zoo resource, as text/plain.
+
+It deliberately contains a fenced block:
+
+```json
+{"why": "a resource body is arbitrary, and frequently is Markdown itself"}
+```
+
+Rendered as prose this would style itself and close the fence around it early, which is
+what `fenced_lines` sizes its own fence past."""
+
+# "hi there, this is a zoo blob" -- short enough to read in a diff, long enough that the
+# rendered "about N bytes" placeholder is not 2.
+ZOO_BLOB = "aGkgdGhlcmUsIHRoaXMgaXMgYSB6b28gYmxvYg=="
+
+
+# The zoo's own subject matter, and the one pair of resources here that models how a real
+# server publishes a set: a *listing* resource small enough to send whole, beside a
+# *template* for the per-member read that would not be. `zoo://animals` is the vocabulary
+# -- spelt as a JSON Schema enum fragment, because that is the form a client can drop
+# straight into a picker -- and `zoo://animals/{id}` reads one member of it.
+#
+# `enumNames` rides along for the same reason it does on `zoo-choices`: it is not a JSON
+# Schema keyword, and a client that normalises the body loses the labels a dropdown needs.
+ZOO_ANIMALS = {
+    "axolotl": {
+        "name": "Axolotl",
+        "scientificName": "Ambystoma mexicanum",
+        "habitat": "Lake Xochimilco, Mexico",
+        "diet": "carnivore",
+        "conservationStatus": "Critically Endangered",
+        "fact": "Neotenic: it keeps its larval gills for life and never leaves the water.",
+    },
+    "capybara": {
+        "name": "Capybara",
+        "scientificName": "Hydrochoerus hydrochaeris",
+        "habitat": "Wetlands and riverbanks of South America",
+        "diet": "herbivore",
+        "conservationStatus": "Least Concern",
+        "fact": "The largest living rodent, and a competent underwater swimmer.",
+    },
+    "okapi": {
+        "name": "Okapi",
+        "scientificName": "Okapia johnstoni",
+        "habitat": "Ituri Rainforest, Democratic Republic of the Congo",
+        "diet": "herbivore",
+        "conservationStatus": "Endangered",
+        "fact": "The giraffe's only living relative, striped like a zebra it is unrelated to.",
+    },
+    "pangolin": {
+        "name": "Pangolin",
+        "scientificName": "Manis pentadactyla",
+        "habitat": "Forests and grasslands of Asia and Africa",
+        "diet": "insectivore",
+        "conservationStatus": "Critically Endangered",
+        "fact": "The only mammal covered in keratin scales, and the most trafficked one.",
+    },
+    "quokka": {
+        "name": "Quokka",
+        "scientificName": "Setonix brachyurus",
+        "habitat": "Rottnest Island and south-western Australia",
+        "diet": "herbivore",
+        "conservationStatus": "Vulnerable",
+        "fact": "A macropod the size of a house cat; it climbs trees, which macropods rarely do.",
+    },
+    "red-panda": {
+        "name": "Red Panda",
+        "scientificName": "Ailurus fulgens",
+        "habitat": "Temperate forests of the eastern Himalayas",
+        "diet": "herbivore",
+        "conservationStatus": "Endangered",
+        # A hyphen in the id on purpose: a client that builds the detail URI by string
+        # substitution is fine, and one that assumes an identifier is a bare word is not.
+        "fact": "Its own family, Ailuridae -- not a bear, and not closely related to one.",
+    },
+}
+
+
+class ZooResourceNotFound(Exception):
+    """`zoo://animals/<unknown>`: a URI shaped correctly for a resource that is not here.
+
+    MCP gives this its own code -- `-32002`, with the URI in `data` -- rather than folding
+    it into the generic `-32000` the rest of this fixture uses, and the distinction is the
+    point of the branch: a *mistyped expansion of a real template* is a different failure
+    from an unimplemented method or a broken tool, and a client should be able to tell it
+    apart without reading the message. The older `greeting://` branch keeps answering
+    `-32000`, because a fixture where both codes appear is what proves they stay apart.
+    """
+
+
+def zoo_animals_enum():
+    """The vocabulary, as the JSON Schema fragment a client can render a picker from."""
+    return {
+        "type": "string",
+        "enum": sorted(ZOO_ANIMALS),
+        "enumNames": [ZOO_ANIMALS[key]["name"] for key in sorted(ZOO_ANIMALS)],
+        "description": "The animals this zoo knows about.",
+        # Naming the template in the body is what makes the listing usable on its own: a
+        # client that reads this knows both the ids and where to spend one of them.
+        "readOne": "zoo://animals/{id}",
+    }
+
+
+def zoo_prompt_result(name, arguments):
+    """The expansion of one zoo prompt, or None when `name` is not one of them.
+
+    The substitution happens *here*, on the server, which is the whole reason
+    `/promptShow` needs no model: the arguments arrive as strings and the messages go
+    back as messages.
+    """
+    arguments = arguments if isinstance(arguments, dict) else {}
+    if name == "zoo-prompt-bare":
+        return {
+            "description": "A prompt with nothing to fill in",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {"type": "text", "text": "Describe the zoo in one line."},
+                }
+            ],
+        }
+    if name == "zoo-prompt-arguments":
+        # `subject` is required and the client validates it before we are called; `tone`
+        # is optional, and defaulting it here is the server's job, not the caller's.
+        subject = arguments.get("subject", "<no subject>")
+        tone = arguments.get("tone") or "plain"
+        return {
+            "description": "A prompt with its arguments substituted",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": "Write about %s in a %s tone." % (subject, tone),
+                    },
+                }
+            ],
+        }
+    if name == "zoo-prompt-conversation":
+        return {
+            "description": "A three-message conversation",
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": "What lives here?"}},
+                {
+                    "role": "assistant",
+                    "content": {"type": "text", "text": "One tool per JSON Schema construct."},
+                },
+                {"role": "user", "content": {"type": "text", "text": "Show me the strange ones."}},
+            ],
+        }
+    if name == "zoo-prompt-contents":
+        return {
+            "description": "One message per content type",
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": "some words"}},
+                {
+                    "role": "user",
+                    "content": {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+                },
+                {
+                    "role": "user",
+                    "content": {"type": "audio", "data": "aGk=", "mimeType": "audio/wav"},
+                },
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "resource_link",
+                        "name": "zoo-text",
+                        "uri": "zoo://text",
+                    },
+                },
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "resource",
+                        "resource": {
+                            "uri": "zoo://text",
+                            "mimeType": "text/plain",
+                            "text": "embedded, not linked",
+                        },
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "content": {
+                        "type": "resource",
+                        "resource": {
+                            "uri": "zoo://blob.bin",
+                            "mimeType": "application/octet-stream",
+                            "blob": ZOO_BLOB,
+                        },
+                    },
+                },
+            ],
+        }
+    return None
+
+
+def zoo_resource_contents(uri):
+    """The contents of one zoo resource, or None when `uri` is not one of them.
+
+    A `resources/read` result is a *list*, and every branch here returns one: a client
+    that reads `contents[0]` and stops is wrong about `zoo://multi` and only that one.
+    """
+    if uri == "zoo://text":
+        return [{"uri": uri, "mimeType": "text/plain", "text": ZOO_TEXT}]
+    if uri == "zoo://data.json":
+        return [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                # `text`, not `blob`. JSON is text however the mimeType reads, and a
+                # client that switches on the mimeType rather than on which field is
+                # present gets this one wrong.
+                "text": json.dumps(
+                    {"zoo": True, "tools": len(SCHEMA_ZOO), "note": "text, not blob"},
+                    indent=2,
+                    sort_keys=True,
+                ),
+            }
+        ]
+    if uri == "zoo://blob.bin":
+        return [{"uri": uri, "mimeType": "application/octet-stream", "blob": ZOO_BLOB}]
+    if uri == "zoo://multi":
+        return [
+            {"uri": "zoo://multi#1", "mimeType": "text/plain", "text": "first content"},
+            {"uri": "zoo://multi#2", "mimeType": "text/plain", "text": "second content"},
+            {"uri": "zoo://multi#3", "mimeType": "application/octet-stream", "blob": ZOO_BLOB},
+        ]
+    if uri == "zoo://ticks":
+        return [{"uri": uri, "mimeType": "text/plain", "text": zoo_tick_text()}]
+    if uri == "zoo://animals":
+        return [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(zoo_animals_enum(), indent=2, sort_keys=True),
+            }
+        ]
+    if uri.startswith("zoo://animals/"):
+        # The expansion of `zoo://animals/{id}`. The client did the expanding -- all this
+        # sees is a concrete URI, and an id that is not in the vocabulary is a miss rather
+        # than an invitation to guess at one.
+        animal_id = uri[len("zoo://animals/") :]
+        if animal_id not in ZOO_ANIMALS:
+            raise ZooResourceNotFound(uri)
+        return [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(
+                    dict(ZOO_ANIMALS[animal_id], id=animal_id), indent=2, sort_keys=True
+                ),
+            }
+        ]
+    if uri.startswith("zoo://echo/"):
+        # The expansion of `zoo://echo/{word}`. The client did the expanding; all this
+        # sees, and all it may see, is a concrete URI.
+        word = uri[len("zoo://echo/") :] or "<nothing>"
+        return [{"uri": uri, "mimeType": "text/plain", "text": "You said: %s" % word}]
+    return None
+
 def tool_for_page(index):
     if index == 0:
         echo = {
@@ -514,11 +916,14 @@ def tool_for_page(index):
 
 def prompt_for_page(index):
     if index == 0:
-        return {
+        greeting = {
             "name": "greeting",
             "description": "Build a greeting message",
             "arguments": [{"name": "name", "required": True}],
         }
+        # Page 0 only, like the tool zoo: pagination is its own concern, and hanging the
+        # zoo off every page would make a paginated listing test about the zoo instead.
+        return [greeting, *ZOO_PROMPTS] if _schema_zoo else greeting
     return {
         "name": "greeting-%d" % index,
         "description": "Build a greeting message (page %d)" % index,
@@ -528,7 +933,7 @@ def prompt_for_page(index):
 
 def resource_for_page(index):
     if index == 0:
-        return {
+        greeting = {
             # Concrete, deliberately. `greeting://{name}` lived here once, which is the
             # very mistake `pyacp-as5` is about: a template is published by
             # `resources/templates/list` and by nothing else, and a fixture that mixed
@@ -538,6 +943,7 @@ def resource_for_page(index):
             "description": "A greeting resource",
             "mimeType": "text/plain",
         }
+        return [greeting, *ZOO_RESOURCES] if _schema_zoo else greeting
     return {
         "uri": "greeting://page-%d" % index,
         "name": "greeting-resource-%d" % index,
@@ -548,12 +954,13 @@ def resource_for_page(index):
 
 def template_for_page(index):
     if index == 0:
-        return {
+        greeting = {
             "uriTemplate": "greeting://{name}",
             "name": "greeting-template",
             "description": "A greeting template",
             "mimeType": "text/plain",
         }
+        return [greeting, *ZOO_TEMPLATES] if _schema_zoo else greeting
     return {
         "uriTemplate": "greeting://page-%d/{name}" % index,
         "name": "greeting-template-%d" % index,
@@ -885,7 +1292,13 @@ while True:
         )
     elif method == "prompts/get":
         params = req.get("params", {})
-        if params.get("name") == "greeting":
+        # Only reachable with MOCK_MCP_SCHEMA_ZOO=1, because nothing else lists them --
+        # but answered whenever asked, on the same principle as the capability block: a
+        # client that asks for something unlisted must be caught by its own check.
+        zoo_prompt = zoo_prompt_result(params.get("name"), params.get("arguments", {}))
+        if zoo_prompt is not None:
+            write({"jsonrpc": "2.0", "id": req_id, "result": zoo_prompt})
+        elif params.get("name") == "greeting":
             name = params.get("arguments", {}).get("name", "friend")
             write(
                 {
@@ -933,7 +1346,27 @@ while True:
         # reason a client that sent one ever appeared to work (`pyacp-ito`). A
         # templated URI is expanded client-side before it gets this far.
         resource_uri = params.get("uri")
-        if isinstance(resource_uri, str) and resource_uri.startswith("greeting://"):
+        try:
+            zoo_contents = (
+                zoo_resource_contents(resource_uri) if isinstance(resource_uri, str) else None
+            )
+        except ZooResourceNotFound:
+            # The one place this fixture answers `-32002`. See ZooResourceNotFound.
+            write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32002,
+                        "message": "Resource not found",
+                        "data": {"uri": resource_uri},
+                    },
+                }
+            )
+            continue
+        if zoo_contents is not None:
+            write({"jsonrpc": "2.0", "id": req_id, "result": {"contents": zoo_contents}})
+        elif isinstance(resource_uri, str) and resource_uri.startswith("greeting://"):
             name = resource_uri.split("//", 1)[1] or "friend"
             content = f"Hello, {name}!"
             write(

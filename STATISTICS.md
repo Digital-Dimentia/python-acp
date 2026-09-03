@@ -4,7 +4,7 @@
 [scripts/code_stats.py](scripts/code_stats.py); an edit here is lost the next time
 anyone runs it.
 
-Counted at commit **336c8f3 2026-09-01**. These are a snapshot and go out of date with the
+Counted at commit **ccb7974 2026-09-01**. These are a snapshot and go out of date with the
 next commit, which is why the commit is stamped rather than the date alone. The
 stamp is ignored when checking whether the numbers are current — it names the
 commit *before* the one that committed this file, and always will.
@@ -24,18 +24,18 @@ does. Docstring totals below are therefore lower than a naive span count.
 | Group | Files | Lines | Code | Docstring | Comment | Blank | Classes | Functions | async | Test fns |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `src/python_acp` | 25 | 13,203 | 6,543 | 3,627 | 997 | 2,036 | 82 | 459 | 122 | 0 |
-| `tests` | 41 | 21,231 | 12,702 | 2,653 | 1,037 | 4,839 | 55 | 1,383 | 700 | 1,065 |
+| `tests` | 41 | 21,895 | 13,152 | 2,721 | 1,108 | 4,914 | 56 | 1,401 | 714 | 1,079 |
 | `scripts` | 3 | 989 | 639 | 147 | 53 | 150 | 4 | 31 | 0 | 0 |
-| **Total** | **69** | **35,423** | **19,884** | **6,427** | **2,087** | **7,025** | **141** | **1,873** | **822** | **1,065** |
+| **Total** | **69** | **36,087** | **20,334** | **6,495** | **2,158** | **7,100** | **142** | **1,891** | **836** | **1,079** |
 
 ## Ratios worth knowing
 
 | Measure | Value | What it means |
 | --- | ---: | --- |
-| Test code to production code | 1.9 : 1 | 12,702 lines of test code against 6,543 of production code |
+| Test code to production code | 2.0 : 1 | 13,152 lines of test code against 6,543 of production code |
 | Prose share of production source | 35% | 3,627 docstring + 997 comment lines. The repo documents decisions, not descriptions, and it shows up as mass |
 | Co-located module docs | 5,730 lines | 24 files beside the 24 modules that need one — `__init__.py` is exempt. The rule `check_docs.py` enforces |
-| Project documentation | 10,179 lines | 36 files — the repository root plus `docs/`, `src/python_acp/`, module docs included and this one excluded, since its own length would otherwise be part of its own content |
+| Project documentation | 10,201 lines | 36 files — the repository root plus `docs/`, `src/python_acp/`, module docs included and this one excluded, since its own length would otherwise be part of its own content |
 
 **Test functions are not test cases.** The table counts `def test_*`; pytest
 collects more, because `@pytest.mark.parametrize` expands one function into many.
@@ -102,8 +102,8 @@ project — see `DOC_ROOTS` in [scripts/code_stats.py](scripts/code_stats.py).
 | [`src/python_acp/turns.md`](src/python_acp/turns.md) | 303 |
 | [`src/python_acp/cli.md`](src/python_acp/cli.md) | 291 |
 | [`docs/acp-compliance-matrix.md`](docs/acp-compliance-matrix.md) | 263 |
+| [`docs/tool-schema-contract.md`](docs/tool-schema-contract.md) | 259 |
 | [`docs/full-apc-plan.md`](docs/full-apc-plan.md) | 240 |
-| [`docs/tool-schema-contract.md`](docs/tool-schema-contract.md) | 237 |
 | [`src/python_acp/sessions.md`](src/python_acp/sessions.md) | 217 |
 | [`src/python_acp/edit_yaml.md`](src/python_acp/edit_yaml.md) | 207 |
 | [`src/python_acp/mcp_registry.md`](src/python_acp/mcp_registry.md) | 193 |
@@ -123,13 +123,13 @@ project — see `DOC_ROOTS` in [scripts/code_stats.py](scripts/code_stats.py).
 | [`src/python_acp/markdown.md`](src/python_acp/markdown.md) | 113 |
 | [`src/python_acp/transport_stdio.md`](src/python_acp/transport_stdio.md) | 105 |
 | [`docs/mcp-gateway-ideals.md`](docs/mcp-gateway-ideals.md) | 85 |
-| **36 files** | **10,179** |
+| **36 files** | **10,201** |
 
 ## Test modules
 
 | Module | Lines | Test functions |
 | --- | ---: | ---: |
-| [`test_turn_mcp_router.py`](tests/test_turn_mcp_router.py) | 3,431 | 192 |
+| [`test_turn_mcp_router.py`](tests/test_turn_mcp_router.py) | 3,662 | 206 |
 | [`test_agent.py`](tests/test_agent.py) | 2,735 | 128 |
 | [`test_commands.py`](tests/test_commands.py) | 900 | 73 |
 | [`test_mcp_stdio.py`](tests/test_mcp_stdio.py) | 1,033 | 60 |

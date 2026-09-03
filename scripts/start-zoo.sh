@@ -11,7 +11,8 @@
 # every client has to remember to decorate.
 #
 # See docs/tool-schema-contract.md for what is in `_meta` and why, and
-# tests/fixtures/mock_mcp_server.py for the thirteen tools this turns on.
+# tests/fixtures/mock_mcp_server.py for what this turns on: thirteen tools, four prompts,
+# and seven resources plus two URI templates.
 
 set -euo pipefail
 
@@ -91,6 +92,24 @@ Thirteen zoo tools are announced as \`zoo/zoo-*\`, each carrying its inputSchema
 AvailableCommand._meta["python-acp/tool"]. Try:
 
   /zoo/zoo-choices --colour red --priority P1 --retries 3
+
+The same flag adds four prompts and seven resources, two of them templated:
+
+  /listPrompts
+  /promptShow zoo/zoo-prompt-arguments --subject lemurs
+  /listResources
+  /resourceShow zoo zoo://multi
+
+\`zoo://animals\` is the known animals as an enum; \`zoo://animals/{id}\` reads one of them
+(expand the template yourself -- an unknown id answers -32002):
+
+  /resourceShow zoo zoo://animals
+  /resourceShow zoo zoo://animals/red-panda
+
+\`zoo://ticks\` is the dynamic one -- each read appends a minute-stamped line and keeps the
+last ten, so reading it twice proves the second read reached the server:
+
+  /resourceShow zoo zoo://ticks
 BANNER
 
 # Everything else — venv activation, the empty-argument rule, --log, keeping stdout

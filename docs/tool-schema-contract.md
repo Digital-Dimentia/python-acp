@@ -199,6 +199,28 @@ decline, and both edges above (`properties: {}` against no `inputSchema`). Every
 echoes its arguments back as JSON, so the *types* that came out the far end are visible
 rather than assumed: `--count 3` arriving as `3` rather than `"3"` is a thing you can see.
 
+The same flag adds the other two primitives, for the same reason and on the same
+one-entry-per-concern rule — `/listPrompts`, `/promptShow`, `/listResources` and
+`/resourceShow` are client-rendered surface too, and the baseline fixture publishes one
+prompt, one resource and one template, which is enough to prove the plumbing and not
+enough to break a renderer. Four prompts: no arguments, a required argument beside an
+optional one the *server* defaults, a multi-message conversation with roles, and one
+message per MCP content type. Seven resources and two templates: text that opens a
+fenced block of its own, JSON that is still `text`, a `blob` that must never be printed,
+one URI answering with three contents, a `zoo://echo/{word}` template, and two on the
+zoo's own subject — **`zoo://animals`**, the known animals as a JSON Schema *enum*
+fragment (`enumNames` and all, so a client can render a picker straight from it), beside
+**`zoo://animals/{id}`**, the template that reads one of them. That pair is the shape a
+real server has: a listing small enough to send whole, and a per-member read that would
+not be. An id that is not in the vocabulary answers **`-32002` with the URI in `data`** —
+a mistyped expansion of a real template is its own failure, and the `greeting://` branch
+still answers `-32000`, so the fixture proves the two codes stay apart.
+
+Then **`zoo://ticks`**, the one body here that is not a constant — every read appends a line stamped to the *minute* and keeps
+the last ten. Read it twice and the second answer differs, which is how you tell a real
+round trip from a cached one; reads inside one minute share a stamp, so the sequence
+number is what separates them and a client de-duplicating by content is caught by it.
+
 [`scripts/start-zoo.sh`](../scripts/start-zoo.sh) is the whole setup: it activates the
 venv, exports `MOCK_MCP_SCHEMA_ZOO=1`, and starts the agent on stdio. Because a session's
 MCP servers are spawned as children of that process, they inherit the variable — so the
